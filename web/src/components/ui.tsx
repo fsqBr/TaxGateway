@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { AlertTriangle, CheckCircle2, Copy, Inbox, Info, KeyRound, XCircle, type LucideIcon } from 'lucide-react';
 import { describeError } from '../lib/api';
+import { ConfirmButton } from './ConfirmDialog';
 
 export function useLoad<T>(load: () => Promise<T>, deps: unknown[] = []) {
   const [data, setData] = useState<T | undefined>();
@@ -195,18 +196,10 @@ export function Table({ head, children, empty, emptyText = 'Nada por aqui ainda.
   );
 }
 
-export function Confirm({ label, onConfirm, tone = 'danger', disabled }: { label: string; onConfirm: () => void; tone?: 'danger' | 'secondary'; disabled?: boolean }) {
+/** Ação destrutiva com confirmação (diálogo próprio). Prefira ConfirmButton com título e impacto específicos. */
+export function Confirm({ label, onConfirm, tone = 'danger', disabled, impact }: { label: string; onConfirm: () => void; tone?: 'danger' | 'secondary'; disabled?: boolean; impact?: string }) {
   return (
-    <button
-      type="button"
-      className={tone}
-      disabled={disabled}
-      onClick={() => {
-        if (window.confirm(`${label}?`)) onConfirm();
-      }}
-    >
-      {label}
-    </button>
+    <ConfirmButton label={label} title={`${label}?`} impact={impact ?? 'Esta ação tem efeito imediato.'} tone={tone} disabled={disabled} onConfirm={onConfirm} />
   );
 }
 

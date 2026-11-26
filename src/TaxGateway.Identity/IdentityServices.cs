@@ -38,8 +38,24 @@ public static class ClientSecretHasher
         return (Compute(secret, salt), salt);
     }
 
-    public static bool Verify(string secret, byte[] hash, byte[] salt) =>
-        CryptographicOperations.FixedTimeEquals(Compute(secret, salt), hash);
+    /// <summary>
+    /// D-P16: no máximo N verificações Argon2id (19 MiB cada) ao mesmo tempo por processo — 50 tentativas simultâneas
+    /// com client_id válido consumiriam ~1 GB e todos os núcleos do pod do caminho crítico.
+    /// </summary>
+    private static readonly SemaphoreSlim Gate = new(Math.Max(2, Environment.ProcessorCount));
+
+    public static bool Verify(string secret, byte[] hash, byte[] salt)
+    {
+        Gate.Wait();
+        try
+        {
+            return CryptographicOperations.FixedTimeEquals(Compute(secret, salt), hash);
+        }
+        finally
+        {
+            Gate.Release();
+        }
+    }
 
     private static byte[] Compute(string secret, byte[] salt)
     {
@@ -73,12 +89,21 @@ public sealed class OAuthClientStore(NpgsqlDataSource appDb)
 }
 
 /// <summary>
-/// Revogação (SDD §3.1; D-803): por jti, por cliente e por tenant suspenso. Estado no Valkey; cada instância mantém
-/// conjuntos locais atualizados por pub/sub e por releitura a cada 2 s. A checagem por requisição é só em memória
-/// (sem ida ao Valkey), e a suspensão vale em todas as instâncias em menos de 5 s (meta do §12, Fase 8).
+/// Revogação (SDD §3.1; D-803): por jti, por cliente e por tenant suspenso. Cada instância mantém conjuntos locais
+/// atualizados por pub/sub e por releitura a cada 2 s; a checagem por requisição é só em memória, e a suspensão vale
+/// em todas as instâncias em menos de 5 s (meta do §12, Fase 8).
+/// D-P10: o BANCO é a fonte da verdade (tenants.status, oauth_applications.revoked_at, revoked_tokens), relido a cada
+/// <see cref="DbRefresh"/>; o Valkey só acelera. O estado efetivo é banco ∪ Valkey — escrever no Valkey pode, no
+/// máximo, suspender (negação de serviço), nunca liberar um tenant suspenso ou um token revogado.
 /// </summary>
-public sealed partial class RevocationService(IConnectionMultiplexer valkey, ILogger<RevocationService> log) : BackgroundService
+public sealed partial class RevocationService(IConnectionMultiplexer valkey, NpgsqlDataSource appDb, ILogger<RevocationService> log) : BackgroundService
 {
+    private static readonly TimeSpan DbRefresh = TimeSpan.FromSeconds(10);
+    private volatile HashSet<string> _dbTenants = [];
+    private volatile HashSet<string> _dbClients = [];
+    private volatile Dictionary<string, DateTimeOffset> _dbJtis = [];
+    private DateTimeOffset _lastDbLoad = DateTimeOffset.MinValue;
+
     public const string Channel = "auth:revocations";
     private const string Tenants = "revoked:tenants";
     private const string Clients = "revoked:clients";
@@ -89,12 +114,35 @@ public sealed partial class RevocationService(IConnectionMultiplexer valkey, ILo
     private volatile HashSet<string> _clients = [];
     private readonly ConcurrentDictionary<string, DateTimeOffset> _jtis = new(StringComparer.Ordinal);
 
-    public bool IsTenantSuspended(TenantId tenant) => _tenants.Contains(tenant.ToString());
+    public bool IsTenantSuspended(TenantId tenant) => _tenants.Contains(tenant.ToString()) || _dbTenants.Contains(tenant.ToString());
 
     public bool IsRevoked(string? jti, string? clientId, TenantId tenant) =>
-        _tenants.Contains(tenant.ToString())
-        || (clientId is not null && _clients.Contains(clientId))
-        || (jti is not null && _jtis.TryGetValue(jti, out var exp) && exp > DateTimeOffset.UtcNow);
+        IsTenantSuspended(tenant)
+        || (clientId is not null && (_clients.Contains(clientId) || _dbClients.Contains(clientId)))
+        || (jti is not null && ((_jtis.TryGetValue(jti, out var exp) && exp > DateTimeOffset.UtcNow)
+                                || (_dbJtis.TryGetValue(jti, out var dexp) && dexp > DateTimeOffset.UtcNow)));
+
+    /// <summary>Relê o estado do banco (fonte da verdade). Público para os testes.</summary>
+    public async Task LoadFromDatabaseAsync(CancellationToken ct)
+    {
+        var tenants = new HashSet<string>(StringComparer.Ordinal);
+        var clients = new HashSet<string>(StringComparer.Ordinal);
+        var jtis = new Dictionary<string, DateTimeOffset>(StringComparer.Ordinal);
+        await using var cmd = appDb.CreateCommand("SELECT kind, value, expires_at FROM app.revocation_state()");
+        await using var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await r.ReadAsync(ct).ConfigureAwait(false))
+        {
+            switch (r.GetString(0))
+            {
+                case "tenant": tenants.Add(r.GetString(1)); break;
+                case "client": clients.Add(r.GetString(1)); break;
+                case "jti": jtis[r.GetString(1)] = r.GetFieldValue<DateTimeOffset>(2); break;
+            }
+        }
+
+        (_dbTenants, _dbClients, _dbJtis) = (tenants, clients, jtis);
+        _lastDbLoad = DateTimeOffset.UtcNow;
+    }
 
     public Task SuspendTenantAsync(TenantId tenant) => ChangeAsync(db => db.SetAddAsync(Tenants, tenant.ToString()), $"t+{tenant}");
 
@@ -168,12 +216,27 @@ public sealed partial class RevocationService(IConnectionMultiplexer valkey, ILo
             {
                 LogError(log, ex);   // mantém o último estado conhecido
             }
+
+            if (DateTimeOffset.UtcNow - _lastDbLoad >= DbRefresh)
+            {
+                try
+                {
+                    await LoadFromDatabaseAsync(stoppingToken).ConfigureAwait(false);
+                }
+                catch (NpgsqlException ex)
+                {
+                    LogDbError(log, ex);   // mantém o último estado conhecido do banco
+                }
+            }
         }
         while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false));
     }
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Revogações: Valkey indisponível, mantendo o último estado.")]
     private static partial void LogError(ILogger logger, Exception ex);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Revogações: banco indisponível, mantendo o último estado do banco.")]
+    private static partial void LogDbError(ILogger logger, Exception ex);
 }
 
 public sealed class IdentityOptions
@@ -216,12 +279,25 @@ public static class TaxGatewayIdentityExtensions
         var options = config.GetSection(IdentityOptions.Section).Get<IdentityOptions>() ?? new IdentityOptions();
         services.AddSingleton<OAuthClientStore>();
         services.AddSingleton<RevocationService>();
+
+        // Contas de pessoas com MFA (D-U01) e e-mail transacional (D-U06).
+        services.AddOptions<Accounts.AccountOptions>().Bind(config.GetSection(Accounts.AccountOptions.Section));
+        services.AddOptions<Accounts.EmailOptions>().Bind(config.GetSection(Accounts.EmailOptions.Section));
+        services.AddSingleton<Accounts.IEmailSender, Accounts.SmtpEmailSender>();
+        services.AddSingleton<Accounts.AccountService>();
         services.AddHostedService(sp => sp.GetRequiredService<RevocationService>());
 
         services.AddOpenIddict()
             .AddServer(o =>
             {
                 o.SetTokenEndpointUris("/oauth/token");
+                // D-P14: issuer fixo por configuração (antes derivado do header Host — discovery envenenável e tokens que
+                // falhavam entre hosts). Obrigatório em produção (ProductionGuard).
+                if (Uri.TryCreate(config["Identity:Issuer"], UriKind.Absolute, out var issuer))
+                {
+                    o.SetIssuer(issuer);
+                }
+
                 o.SetJsonWebKeySetEndpointUris("/.well-known/jwks.json");
                 o.SetConfigurationEndpointUris("/.well-known/openid-configuration");
                 o.AllowClientCredentialsFlow();
@@ -265,7 +341,11 @@ public static class TaxGatewayIdentityExtensions
         return services;
     }
 
-    /// <summary>Valida client_id/segredo (Argon2id), tenant ativo e escopos pedidos ⊆ escopos do cliente.</summary>
+    /// <summary>
+    /// Valida client_id/segredo (Argon2id), tenant ativo e escopos pedidos ⊆ escopos do cliente.
+    /// As descrições de erro são só ASCII (RFC 6749 §5.2, D-P05): elas vão também para o header WWW-Authenticate do
+    /// 401, e um acento fazia o Kestrel lançar exceção — /oauth/token respondia 500 a qualquer credencial errada.
+    /// </summary>
     public sealed class ValidateClientHandler(OAuthClientStore store, RevocationService revocations) : IOpenIddictServerHandler<ValidateTokenRequestContext>
     {
         public async ValueTask HandleAsync(ValidateTokenRequestContext context)
@@ -273,14 +353,14 @@ public static class TaxGatewayIdentityExtensions
             ArgumentNullException.ThrowIfNull(context);
             if (!context.Request.IsClientCredentialsGrantType())
             {
-                context.Reject(Errors.UnsupportedGrantType, "Só client_credentials.");
+                context.Reject(Errors.UnsupportedGrantType, "Somente client_credentials.");
                 return;
             }
 
             var client = context.ClientId is null ? null : await store.FindAsync(context.ClientId, CancellationToken.None).ConfigureAwait(false);
             if (client is null || context.Request.ClientSecret is null || !ClientSecretHasher.Verify(context.Request.ClientSecret, client.Hash, client.Salt))
             {
-                context.Reject(Errors.InvalidClient, "Credenciais inválidas.");
+                context.Reject(Errors.InvalidClient, "Credenciais invalidas.");
                 return;
             }
 
@@ -293,7 +373,7 @@ public static class TaxGatewayIdentityExtensions
             var requested = context.Request.GetScopes();
             if (requested.Any(s => !client.Scopes.Contains(s, StringComparer.Ordinal)))
             {
-                context.Reject(Errors.InvalidScope, "Escopo não concedido a este cliente.");
+                context.Reject(Errors.InvalidScope, "Escopo nao concedido a este cliente.");
                 return;
             }
 

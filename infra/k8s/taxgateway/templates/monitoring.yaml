@@ -84,4 +84,19 @@ spec:
           annotations:
             summary: "Nenhuma instância da API sendo coletada pelo Prometheus"
             runbook: docs/runbooks/README.md
+        # D-P23: LCR com mais de 36 h em alguma instância = revogação de certificado sem verificação atualizada.
+        - alert: TaxGatewayLcrDesatualizada
+          expr: max(taxgateway_crl_max_age_seconds) > 129600
+          for: 30m
+          labels: { severity: ticket }
+          annotations:
+            summary: "LCR da ICP-Brasil com mais de 36 h: confira o CrlPublisher dos workers e o acesso aos pontos de distribuição"
+            runbook: docs/runbooks/lcr-e-cache.md
+        # D-P10: entrada do Valkey com selo inválido = possível adulteração do cache (investigar como incidente de segurança).
+        - alert: TaxGatewayCacheAdulterado
+          expr: sum(increase(taxgateway_cache_tampered_total[10m])) > 0
+          labels: { severity: page }
+          annotations:
+            summary: "Entradas do Valkey com selo de integridade inválido"
+            runbook: docs/runbooks/lcr-e-cache.md
 {{- end }}

@@ -8,6 +8,27 @@ namespace TaxGateway.GoldenTests;
 [Collection(GoldenCollection.Name)]
 public sealed class UiSupportTests(GoldenFixture env)
 {
+    /// <summary>D-W11: a versão vem do arquivo VERSION da raiz e aparece em GET /version e no header de toda resposta.</summary>
+    [Fact]
+    public async Task Versao_unica_em_version_e_no_header()
+    {
+        var expected = (await File.ReadAllTextAsync(Path.Combine(Paths.RepoRoot, "VERSION"))).Trim();
+        using var resp = await env.Api.GetAsync(new Uri("/version", UriKind.Relative));
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = JsonNode.Parse(await resp.Content.ReadAsStringAsync())!;
+        Assert.Equal(expected, body["versao"]!.GetValue<string>());
+        Assert.Equal("v1", body["api"]!.GetValue<string>());
+        Assert.False(string.IsNullOrEmpty(body["bundle_fiscal"]?.GetValue<string>()));
+        Assert.Equal(expected, resp.Headers.GetValues("X-TaxGateway-Version").Single());
+
+        // Também em erro (401) e na documentação: o cliente sempre sabe com qual versão falou.
+        using var unauth = await env.Api.GetAsync(new Uri("/v1/me", UriKind.Relative));
+        Assert.Equal(HttpStatusCode.Unauthorized, unauth.StatusCode);
+        Assert.Equal(expected, unauth.Headers.GetValues("X-TaxGateway-Version").Single());
+        var v1 = JsonNode.Parse(await env.Api.GetStringAsync(new Uri("/openapi/v1.json", UriKind.Relative)))!;
+        Assert.Equal(expected, v1["info"]!["version"]!.GetValue<string>());
+    }
+
     [Fact]
     public async Task Documentacao_publica_sem_superficie_admin()
     {

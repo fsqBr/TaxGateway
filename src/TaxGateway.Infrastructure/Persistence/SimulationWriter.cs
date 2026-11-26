@@ -41,11 +41,20 @@ public sealed partial class SimulationWriter(ITenantDb db, ILogger<SimulationWri
     private readonly Channel<SimulationRecord> _channel = Channel.CreateBounded<SimulationRecord>(
         new BoundedChannelOptions(100_000) { SingleReader = true, FullMode = BoundedChannelFullMode.DropWrite });
 
-    /// <summary>Nunca bloqueia a requisição. Fila cheia: descarta, conta e registra (alerta na métrica).</summary>
+    /// <summary>D-P19: teto também em BYTES na fila (128 MB) — 100 mil registros de 500 itens não cabem num pod de 1 GiB.</summary>
+    public const long MaxQueuedBytes = 128L * 1024 * 1024;
+    private long _queuedBytes;
+
+    private static long SizeOf(SimulationRecord r) => (r.RequestJson.Length + r.ResultJson.Length) * 2L + 256;
+
+    /// <summary>Nunca bloqueia a requisição. Fila cheia (contagem ou bytes): descarta, conta e registra (alerta na métrica).</summary>
     public void Enqueue(SimulationRecord record)
     {
-        if (!_channel.Writer.TryWrite(record))
+        ArgumentNullException.ThrowIfNull(record);
+        var size = SizeOf(record);
+        if (Interlocked.Add(ref _queuedBytes, size) > MaxQueuedBytes || !_channel.Writer.TryWrite(record))
         {
+            Interlocked.Add(ref _queuedBytes, -size);
             Dropped.Add(1);
             LogDropped(log, record.Id);
         }
@@ -67,6 +76,7 @@ public sealed partial class SimulationWriter(ITenantDb db, ILogger<SimulationWri
                     {
                         while (buffer.Count < MaxBatch && reader.TryRead(out var item))
                         {
+                            Interlocked.Add(ref _queuedBytes, -SizeOf(item));
                             buffer.Add(item);
                         }
                     }
@@ -87,6 +97,7 @@ public sealed partial class SimulationWriter(ITenantDb db, ILogger<SimulationWri
         _channel.Writer.TryComplete();
         while (reader.TryRead(out var item))
         {
+            Interlocked.Add(ref _queuedBytes, -SizeOf(item));
             buffer.Add(item);
             if (buffer.Count == MaxBatch)
             {

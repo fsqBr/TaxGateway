@@ -28,6 +28,9 @@ public static class RuntimeServiceCollectionExtensions
     /// Serviços de runtime da API (Fase 2): Valkey, autenticação, rate limit, parâmetros, motor regular e
     /// persistência assíncrona. Exige <c>ConnectionStrings:Valkey</c> e as seções Engines/Auth/RateLimiting.
     /// </summary>
+    /// <summary>Chave do Valkey de cache (D-P26).</summary>
+    public const string ValkeyCacheKey = "cache";
+
     public static IServiceCollection AddTaxGatewayRuntime(this IServiceCollection services, IConfiguration config)
     {
         ArgumentNullException.ThrowIfNull(config);
@@ -43,8 +46,27 @@ public static class RuntimeServiceCollectionExtensions
             return ConnectionMultiplexer.Connect(o);
         });
 
-        services.AddMemoryCache();
+        // D-P26 (revisão de arquitetura 21): o cache de simulação (alta cardinalidade, descartável) pode ir para outro
+        // Valkey (ConnectionStrings:ValkeyCache, com maxmemory-policy allkeys-lru), longe do estado de segurança e do
+        // rate limit (que ficam no principal, com noeviction/volatile-lru). Sem a string, usa o principal.
+        var valkeyCache = config.GetConnectionString("ValkeyCache");
+        services.AddKeyedSingleton<IConnectionMultiplexer>(ValkeyCacheKey, (sp, _) =>
+        {
+            if (string.IsNullOrEmpty(valkeyCache))
+            {
+                return sp.GetRequiredService<IConnectionMultiplexer>();
+            }
+
+            var o = ConfigurationOptions.Parse(valkeyCache);
+            o.AbortOnConnectFail = false;
+            return ConnectionMultiplexer.Connect(o);
+        });
+
+        // D-P19: cache em memória com teto (contagem de entradas; cada uso define Size = 1). Sem teto, tráfego de alta
+        // cardinalidade enchia o pod até o OOMKill.
+        services.AddMemoryCache(o => o.SizeLimit = 200_000);
         services.AddSingleton<ApiKeyHasher>();
+        services.AddSingleton<CacheSeal>();
         services.AddSingleton<ApiKeyAuthenticator>();
         services.AddSingleton<TenantRateLimiter>();
         services.AddSingleton<IdempotencyStore>();
@@ -64,8 +86,7 @@ public static class RuntimeServiceCollectionExtensions
     /// <summary>Fonte de dados do <c>tg_admin</c> para a Admin API (opcional: sem connection string, a Admin API fica desligada).</summary>
     public static IServiceCollection AddTaxGatewayAdmin(this IServiceCollection services, string adminConnectionString)
     {
-        services.AddSingleton(_ => new AdminDataSource(NpgsqlDataSource.Create(
-            new NpgsqlConnectionStringBuilder(adminConnectionString) { GssEncryptionMode = GssEncryptionMode.Disable }.ConnectionString)));
+        services.AddSingleton(_ => new AdminDataSource(NpgsqlDataSource.Create(DbPools.Normalize(adminConnectionString, DbPools.Auxiliary))));
         services.AddSingleton<AdminRepository>();
         return services;
     }
@@ -110,23 +131,26 @@ public static class RuntimeServiceCollectionExtensions
                 // D-Q08: timeouts e esperas de rede são tempo real, nunca o relógio de negócio (TimeProvider do DI pode ser
                 // controlado em teste; com ele, a espera entre tentativas nunca terminava e a requisição pendurava).
                 b.TimeProvider = TimeProvider.System;
+                // D-P20 (revisão de arquitetura 11): o teto total é a estratégia MAIS EXTERNA — inclui a espera na fila (antes a
+                // fila de até 256 ficava fora do teto, ~18 s); fila curta (descarte de carga em 503 em vez de enfileirar); e
+                // SEM nova tentativa em timeout: com o motor saturado, o cálculo que estourou continua rodando na JVM e repetir
+                // triplicava a carga justamente no pico. Só falha de conexão e 502/503/504 (reinício do sidecar) repetem.
+                b.AddTimeout(TimeSpan.FromMilliseconds(o.TimeoutMs * 2));   // teto total: fila + tentativas
                 b.AddConcurrencyLimiter(new ConcurrencyLimiterOptions
                 {
                     PermitLimit = o.MaxConcurrency,
-                    QueueLimit = o.MaxQueue,
+                    QueueLimit = Math.Min(o.MaxQueue, o.MaxConcurrency),
                     QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
                 });
-                b.AddTimeout(TimeSpan.FromMilliseconds(o.TimeoutMs * 3));   // teto total, com as tentativas
                 b.AddRetry(new HttpRetryStrategyOptions
                 {
                     MaxRetryAttempts = 2,
                     BackoffType = DelayBackoffType.Exponential,
                     UseJitter = true,
                     Delay = TimeSpan.FromMilliseconds(50),
-                    // Só transitórios: falha de rede, 502/503/504 e timeout da tentativa. O cálculo é idempotente.
                     ShouldHandle = args => ValueTask.FromResult(args.Outcome switch
                     {
-                        { Exception: HttpRequestException or Polly.Timeout.TimeoutRejectedException } => true,
+                        { Exception: HttpRequestException } => true,
                         { Result.StatusCode: System.Net.HttpStatusCode.BadGateway or System.Net.HttpStatusCode.ServiceUnavailable or System.Net.HttpStatusCode.GatewayTimeout } => true,
                         _ => false,
                     }),

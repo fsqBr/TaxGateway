@@ -1,8 +1,6 @@
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 
-using OpenTelemetry.Metrics;
-using OpenTelemetry.Resources;
 
 using Scalar.AspNetCore;
 
@@ -18,6 +16,7 @@ using TaxGateway.Infrastructure.Params;
 using TaxGateway.Infrastructure.Persistence;
 
 var builder = WebApplication.CreateSlimBuilder(args);
+ProductionGuard.EnsureSafe(builder.Configuration, builder.Environment);   // D-P13: não sobe com configuração de dev
 builder.WebHost.ConfigureKestrel(k => k.AddServerHeader = false);
 
 builder.Services.AddProblemDetails();
@@ -44,6 +43,26 @@ builder.Services.AddSingleton<SimulationService>();
 // OAuth 2.0 client credentials (Fase 8; D-801): token, JWKS e validação local.
 builder.Services.AddTaxGatewayIdentity(builder.Configuration);
 builder.Services.AddSingleton<BearerAuthenticator>();
+// Contas de pessoas com MFA (D-U01): sessão em cookie no lugar da API key no navegador.
+builder.Services.AddSingleton<SessionCookies>();
+builder.Services.AddSingleton<TenantProfileCache>();
+// Stripe (D-C02): contratação/troca de plano e webhook. Sem Stripe:SecretKey, o pagamento online fica desligado.
+TaxGateway.Infrastructure.StripeServiceCollectionExtensions.AddTaxGatewayStripe(builder.Services, builder.Configuration);
+builder.Services.AddSingleton<SessionAuthenticator>();
+// Rotas anônimas de conta (entrar, cadastro, senha, MFA): 60 por minuto por IP (escritórios atrás de NAT dividem o IP);
+// o bloqueio por conta (5 erros = 15 min) vem do AccountService.
+builder.Services.AddRateLimiter(o =>
+{
+    o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    o.AddPolicy(AccountEndpoints.RateLimitPolicy, ctx => System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
+        ctx.Connection.RemoteIpAddress?.ToString() ?? "sem-ip",
+        _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions { PermitLimit = builder.Configuration.GetValue("Accounts:RequestsPerMinutePerIp", 60), Window = TimeSpan.FromMinutes(1) }));
+    o.OnRejected = async (ctx, ct) =>
+    {
+        ctx.HttpContext.Response.Headers.RetryAfter = "60";
+        await ApiProblem.Result(429, "ERR_RATE_LIMITED", "Muitas tentativas", "Aguarde um minuto e tente de novo.").ExecuteAsync(ctx.HttpContext);
+    };
+});
 builder.Services.AddSingleton<TitularEndpoints.TitularDeps>();
 builder.Services.AddTaxGatewayAudit(builder.Configuration);
 builder.Services.AddSingleton<AuditService>();
@@ -74,19 +93,14 @@ if (billingConnection is not null)
 // Métricas (Hardening, D-H01): medidores nativos do ASP.NET Core, Kestrel, HttpClient (chamadas ao motor), runtime e
 // Npgsql, expostos em /metrics SÓ na porta de gestão (Metrics:Port, padrão 9464) — fora do Service público.
 var metricsPort = builder.Configuration.GetValue("Metrics:Port", 9464);
-builder.Services.AddOpenTelemetry()
-    .ConfigureResource(r => r.AddService("taxgateway-api"))
-    .WithMetrics(m => m
-        .AddMeter("Microsoft.AspNetCore.Hosting", "Microsoft.AspNetCore.Server.Kestrel", "System.Net.Http", "System.Runtime", "Npgsql")
-        .AddView("http.server.request.duration", new OpenTelemetry.Metrics.ExplicitBucketHistogramConfiguration
-        {
-            // Baldes alinhados aos SLOs do §16.3 (5, 15, 40, 100, 150 ms...).
-            Boundaries = [0.002, 0.005, 0.01, 0.015, 0.025, 0.04, 0.06, 0.1, 0.15, 0.25, 0.5, 1, 2.5, 5, 10],
-        })
-        .AddPrometheusExporter());
+builder.Services.AddTaxGatewayTelemetry(builder.Configuration, builder.Logging, "taxgateway-api", prometheus: true);   // D-P17
+// D-P25: até 30 s para drenar as requisições em voo após o SIGTERM (grace period do pod: 45 s, preStop: 10 s).
+builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(30));
 
 builder.Services.AddHealthChecks()
-    .AddCheck<PartitionHealthCheck>("partitions", tags: ["ready"])
+    // D-P18: o banco NÃO entra no readiness — um failover do Postgres gerenciado (30–120 s) tiraria 100% dos pods do
+    // balanceador de uma vez. Partições/banco ficam em /health/full (alerta), o readiness só com dependências locais.
+    .AddCheck<PartitionHealthCheck>("partitions", tags: ["full"])
     .AddCheck<RuntimeReadinessCheck>("runtime", tags: ["ready"]);
 
 // Atrás do ingress/nginx (D-W06): X-Forwarded-Proto/For só são aceitos de redes confiáveis (Http:TrustedProxyNetworks,
@@ -105,14 +119,52 @@ builder.Services.Configure<Microsoft.AspNetCore.Builder.ForwardedHeadersOptions>
 var app = builder.Build();
 
 app.UseForwardedHeaders();
+app.UseVersionHeader();   // X-TaxGateway-Version em toda resposta (D-W11)
 app.UseExceptionHandler();
 if (metricsPort > 0)
 {
+    // D-P14: o filtro é a PORTA LOCAL da conexão, não o header Host (antes, "Host: x:9464" na porta pública expunha
+    // /metrics com todas as rotas e nomes de pool do banco).
+    app.Use(async (ctx, next) =>
+    {
+        if (ctx.Request.Path.StartsWithSegments("/metrics") && ctx.Connection.LocalPort != metricsPort)
+        {
+            ctx.Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+
+        await next(ctx);
+    });
     app.MapPrometheusScrapingEndpoint().RequireHost($"*:{metricsPort}");
 }
 
+// D-P16: /oauth/token é atendido pelo OpenIddict antes do roteamento; o limite por IP fica num middleware próprio
+// (30 por minuto por IP; client_credentials legítimo pede um token a cada ~15 min).
+var tokenLimiter = System.Threading.RateLimiting.PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
+    System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(ctx.Connection.RemoteIpAddress?.ToString() ?? "sem-ip",
+        _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions { PermitLimit = app.Configuration.GetValue("Identity:TokenRequestsPerMinutePerIp", 30), Window = TimeSpan.FromMinutes(1) }));
+app.Use(async (ctx, next) =>
+{
+    if (ctx.Request.Path.Equals("/oauth/token", StringComparison.OrdinalIgnoreCase))
+    {
+        using var lease = await tokenLimiter.AcquireAsync(ctx, 1, ctx.RequestAborted);
+        if (!lease.IsAcquired)
+        {
+            ctx.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+            ctx.Response.Headers.RetryAfter = "60";
+            ctx.Response.ContentType = "application/json";
+            // Formato OAuth (RFC 6749 §5.2), descrição só em ASCII (D-P05).
+            await ctx.Response.WriteAsync("{\"error\":\"slow_down\",\"error_description\":\"Too many token requests from this IP. Retry in 60 s.\"}", ctx.RequestAborted);
+            return;
+        }
+    }
+
+    await next(ctx);
+});
 app.UseAuthentication();   // atende /oauth/token e /.well-known/* (OpenIddict)
+app.UseRateLimiter();
 app.MapOpenApi();   // /openapi/v1.json (e /openapi/admin.json quando habilitado)
+app.MapVersion();
 app.MapGet("/favicon.svg", () => Results.Text(Brand.Mark, "image/svg+xml")).ExcludeFromDescription();
 app.MapScalarApiReference("/docs", o =>
 {
@@ -136,13 +188,15 @@ app.MapScalarApiReference("/docs", o =>
     }
 });
 
-// Liveness não toca dependências; readiness inclui banco, parâmetros e cadastro do motor (D-112).
+// Liveness não toca dependências; readiness só com parâmetros e cadastro do motor carregados (D-112, D-P18); /health/full inclui o banco.
 app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });
 app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = c => c.Tags.Contains("ready") });
+app.MapHealthChecks("/health/full", new HealthCheckOptions { Predicate = _ => true });
 
 var v1 = app.MapGroup("/v1")
     .AddEndpointFilter<ApiKeyFilter>()
-    .AddEndpointFilter<RateLimitFilter>();
+    .AddEndpointFilter<RateLimitFilter>()
+    .AddEndpointFilter<QuotaFilter>();   // franquia rígida do Sandbox (D-C07)
 v1.MapSimulation();
 v1.MapApiKeys();
 v1.MapAudit();
@@ -152,14 +206,42 @@ v1.MapOem();
 v1.MapTitulares();
 v1.MapDfe();
 v1.MapListings();
+v1.MapDocuments();        // D-J01
+v1.MapClassification();   // D-J02
+v1.MapNotices();          // D-J03/D-J04
+v1.MapBilling();
+
+app.MapAccounts(includeOperators: adminConnection is not null);
+
+// D-J05: rota inexistente da API responde problem+json (antes, 404 com corpo vazio — o cliente não sabia o motivo).
+app.MapFallback("/{**path}", (HttpContext http) =>
+    http.Request.Path.StartsWithSegments("/v1") || http.Request.Path.StartsWithSegments("/admin")
+        ? ApiProblem.Result(404, "ERR_ROTA_INEXISTENTE", "Rota inexistente", $"{http.Request.Method} {http.Request.Path} não existe. Veja a referência em /docs.")
+        : Results.NotFound()).ExcludeFromDescription();
+app.MapPublicPlans();
+app.MapStripeWebhook();
 
 if (adminConnection is not null)
 {
-    var admin = app.MapGroup("/admin/v1").AddEndpointFilter<AdminKeyFilter>().MapAdmin().MapIdentityAdmin().MapAdminListings();
+    var admin = app.MapGroup("/admin/v1").AddEndpointFilter<AdminKeyFilter>().MapAdmin().MapIdentityAdmin().MapAdminListings().MapOperators().MapAdminPlans();
     if (billingConnection is not null)
     {
         admin.MapBillingAdmin();
     }
+}
+
+// Primeiro operador do backoffice (D-U08): "create-operator --email x --nome y --escopos admin:commercial,admin:fiscal".
+// Imprime o link de primeiro acesso (definir senha + MFA); também é enviado por e-mail.
+if (args.Length > 0 && args[0] == "create-operator")
+{
+    string Arg(string name) => args.SkipWhile(a => a != name).Skip(1).FirstOrDefault()
+        ?? throw new ArgumentException($"Informe {name}.");
+    await app.StartAsync();
+    var link = await app.Services.GetRequiredService<TaxGateway.Identity.Accounts.AccountService>().CreateOperatorAsync(
+        Arg("--email"), Arg("--nome"), Arg("--escopos").Split(','), "cli", CancellationToken.None);
+    Console.WriteLine($"Operador criado. Primeiro acesso (24 h): {link}");
+    await app.StopAsync();
+    return 0;
 }
 
 // Modo Job: "reprocess --tenant ID --from AAAA-MM --to AAAA-MM" (SDD §2.3 passo 7; D-408).

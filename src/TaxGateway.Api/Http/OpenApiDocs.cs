@@ -27,9 +27,13 @@ public static partial class OpenApiDocs
     /// <summary>Grupos na ordem em que aparecem na referência.</summary>
     private static readonly (string Name, string Description)[] Tags =
     [
+        ("Plataforma", "Versão da API e do bundle fiscal. Toda resposta traz o header `X-TaxGateway-Version`; as mudanças de cada versão ficam em /ajuda/novidades."),
         ("Simulação", "Cálculo de CBS, IBS e Imposto Seletivo de uma operação, antes da emissão, pelos motores oficiais da Receita Federal."),
         ("Auditoria", "Recalcula um XML de NF-e/NFC-e autorizado e aponta divergências com fundamentação legal, na saída ou na entrada."),
+        ("Documentos", "Histórico do que foi auditado (portal, API, lotes e DF-e): filtros, detalhe por item e exportação CSV."),
         ("Lotes", "Auditoria assíncrona de muitos documentos por arquivo ZIP, com relatório CSV e aviso por webhook."),
+        ("Classificação", "Consulta de CST/cClassTrib candidatos por NCM ou NBS nos dados abertos do motor oficial."),
+        ("Avisos", "Avisos da conta (franquia, webhook pausado, certificado, mudança fiscal) e primeiros passos."),
         ("Webhooks", "Notificações assinadas (HMAC-SHA256) sobre auditorias, lotes, DF-e e vencimento de certificado."),
         ("Credenciais", "API keys, token OAuth 2.0 (client credentials) e dados da credencial em uso."),
         ("Consumo", "Uso da competência e prévia da fatura."),
@@ -47,6 +51,9 @@ public static partial class OpenApiDocs
 
     private static readonly Dictionary<string, Doc> Docs = new(StringComparer.Ordinal)
     {
+        ["GET /version"] = new("Plataforma", "Versão da API, commit, bundle fiscal e snapshot de parâmetros",
+            Description: "Sem autenticação. Use para detectar mudança de versão (compare com o header `X-TaxGateway-Version`).",
+            Response: """{"versao":"0.11.0","commit":"66eb2cf5aed5","api":"v1","bundle_fiscal":"2026.11.2","parametros_snapshot":11,"novidades":"/ajuda/novidades"}"""),
         ["POST /v1/calculo/simular"] = new("Simulação", "Simula IBS/CBS/IS de uma operação",
             """{"cnpj_emitente":"11222333000181","regime_tributario":"REGIME_REGULAR","data_fato_gerador":"2027-06-15T14:00:00-03:00","municipio_ibge":3550308,"uf":"SP","itens":[{"numero":1,"cst_ibs_cbs":"000","c_class_trib":"000001","valor_base_calculo":1000,"ncm":"84713012","quantidade":1,"unidade":"UN"}]}""",
             "Aceita `Idempotency-Key`. A resposta é determinística para a mesma entrada e o mesmo snapshot de parâmetros (`param_snapshot_id`). O exemplo de resposta é real, com o catálogo de 2027 (CBS provisória de 11,2%).",
@@ -64,13 +71,41 @@ public static partial class OpenApiDocs
             Errors: [403, 413, 422]),
         ["POST /v1/auditoria/lotes/upload-url"] = new("Lotes", "Gera URL pré-assinada para enviar um lote grande",
             Description: "Envie o ZIP com `PUT` na `upload_url` (válida por 15 min) e depois chame `POST /v1/auditoria/lotes` com `{\"storage_object_key\"}`.",
-            Response: """{"upload_url":"https://storage.exemplo/taxgateway-xml/t/.../uploads/....zip?X-Amz-Signature=...","storage_object_key":"t/01938a6e-.../uploads/....zip","expira_em_segundos":900,"metodo":"PUT","content_type":"application/zip"}"""),
+            Response: """{"upload_url":"https://storage.exemplo/taxgateway-xml/uploads/01938a6e-.../....zip?X-Amz-Signature=...","storage_object_key":"uploads/01938a6e-.../....zip","expira_em_segundos":900,"metodo":"PUT","content_type":"application/zip"}"""),
         ["GET /v1/auditoria/lotes"] = new("Lotes", "Lista os lotes (50 mais recentes)",
             Response: $$"""{"lotes":[{"batch_id":"{{Id}}","status":"COMPLETED","direction":"OUTBOUND","total":3000,"processados":3000,"falhas":2,"conformes":2950,"criado_em":"{{Ts}}","concluido_em":"2026-11-25T14:31:10+00:00"}]}"""),
         ["GET /v1/auditoria/lotes/{id}"] = new("Lotes", "Situação de um lote",
             Response: $$"""{"batch_id":"{{Id}}","status":"RUNNING","direction":"OUTBOUND","total_documentos":3000,"processados":1500,"falhas":0,"conformes":1490,"chunks":6,"chunks_concluidos":3,"relatorio_url":null,"criado_em":"{{Ts}}","concluido_em":null}"""),
         ["GET /v1/auditoria/lotes/{id}/relatorio"] = new("Lotes", "Baixa o relatório CSV do lote concluído",
             ResponseDescription: "Arquivo `text/csv` com uma linha por documento (chave, status, ocorrências, diferença, erro)."),
+
+        ["GET /v1/auditoria/documentos"] = new("Documentos", "Lista os documentos auditados",
+            Description: "Filtros: `de` e `ate` (AAAA-MM-DD, horário de Brasília; padrão: últimos 90 dias; até 400 dias), `status` (lista separada por vírgula), `direcao` (`saida` ou `entrada`), `cnpj` (emitente ou contraparte), `chave` (44 dígitos), `lote` (batch_id). Paginação por `cursor` (use `proximo_cursor`) e `limite` (1–200, padrão 50). Escopo `auditoria:read` ou `auditoria:write`.",
+            Response: $$$"""{"documentos":[{"id":"{{{Id}}}","chave_acesso":"35270611222333000181550010000000011000000010","direcao":"saida","modelo":"NFE55","status":"DIVERGENTE","cnpj":"11222333000181","cnpj_contraparte":"11444777000161","diferenca":12.5,"credito_potencial":0,"credito_status":null,"ocorrencias":2,"lote_id":null,"competencia":"2026-11","criado_em":"{{{Ts}}}","reprocessamento":false,"xml_armazenado":true}],"proximo_cursor":null,"periodo":{"de":"2026-08-27","ate":"2026-11-25"}}"""),
+        ["GET /v1/auditoria/documentos/{id}"] = new("Documentos", "Detalhe de um documento auditado",
+            Description: "Itens como declarados no XML (valores fiscais, sem dados pessoais) e a resposta completa da auditoria, com cada ocorrência por item e campo (declarado × referência × fundamento).",
+            Response: $$$"""{"documento":{"id":"{{{Id}}}","chave_acesso":"35270611222333000181550010000000011000000010","direcao":"saida","modelo":"NFE55","status":"CONFORME","cnpj":"11222333000181","cnpj_contraparte":"11444777000161","diferenca":0,"credito_potencial":0,"credito_status":null,"ocorrencias":0,"lote_id":null,"competencia":"2026-11","criado_em":"{{{Ts}}}","reprocessamento":false,"xml_armazenado":true},"itens_declarados":[{"numero":1,"ncm":"84713012","cst":"000","c_class_trib":"000001","vbc":1000.0,"pcbs":0.9,"vcbs":9.0}],"data_emissao":"2027-06-15T11:00:00-04:00","municipio_incidencia":1100205,"auditoria":{"audit_id":"aud_01938a6e5b1c7d2a9e4f0a1b2c3d4e5f","status":"CONFORME","ocorrencias":[],"avisos":[]}}"""),
+        ["GET /v1/auditoria/documentos/exportar"] = new("Documentos", "Exporta os documentos em CSV",
+            Description: "Mesmos filtros da listagem. `nivel=documento` (padrão, uma linha por documento) ou `nivel=ocorrencia` (uma linha por achado: regra, item, campo, declarado, referência e fundamento). Separador `;` e vírgula decimal (abre direto no Excel em pt-BR); até 50 mil linhas.",
+            ResponseDescription: "Arquivo `text/csv` (UTF-8 com BOM)."),
+        ["GET /v1/auditoria/resumo"] = new("Documentos", "Totais por situação no período",
+            Description: "Mesmos filtros da listagem. Contagem por `status` (só as situações presentes no período), diferença total e crédito potencial (entradas).",
+            Response: """{"total":1240,"por_status":{"CONFORME":1180},"diferenca_total":3120.55,"credito_potencial_total":890.1,"periodo":{"de":"2026-08-27","ate":"2026-11-25"}}"""),
+        ["GET /v1/cnpjs/{cnpj}/dfe/documentos"] = new("DF-e", "Notas recebidas pela captura DF-e",
+            Description: "Resumos, notas completas e eventos recebidos da SEFAZ para o CNPJ, com a situação (ciência, auditoria). Filtro `status` e `limite` (até 500).",
+            Response: $$"""{"documentos":[{"nsu":1532,"schema":"procNFe_v4.00.xsd","tipo":"COMPLETO","chave_acesso":"35270611444777000161550010000000011000000010","situacao":"AUDITADO","status_auditoria":"CONFORME","detalhe":null,"recebido_em":"{{Ts}}"}]}"""),
+        ["GET /v1/classificacao"] = new("Classificação", "Consulta CST/cClassTrib candidatos por NCM ou NBS",
+            Description: "Informe `ncm` (8 dígitos) **ou** `nbs` (9 dígitos); opcionais `q` (palavras do produto, filtra), `data` (AAAA-MM-DD, padrão hoje) e `modelo` (55 ou 65). Devolve a descrição do código e se há Imposto Seletivo, e as classificações compatíveis ordenadas — **atalho de pesquisa, não parecer**: reduções dos anexos da LC 214/2025 dependem do enquadramento do produto.",
+            Response: """{"consulta":{"tipo":"NCM","codigo":"22021000","data":"2027-01-01","modelo":55},"item":{"descricao":"Bebidas, líquidos alcoólicos e vinagres. — Águas, incluindo as águas minerais...","imposto_seletivo":true,"is_aliquota_ad_valorem":true,"is_aliquota_ad_rem":false},"sugestoes":[{"c_class_trib":"000001","cst":"000","descricao":"Situações tributadas integralmente pelo IBS e CBS.","tratamento":"Tributação integral","tipo_aliquota":"Padrão","reducao_cbs_percentual":0,"reducao_ibs_uf_percentual":0,"reducao_ibs_mun_percentual":0,"credito_adquirente":true,"motivo":"Regra geral: tributação integral, quando nenhuma situação específica se aplica."}],"aviso":"Sugestões por compatibilidade com a nomenclatura e com a descrição do item..."}""",
+            Errors: [503]),
+        ["GET /v1/avisos"] = new("Avisos", "Avisos da conta",
+            Description: "Os 50 mais recentes; `nao_lidos=true` filtra. Tipos: FRANQUIA_80, FRANQUIA_ESGOTADA, WEBHOOK_PAUSADO, CERTIFICADO_VENCENDO, MUDANCA_FISCAL. Os mesmos avisos vão por e-mail aos papéis responsáveis.",
+            Response: $$"""{"avisos":[{"id":"{{Id}}","tipo":"FRANQUIA_80","severidade":"aviso","titulo":"80% da franquia de auditorias usada","mensagem":"O plano ESSENCIAL inclui 2000 auditorias por mês...","link":"/portal/cobranca","criado_em":"{{Ts}}","lido":false}],"nao_lidos":1}"""),
+        ["POST /v1/avisos/{id}/lido"] = new("Avisos", "Marca um aviso como lido", Status: 204),
+        ["POST /v1/avisos/lidos"] = new("Avisos", "Marca todos os avisos como lidos", Status: 204),
+        ["GET /v1/primeiros-passos"] = new("Avisos", "Checklist de primeiros passos da conta",
+            Description: "O que a empresa já fez (simular, auditar, chave de API, webhook, equipe, plano) — usado pela Visão geral do portal.",
+            Response: """{"passos":[{"id":"simular","titulo":"Simule um cálculo","descricao":"Veja CBS, IBS e IS de um item com o motor oficial da RFB.","link":"/portal/simular","feito":true}],"concluidos":1,"total":6}"""),
 
         ["GET /v1/webhooks"] = new("Webhooks", "Lista os webhooks",
             Response: $$"""[{"id":"{{Id}}","url":"https://erp.exemplo.com.br/hooks/taxgateway","events":["document.audited"],"active":true,"created_at":"{{Ts}}"}]"""),
@@ -132,8 +167,11 @@ public static partial class OpenApiDocs
         ["GET /admin/v1/me"] = new("Admin: tenants", "Operador autenticado", Response: """{"operador":"fiscal-a","scopes":["admin:fiscal","admin:commercial"]}"""),
         ["GET /admin/v1/plans"] = new("Admin: tenants", "Planos e limites",
             Response: """{"planos":[{"codigo":"GROWTH","rpm":600,"concorrencia":20,"lote_max_documentos":5000}]}"""),
-        ["GET /admin/v1/tenants"] = new("Admin: tenants", "Lista tenants", Description: "Filtro opcional `busca` (nome ou início do CNPJ). Clientes OAuth só com id, nome e datas.",
-            Response: $$"""{"tenants":[{"tenant_id":"{{Id}}","nome":"Empresa Exemplo Ltda","cnpj_raiz":"11222333000181","plano":"GROWTH","situacao":"ACTIVE","auto_provisionar_cnpj":false,"retencao_xml_dias":null,"criado_em":"{{Ts}}","clientes_oauth":[]}]}"""),
+        ["GET /admin/v1/tenants/{id}"] = new("Admin: tenants", "Detalhe do tenant",
+            Description: "Assinatura, pessoas com acesso (papel e MFA), CNPJs, API keys (sem segredo), consumo dos últimos 3 meses e as 12 últimas faturas.",
+            Response: $$$"""{"tenant":{"tenant_id":"{{{Id}}}","nome":"Empresa Exemplo Ltda","cnpj_raiz":"11222333000181","plano":"PROFISSIONAL","situacao":"ACTIVE","cobranca":{"provedor":"STRIPE","situacao_assinatura":"active"}},"pessoas":[{"nome":"Maria","email":"maria@exemplo.com.br","papel":"owner","mfa":true,"situacao":"ACTIVE","ultimo_acesso":"{{{Ts}}}"}],"cnpjs":[{"cnpj":"11222333000181","ativo":true,"criado_em":"{{{Ts}}}"}],"api_keys":[],"consumo":[{"competencia":"2026-11","documentos":1240,"simulacoes":8800}],"faturas":[]}"""),
+        ["GET /admin/v1/tenants"] = new("Admin: tenants", "Lista tenants", Description: "Filtro opcional `busca` (nome ou início do CNPJ); paginação por `pagina` (a partir de 1) e `limite` (1–200, padrão 50), com `total`. Clientes OAuth só com id, nome e datas.",
+            Response: $$"""{"tenants":[{"tenant_id":"{{Id}}","nome":"Empresa Exemplo Ltda","cnpj_raiz":"11222333000181","plano":"GROWTH","situacao":"ACTIVE","auto_provisionar_cnpj":false,"retencao_xml_dias":null,"criado_em":"{{Ts}}","clientes_oauth":[]}],"total":1,"pagina":1,"limite":50}"""),
         ["POST /admin/v1/tenants"] = new("Admin: tenants", "Cria tenant",
             """{"nome":"Empresa Exemplo Ltda","cnpj_raiz":"11222333000181","plano":"GROWTH","auto_provisionar_cnpj":false,"retencao_xml_dias":90,"cnpjs":[]}""",
             "Devolve a primeira API key (exibida uma única vez). Sem `retencao_xml_dias` o XML não é guardado.",
@@ -185,7 +223,9 @@ public static partial class OpenApiDocs
     {
         services.AddOpenApi("v1", o =>
         {
-            o.ShouldInclude = d => d.RelativePath is { } p && !p.StartsWith("admin", StringComparison.Ordinal) && !p.StartsWith("health", StringComparison.Ordinal);
+            // Rotas de conta de pessoas (/v1/conta, D-U01) servem ao navegador do portal, não à integração: fora da referência.
+            o.ShouldInclude = d => d.RelativePath is { } p && !p.StartsWith("admin", StringComparison.Ordinal) && !p.StartsWith("health", StringComparison.Ordinal)
+                && !p.StartsWith("v1/conta", StringComparison.Ordinal);
             Configure(o, "TaxGateway API", """
                 Cálculo e auditoria de **IBS, CBS e Imposto Seletivo** sobre os motores oficiais da Receita Federal.
 
@@ -199,7 +239,7 @@ public static partial class OpenApiDocs
         {
             services.AddOpenApi("admin", o =>
             {
-                o.ShouldInclude = d => d.RelativePath is { } p && p.StartsWith("admin", StringComparison.Ordinal);
+                o.ShouldInclude = d => d.RelativePath is { } p && p.StartsWith("admin", StringComparison.Ordinal) && !p.StartsWith("admin/v1/conta", StringComparison.Ordinal);
                 Configure(o, "TaxGateway Admin API", "Backoffice: tenants, OAuth, parâmetros fiscais (duas pessoas) e faturamento. **Uso interno.**", publicDoc: false);
             });
         }
@@ -251,7 +291,7 @@ public static partial class OpenApiDocs
         // classe que o gerador cria e deixava grupos vazios na referência).
         o.AddDocumentTransformer((doc, _, _) =>
         {
-            doc.Info = new OpenApiInfo { Title = title, Version = "1.0", Description = description };
+            doc.Info = new OpenApiInfo { Title = title, Version = AppVersion.Version, Description = description };
             doc.Components ??= new OpenApiComponents();
             doc.Components.Schemas ??= new Dictionary<string, IOpenApiSchema>();
             doc.Components.Schemas[Problem] = new OpenApiSchema

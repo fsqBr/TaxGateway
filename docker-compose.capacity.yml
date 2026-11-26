@@ -4,6 +4,8 @@
 # A API usa o motor síncrono (rtc-regular); os workers usam um motor dedicado ao lote (rtc-regular-batch), como os
 # Deployments separados do Helm (§8.4): o lote não disputa o motor do checkout.
 x-app-env: &app-env
+  DOTNET_ENVIRONMENT: Local                          # ambiente local: a trava de produção (D-P13) não se aplica
+  ASPNETCORE_ENVIRONMENT: Local
   ConnectionStrings__Valkey: valkey:6379
   Engines__Bundle: "2026.11.2"
   Engines__Simples__BaseUrl: http://rtc-simples:8082/api/
@@ -17,8 +19,23 @@ x-app-env: &app-env
   Identity__AllowHttp: "true"                               # D-804: só neste ambiente local de carga
   Identity__AllowEphemeralKeys: "true"
   Xml__ExtraTrustAnchorPemFiles__0: /pki/test-root.crt     # PKI de TESTE (corpus golden); nunca em produção
+  # Contas de pessoas (D-U01): http local (cookie sem __Host-/Secure), e-mails no Mailpit (http://127.0.0.1:8025).
+  Accounts__CookieSecure: "false"
+  Accounts__PublicBaseUrl: http://127.0.0.1:8090
+  Accounts__BackofficeBaseUrl: http://127.0.0.1:8091
+  Email__SmtpHost: mailpit
+  Email__SmtpPort: "1025"
+  Email__SmtpTls: "false"
+  Accounts__RequestsPerMinutePerIp: "600"                  # E2E e capturas saem todos do mesmo IP
 
 services:
+  # Caixa de e-mail de desenvolvimento (D-U06): todo e-mail enviado pela API aparece em http://127.0.0.1:8025.
+  mailpit:
+    image: axllent/mailpit:v1.27.11
+    restart: unless-stopped
+    networks: [data]
+    ports: ["127.0.0.1:8025:8025"]
+
   rtc-regular-batch:
     image: taxgateway/rtc-regular:1.7.2
     restart: unless-stopped
@@ -62,6 +79,8 @@ services:
       <<: *app-env
       ConnectionStrings__Worker: Host=postgres;Database=taxgateway;Username=tg_worker;Password=dev-only
       ConnectionStrings__Relay: Host=postgres;Database=taxgateway;Username=tg_relay;Password=dev-only
+      # Faturamento e Stripe (D-C02). Sem Stripe__SecretKey, a cobrança online fica desligada (o portal avisa).
+      ConnectionStrings__Billing: Host=postgres;Database=taxgateway;Username=tg_billing;Password=dev-only
       Engines__Regular__BaseUrl: http://rtc-regular-batch:8080/api/
       Engines__Regular__SyncTimeoutMs: "5000"
       Batches__WorkerSlots: "4"

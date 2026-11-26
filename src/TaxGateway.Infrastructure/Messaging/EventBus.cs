@@ -155,25 +155,49 @@ public sealed partial class WebhookFanOutConsumer(WebhookRepository repo, IOptio
                 await using var ch = await conn.CreateChannelAsync(cancellationToken: stoppingToken).ConfigureAwait(false);
                 await Topology.DeclareAsync(ch, stoppingToken).ConfigureAwait(false);
                 await ch.BasicQosAsync(0, 50, false, stoppingToken).ConfigureAwait(false);
+                // D-P28: desligamento limpo. O trabalho em andamento NÃO usa o stoppingToken (antes, o SIGTERM cancelava o
+                // fan-out no meio); ao parar, cancela o consumo, espera as mensagens em voo por até 20 s e só então fecha.
+                using var hard = new CancellationTokenSource();
+                var inFlight = 0;
                 var consumer = new AsyncEventingBasicConsumer(ch);
                 consumer.ReceivedAsync += async (_, ea) =>
                 {
+                    Interlocked.Increment(ref inFlight);
                     try
                     {
                         var tenant = new TenantId(Guid.Parse(Encoding.UTF8.GetString((byte[])ea.BasicProperties.Headers!["tenant_id"]!)));
                         var topic = Encoding.UTF8.GetString((byte[])ea.BasicProperties.Headers["topic"]!);
                         var id = long.Parse(ea.BasicProperties.MessageId!, System.Globalization.CultureInfo.InvariantCulture);
-                        await repo.FanOutAsync(tenant, id, topic, Encoding.UTF8.GetString(ea.Body.Span), stoppingToken).ConfigureAwait(false);
-                        await ch.BasicAckAsync(ea.DeliveryTag, false, stoppingToken).ConfigureAwait(false);
+                        await repo.FanOutAsync(tenant, id, topic, Encoding.UTF8.GetString(ea.Body.Span), hard.Token).ConfigureAwait(false);
+                        await ch.BasicAckAsync(ea.DeliveryTag, false, CancellationToken.None).ConfigureAwait(false);
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
                         LogFanOutError(log, ex);
-                        await ch.BasicNackAsync(ea.DeliveryTag, false, true, stoppingToken).ConfigureAwait(false);   // x-delivery-limit manda para a DLQ
+                        await ch.BasicNackAsync(ea.DeliveryTag, false, true, CancellationToken.None).ConfigureAwait(false);   // x-delivery-limit manda para a DLQ
+                    }
+                    finally
+                    {
+                        Interlocked.Decrement(ref inFlight);
                     }
                 };
-                await ch.BasicConsumeAsync(Topology.WebhookQueue, false, consumer, stoppingToken).ConfigureAwait(false);
-                await Task.Delay(Timeout.Infinite, stoppingToken).ConfigureAwait(false);
+                var tag = await ch.BasicConsumeAsync(Topology.WebhookQueue, false, consumer, stoppingToken).ConfigureAwait(false);
+                try
+                {
+                    await Task.Delay(Timeout.Infinite, stoppingToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    await ch.BasicCancelAsync(tag, false, CancellationToken.None).ConfigureAwait(false);
+                    var deadline = DateTime.UtcNow.AddSeconds(20);
+                    while (Volatile.Read(ref inFlight) > 0 && DateTime.UtcNow < deadline)
+                    {
+                        await Task.Delay(100, CancellationToken.None).ConfigureAwait(false);
+                    }
+
+                    await hard.CancelAsync().ConfigureAwait(false);   // o que sobrar volta à fila (sem ack); o fan-out é idempotente
+                    throw;
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -213,7 +237,7 @@ public sealed partial class WebhookDeliveryScheduler(NpgsqlDataSource workerDb, 
     public async Task<int> RunOnceAsync(CancellationToken ct)
     {
         var due = new List<(Guid Tenant, Guid Id)>();
-        await using (var cmd = workerDb.CreateCommand("SELECT tenant_id, delivery_id FROM app.claim_due_webhook_deliveries(50, 60)"))
+        await using (var cmd = workerDb.CreateCommand("SELECT tenant_id, delivery_id FROM app.claim_due_webhook_deliveries(50, 60, 8)"))
         await using (var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false))
         {
             while (await r.ReadAsync(ct).ConfigureAwait(false))

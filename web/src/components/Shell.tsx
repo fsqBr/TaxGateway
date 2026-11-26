@@ -1,29 +1,74 @@
-import { useState, type FormEvent, type ReactNode } from 'react';
-import { NavLink, Navigate, useLocation, useNavigate } from 'react-router-dom';
-import { BookOpen, CheckCircle2, LogOut, ShieldCheck, type LucideIcon } from 'lucide-react';
-import { getCredential, request, setCredential, type Realm } from '../lib/api';
+import { useEffect, useState, type ReactNode } from 'react';
+import { NavLink, useLocation } from 'react-router-dom';
+import { BookOpen, CircleUserRound, LifeBuoy, LogOut, Menu, X, type LucideIcon } from 'lucide-react';
+import { useSession } from '../auth/session';
+import { account, type Realm } from '../lib/api';
+import { cnpj } from '../lib/format';
 import { Logo } from './Logo';
-import { Alert, Field, useAction } from './ui';
+import { Badge } from './ui';
+import { UpdateBanner, VersionTag, WhatsNewModal } from './VersionNotice';
+
+export { safeReturnPath } from '../auth/AuthPages';
 
 export interface NavItem {
   to: string;
   label: string;
   icon: LucideIcon;
   section?: string;
+  /** Só aparece para quem tem o escopo (papel da pessoa). */
+  scope?: string;
 }
 
-/** Barra lateral com seções + conteúdo; sair limpa a credencial da aba. */
-export function Shell({ realm, nav, workspace, children }: { realm: Realm; nav: NavItem[]; workspace?: ReactNode; children: ReactNode }) {
-  const navigate = useNavigate();
+/** Empresa ativa e troca entre empresas (escritórios e software houses com vários tenants, D-U05). */
+function Workspace() {
+  const { sessao, reload } = useSession();
+  const empresas = sessao?.empresas ?? [];
+  const ativa = empresas.find((e) => e.tenant_id === sessao?.empresa_ativa);
+  if (!ativa) return null;
+  return (
+    <div className="workspace">
+      {empresas.length > 1 ? (
+        <select aria-label="Empresa" value={ativa.tenant_id} onChange={async (e) => {
+          await account('portal', '/empresa-ativa', { method: 'POST', body: { tenant_id: e.target.value } });
+          await reload();
+          window.location.assign('/portal');   // recarrega tudo no contexto da outra empresa
+        }}>
+          {empresas.map((e) => <option key={e.tenant_id} value={e.tenant_id}>{e.nome}</option>)}
+        </select>
+      ) : <strong title={ativa.nome}>{ativa.nome}</strong>}
+      <span className="muted small mono">{cnpj(ativa.cnpj_raiz)}</span>
+      <span><Badge tone="info">{ativa.plano}</Badge></span>
+    </div>
+  );
+}
+
+/** Barra lateral com seções + conteúdo. Sair encerra a sessão no servidor. */
+export function Shell({ realm, nav, workspace, topbar, children }: { realm: Realm; nav: NavItem[]; workspace?: ReactNode; topbar?: ReactNode; children: ReactNode }) {
+  const { sessao, logout, can } = useSession();
+  // Celular (UX: antes o menu inteiro empurrava o conteúdo para baixo da dobra): menu recolhido atrás de um botão.
+  const [open, setOpen] = useState(false);
+  const location = useLocation();
+  useEffect(() => setOpen(false), [location.pathname]);
   let lastSection: string | undefined;
   return (
-    <div className="shell">
-      <aside className="sidebar">
+    <div className={`shell${open ? ' nav-open' : ''}`}>
+      <a className="skip-link" href="#conteudo">Pular para o conteúdo</a>
+      <header className="mobile-bar">
+        <Logo size={24} suffix={realm === 'portal' ? 'Portal' : 'Backoffice'} />
+        <div className="row">
+          {topbar}
+          <button type="button" className="ghost icon-only" aria-expanded={open} aria-controls="menu-lateral" aria-label={open ? 'Fechar menu' : 'Abrir menu'} onClick={() => setOpen(!open)}>
+            {open ? <X size={20} aria-hidden="true" /> : <Menu size={20} aria-hidden="true" />}
+          </button>
+        </div>
+      </header>
+      <aside className="sidebar" id="menu-lateral">
         <Logo size={28} suffix={realm === 'portal' ? 'Portal' : 'Backoffice'} />
+        {topbar && <div className="sidebar-topbar">{topbar}</div>}
         {realm === 'backoffice' && <div className="internal-banner">Ambiente interno</div>}
-        {workspace && <div className="workspace">{workspace}</div>}
+        {realm === 'portal' ? <Workspace /> : workspace && <div className="workspace">{workspace}</div>}
         <nav className="nav" aria-label={realm === 'portal' ? 'Portal' : 'Backoffice'}>
-          {nav.map((n) => {
+          {nav.filter((n) => !n.scope || can(n.scope)).map((n) => {
             const header = n.section && n.section !== lastSection ? <div className="nav-section" key={`s-${n.section}`}>{n.section}</div> : null;
             lastSection = n.section ?? lastSection;
             const Icon = n.icon;
@@ -37,112 +82,25 @@ export function Shell({ realm, nav, workspace, children }: { realm: Realm; nav: 
           })}
         </nav>
         <div className="sidebar-footer nav">
+          {realm === 'portal' && (
+            <NavLink to="/portal/conta" end>
+              <CircleUserRound size={17} aria-hidden="true" />
+              <span className="truncate" title={sessao?.usuario.email}>{sessao?.usuario.nome.split(' ')[0] ?? 'Minha conta'}</span>
+            </NavLink>
+          )}
+          <a href="/ajuda" target="_blank" rel="noreferrer"><LifeBuoy size={17} aria-hidden="true" />Central de ajuda</a>
           <a href="/docs/" target="_blank" rel="noreferrer"><BookOpen size={17} aria-hidden="true" />Referência da API</a>
-          <button
-            type="button"
-            className="ghost"
-            onClick={() => {
-              setCredential(realm, null);
-              navigate(realm === 'portal' ? '/portal/entrar' : '/backoffice/entrar');
-            }}
-          >
+          <button type="button" className="ghost" onClick={() => void logout()}>
             <LogOut size={17} aria-hidden="true" /> Sair
           </button>
+          <VersionTag />
         </div>
       </aside>
-      <main className="content">{children}</main>
+      <main className="content" id="conteudo" tabIndex={-1}>
+        <UpdateBanner />
+        {children}
+      </main>
+      <WhatsNewModal />
     </div>
   );
-}
-
-/** Rotas internas só com credencial na aba; senão, vai para o login. */
-export function RequireCredential({ realm, children }: { realm: Realm; children: ReactNode }) {
-  const location = useLocation();
-  if (!getCredential(realm)) {
-    return <Navigate to={realm === 'portal' ? '/portal/entrar' : '/backoffice/entrar'} replace state={{ from: location.pathname }} />;
-  }
-  return <>{children}</>;
-}
-
-const LOGIN: Record<Realm, { title: string; headline: string; points: string[]; label: string; hint: string; probe: string; home: string; placeholder: string }> = {
-  portal: {
-    title: 'Portal',
-    headline: 'Tudo da sua integração fiscal em um só lugar.',
-    points: ['Consumo da competência e prévia da fatura', 'Chaves, webhooks e CNPJs atendidos', 'Certificado A1 e captura automática de DF-e', 'Atendimento a titulares (LGPD)'],
-    label: 'API key',
-    hint: 'Use uma API key com os escopos das telas que vai usar. Ela fica só nesta aba e some ao fechá-la.',
-    probe: '/v1/me',
-    home: '/portal',
-    placeholder: 'tg_live_sk_…',
-  },
-  backoffice: {
-    title: 'Backoffice',
-    headline: 'Operação interna do TaxGateway.',
-    points: ['Tenants, planos e clientes OAuth', 'Alíquotas com aprovação por duas pessoas', 'Fechamento e reconciliação do faturamento'],
-    label: 'Chave de operador',
-    hint: 'Chave individual de operador (X-Admin-Key). Acesso registrado.',
-    probe: '/admin/v1/me',
-    home: '/backoffice',
-    placeholder: 'chave de operador',
-  },
-};
-
-export function Login({ realm }: { realm: Realm }) {
-  const cfg = LOGIN[realm];
-  const [value, setValue] = useState('');
-  const { busy, error, run } = useAction();
-  const navigate = useNavigate();
-  const location = useLocation();
-  const from = safeReturnPath((location.state as { from?: string } | null)?.from, cfg.home);
-
-  const submit = async (e: FormEvent) => {
-    e.preventDefault();
-    const ok = await run(() => request(realm, cfg.probe, { credential: value.trim() }));
-    if (ok !== undefined) {
-      setCredential(realm, value.trim());
-      navigate(from, { replace: true });
-    }
-  };
-
-  return (
-    <div className={realm === 'backoffice' ? 'auth internal' : 'auth'}>
-      <aside className="auth-brand">
-        <Logo size={32} suffix={cfg.title} />
-        <div>
-          <h2>{cfg.headline}</h2>
-          <ul>
-            {cfg.points.map((p) => (
-              <li key={p}><CheckCircle2 size={18} aria-hidden="true" />{p}</li>
-            ))}
-          </ul>
-        </div>
-        <p className="small" style={{ color: '#7f8ea1', display: 'flex', gap: 8, alignItems: 'center' }}>
-          <ShieldCheck size={16} aria-hidden="true" /> Credencial enviada só por HTTPS, em header, nunca na URL.
-        </p>
-      </aside>
-      <div className="auth-form">
-        <form onSubmit={submit}>
-          <div>
-            <h1>Entrar</h1>
-            <p className="muted" style={{ marginTop: 6 }}>{realm === 'portal' ? 'Acesse com uma API key do seu tenant.' : 'Acesse com a sua chave de operador.'}</p>
-          </div>
-          <Field label={cfg.label} hint={cfg.hint}>
-            <input type="password" autoComplete="off" value={value} placeholder={cfg.placeholder} onChange={(e) => setValue(e.target.value)} required />
-          </Field>
-          <Alert>{error}</Alert>
-          <button type="submit" className="lg" disabled={busy || !value.trim()}>{busy ? 'Verificando…' : 'Entrar'}</button>
-          {realm === 'portal' && <a href="/" className="small">← Voltar ao site</a>}
-        </form>
-      </div>
-    </div>
-  );
-}
-
-/**
- * Para onde voltar depois do login (D-Q02): só caminhos internos do próprio app. Bloqueia open redirect
- * ("//evil", "/\evil", esquemas) — o react-router 6 tem aviso de segurança justamente para isso.
- */
-export function safeReturnPath(from: string | undefined, fallback: string): string {
-  if (!from || !/^\/(portal|backoffice)(\/[A-Za-z0-9\-_/]*)?$/.test(from)) return fallback;
-  return from;
 }

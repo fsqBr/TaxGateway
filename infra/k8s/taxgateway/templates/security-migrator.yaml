@@ -22,8 +22,10 @@ spec:
         - { protocol: TCP, port: {{ .Values.engines.simples.mgmtPort }} }
   egress: []
 ---
-# Os pods da API também carregam um motor (sidecar): o motor fala só em localhost, e a saída do pod é limitada
-# a DNS e aos serviços do namespace/dados gerenciados (sem acesso ao portal da RFB).
+# Os pods da API (pública e admin) também carregam motores: o motor fala só em localhost, e a saída do pod é limitada
+# a DNS, aos serviços do namespace/dados gerenciados e às saídas externas explícitas de api.externalEgress (Stripe e
+# SMTP). A LCR NÃO sai daqui: vem do bucket, publicada pelos workers (D-P23). Para fechar por nome (api.stripe.com,
+# host SMTP) use um egress gateway ou política por FQDN do CNI (Cilium/Calico) no lugar do bloco por IP.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -31,7 +33,7 @@ metadata:
   labels: {{- include "tg.labels" . | nindent 4 }}
 spec:
   podSelector:
-    matchLabels: { app.kubernetes.io/name: api }
+    matchExpressions: [{ key: app.kubernetes.io/name, operator: In, values: [api, api-admin] }]
   policyTypes: [Egress]
   egress:
     - to: [{ namespaceSelector: {} }]
@@ -39,6 +41,10 @@ spec:
     - to: [{ podSelector: {} }]
     - to: [{ ipBlock: { cidr: 10.0.0.0/8 } }]          # Postgres/Valkey/S3/KMS gerenciados na VPC
       ports: [{ protocol: TCP, port: 5432 }, { protocol: TCP, port: 6379 }, { protocol: TCP, port: 443 }, { protocol: TCP, port: 8200 }]
+    {{- range .Values.api.externalEgress }}
+    - to: [{ ipBlock: { cidr: {{ .cidr }}{{ with .except }}, except: {{ toJson . }}{{ end }} } }]
+      ports: [{{- range $i, $p := .ports }}{{ if $i }}, {{ end }}{ protocol: TCP, port: {{ $p }} }{{- end }}]
+    {{- end }}
 ---
 # Migrations antes de cada deploy (Job pré-instalação/atualização), como tg_owner (D-101, D-104).
 apiVersion: batch/v1
@@ -61,8 +67,8 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: migrator
-          image: "{{ .Values.image.registry }}/migrator:{{ .Values.image.tag }}"
-          envFrom: [{ secretRef: { name: {{ .Values.migratorSecret }} } }]
+          image: {{ include "tg.image" (dict "root" . "name" "migrator") | quote }}
+          envFrom: [{ secretRef: { name: {{ .Values.secrets.migrator }} } }]
           securityContext: {{- include "tg.secure" . | nindent 12 }}
             runAsUser: 1654
           resources:

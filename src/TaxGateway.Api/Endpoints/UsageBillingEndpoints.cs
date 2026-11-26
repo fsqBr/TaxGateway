@@ -107,6 +107,9 @@ public static class UsageBillingEndpoints
         return Results.Ok(usage);
     }
 
-    private static DateOnly Month(string mes) =>
-        DateOnly.ParseExact(mes + "-01", "yyyy-MM-dd", CultureInfo.InvariantCulture);
+    /// <summary>Competência "AAAA-MM". Valor inválido é 400 (antes: exceção de parse → 500, D-P12).</summary>
+    internal static DateOnly Month(string mes) =>
+        mes is { Length: 7 } && DateOnly.TryParseExact(mes + "-01", "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var m) && m.Year >= 2000
+            ? m
+            : throw new ApiProblemException(400, "ERR_VALIDATION", "Competência inválida", "Use o formato AAAA-MM (ex.: 2026-11).");
 }

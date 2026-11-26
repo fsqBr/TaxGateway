@@ -13,6 +13,7 @@ desenvolvimento tem contextos de outros projetos.
 | Webhooks em `DEAD` / fila `webhooks.dispatch.dlq` crescendo / lote parado | [webhooks-e-lotes.md](webhooks-e-lotes.md) | ticket |
 | Mudança de alíquota (Senado, ente) | [mudanca-aliquota.md](mudanca-aliquota.md) | planejado |
 | Incidente de segurança / dados pessoais | [incidente-seguranca.md](incidente-seguranca.md) | página |
+| LCR com mais de 36 h / entrada do Valkey com selo inválido | [lcr-e-cache.md](lcr-e-cache.md) | ticket / página |
 | Suspender tenant (inadimplência, abuso) | [suspensao-tenant.md](suspensao-tenant.md) | planejado |
 
 Metas de recuperação (SDD §12): **RPO ≤ 5 min, RTO ≤ 1 h.** Ensaio local de PITR: `bash infra/backup/pitr-drill.sh`.

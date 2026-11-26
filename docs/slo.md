@@ -21,10 +21,25 @@ Prometheus (`infra/k8s/taxgateway/templates/monitoring.yaml`, D-H02). Valores em
 * Repetir a medição no hardware de produção antes do GA e ajustar `monitoring.slo` se necessário.
 
 ## Como as métricas saem
-A API publica `/metrics` (formato Prometheus) **só na porta de gestão 9464** (D-H01); a porta pública responde 404
-nessa rota. O ServiceMonitor coleta `api` e `api-canary`; a análise do canário (Fase 4) usa as mesmas séries.
+A API publica `/metrics` (formato Prometheus) **só na porta de gestão 9464** (D-H01), conferida pela porta local da
+conexão e não pelo header `Host` (D-P14); a porta pública responde 404 nessa rota. O ServiceMonitor coleta `api`,
+`api-canary` e `api-admin`; a análise do canário (Fase 4) usa as séries da `api-canary`. Com `Telemetry:OtlpEndpoint`
+configurado, API e workers enviam métricas e traces por OTLP (D-P17), e `Logging:Json=true` liga o log em JSON com
+`trace_id`.
+
+### Métricas próprias (medidor "TaxGateway", D-P17)
+
+| Métrica | O que mede | Uso |
+|:--|:--|:--|
+| `taxgateway_simulation_cache_total{camada}` | Simulações atendidas por L1 (memória), L2 (Valkey) ou `miss` (motor) | Custo e capacidade (§16.3.1) |
+| `taxgateway_quota_exhausted_total{metrica}` | Chamadas recusadas por franquia esgotada (402) | Conversão de plano |
+| `taxgateway_batch_chunks_total{resultado}` | Chunks de lote `done`, `retry`, `fenced` e `failed` | Saúde dos lotes |
+| `taxgateway_stripe_events_total` | Eventos da Stripe processados por tipo e resultado | Cobrança |
+| `taxgateway_cache_tampered_total{cache}` | Entradas do Valkey com selo inválido (D-P10) | Alerta `TaxGatewayCacheAdulterado` (página) |
+| `taxgateway_crl_max_age_seconds` | Idade da LCR mais antiga no cache da instância (D-P23) | Alerta `TaxGatewayLcrDesatualizada` (> 36 h) |
+| `taxgateway_crl_published_total` | LCRs baixadas e publicadas no bucket pelos workers | Diagnóstico da LCR |
 
 ## Lacunas conhecidas
-* Workers ainda não exportam métricas (duração de lote, atraso do outbox, entregas `DEAD`): hoje esses SLOs são
-  verificados por testes e pelo gate, não por alerta.
+* Duração de lote, atraso do outbox e entregas `DEAD` ainda não têm alerta próprio: hoje são verificados por testes,
+  pelo gate e pelos avisos ao cliente (webhook pausado, D-J03).
 * Os SLOs ainda não foram observados em produção (não há cluster de staging disponível neste ambiente).

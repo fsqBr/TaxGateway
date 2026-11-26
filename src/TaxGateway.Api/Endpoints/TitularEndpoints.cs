@@ -73,7 +73,7 @@ public static class TitularEndpoints
             {
                 if (deps.Vault is null)
                 {
-                    return ApiProblem.Result(503, "ERR_STORAGE_UNAVAILABLE", "Armazenamento de XML não configurado nesta instância");
+                    return ApiProblem.Result(503, "ERR_STORAGE_INDISPONIVEL", "Armazenamento de XML não configurado nesta instância");
                 }
 
                 await deps.Vault.DeleteAsync(key, ct);
@@ -81,7 +81,7 @@ public static class TitularEndpoints
             }
         }
 
-        var requestedBy = caller.Identity.KeyId != Guid.Empty ? $"api-key:{caller.Identity.KeyId}" : $"oauth:{http.Items[BearerAuthenticator.ClientItem]}";
+        var requestedBy = SessionAuthenticator.ActorOf(http, caller.Identity);
         await deps.Db.InTenantAsync(tenant, async (s, c) =>
         {
             if (expurgar)

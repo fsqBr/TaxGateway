@@ -44,6 +44,8 @@ metadata:
     app.kubernetes.io/name: workers
 spec:
   replicas: {{ .Values.workers.replicas }}
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }   # D-P25: troca um por vez, o novo pronto antes de o antigo sair
   selector:
     matchLabels: { app.kubernetes.io/name: workers }
   template:
@@ -53,17 +55,33 @@ spec:
         taxgateway/engine-client: "true"
     spec:
       automountServiceAccountToken: false
+      # D-P25: 60 s para os laços terminarem o que pegaram (chunks com cerca e entregas com lease voltam à fila se não).
+      terminationGracePeriodSeconds: 60
       containers:
         - name: workers
-          image: "{{ .Values.image.registry }}/workers:{{ .Values.image.tag }}"
-          envFrom: [{ secretRef: { name: {{ .Values.existingSecret }} } }]
+          image: {{ include "tg.image" (dict "root" . "name" "workers") | quote }}
+          envFrom: [{ secretRef: { name: {{ .Values.secrets.workers }} } }]
+          ports: [{ name: health, containerPort: {{ .Values.workers.healthPort }} }]
           env:
+            - { name: Workers__HealthPort, value: {{ .Values.workers.healthPort | quote }} }
             - { name: Engines__Bundle, value: {{ .Values.engines.bundle | quote }} }
             - { name: Engines__Regular__BaseUrl, value: "http://rtc-regular-batch:{{ .Values.engines.regular.port }}/api/" }
             - { name: Engines__Simples__BaseUrl, value: "http://rtc-simples-batch:{{ .Values.engines.simples.port }}/api/" }
           resources: {{- toYaml .Values.workers.resources | nindent 12 }}
+          # D-P25: antes os workers não tinham sonda — um processo travado seguia "Running" para sempre.
+          livenessProbe: { httpGet: { path: /health/live, port: health }, initialDelaySeconds: 20, periodSeconds: 20, failureThreshold: 3 }
+          readinessProbe: { httpGet: { path: /health/ready, port: health }, periodSeconds: 10 }
           securityContext: {{- include "tg.secure" . | nindent 12 }}
             runAsUser: 1654
           volumeMounts: [{ name: tmp, mountPath: /tmp }]
       volumes:
         - { name: tmp, emptyDir: { sizeLimit: 64Mi } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: workers
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: workers }

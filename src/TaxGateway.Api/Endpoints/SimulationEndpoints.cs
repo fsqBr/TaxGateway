@@ -16,7 +16,7 @@ public static class SimulationEndpoints
     public static RouteGroupBuilder MapSimulation(this RouteGroupBuilder v1)
     {
         v1.MapPost("/calculo/simular", SimulateAsync)
-            .WithMetadata(new RequiredScope(Scopes.SimulacaoWrite), new RequestSizeLimitAttribute(MaxBodyBytes))
+            .WithMetadata(new RequiredScope(Scopes.SimulacaoWrite), new QuotaMetric("SIMULATION"), new RequestSizeLimitAttribute(MaxBodyBytes))
             .WithName("SimularCalculo")
             .Produces<SimulacaoResponse>(200)
             .ProducesProblem(400).ProducesProblem(401).ProducesProblem(403).ProducesProblem(409)
@@ -28,6 +28,13 @@ public static class SimulationEndpoints
     /// Idempotency-Key opcional (SDD §6): replay devolve a resposta original sem nova cobrança; mesma chave com
     /// payload diferente = 422; chave em processamento = 409.
     /// </summary>
+    private static string UnknownMember(string message)
+    {
+        var start = message.IndexOf('\'', StringComparison.Ordinal);
+        var end = start < 0 ? -1 : message.IndexOf('\'', start + 1);
+        return end > start ? $"O campo '{message[(start + 1)..end]}'" : "Um campo";
+    }
+
     private static async Task<IResult> SimulateAsync(HttpContext http, SimulationService service, IdempotencyStore idempotency)
     {
         var caller = http.GetCaller();
@@ -42,6 +49,11 @@ public static class SimulationEndpoints
         try
         {
             req = JsonSerializer.Deserialize(body, ContractsJsonContext.Default.SimulacaoRequest);
+        }
+        catch (JsonException ex) when (ex.Message.Contains("could not be mapped", StringComparison.Ordinal))
+        {
+            return ApiProblem.Result(400, "ERR_CAMPO_DESCONHECIDO", "Campo desconhecido no JSON",
+                $"{UnknownMember(ex.Message)} não existe no contrato (confira a grafia em /docs). Caminho: {ex.Path}.");
         }
         catch (JsonException ex)
         {

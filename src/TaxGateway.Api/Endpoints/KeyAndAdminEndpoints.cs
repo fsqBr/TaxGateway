@@ -22,10 +22,32 @@ public static class ApiKeyEndpoints
         return v1;
     }
 
+    private static readonly string[] MachineDefault = [Scopes.SimulacaoWrite, Scopes.AuditoriaWrite];
+
     private static async Task<IResult> CreateAsync(HttpContext http, CriarApiKeyRequest req, ApiKeyHasher hasher, ITenantDb db)
     {
         var caller = http.GetCaller();
-        var scopes = req.Scopes is { Count: > 0 } s ? s.Distinct(StringComparer.Ordinal).ToList() : [.. Scopes.TenantDefault];
+        // Padrão mínimo (D-U09): sem "scopes", só simular e auditar — antes a chave nova recebia TODOS os escopos, inclusive
+        // expurgo LGPD, certificado A1 e criar outras chaves. Escopos sensíveis só pedidos explicitamente.
+        var scopes = req.Scopes is { Count: > 0 } s
+            ? s.Distinct(StringComparer.Ordinal).ToList()
+            : [.. MachineDefault.Intersect(caller.Identity.Scopes, StringComparer.Ordinal)];
+        if (scopes.Count == 0)
+        {
+            return ApiProblem.Result(400, "ERR_VALIDATION", "Informe os escopos da chave", "Esta credencial não pode criar chave com os escopos padrão (simulacao:write, auditoria:write).");
+        }
+
+        var unknown = scopes.Except(Scopes.TenantDefault, StringComparer.Ordinal).ToList();
+        if (unknown.Count > 0)
+        {
+            return ApiProblem.Result(403, "ERR_FORBIDDEN_SCOPE", "Escopo não permitido em API key", $"Escopos inexistentes ou só de pessoas: {string.Join(", ", unknown)}.");
+        }
+
+        if (req.Nome is { Length: > 80 })
+        {
+            return ApiProblem.Result(400, "ERR_VALIDATION", "nome até 80 caracteres");
+        }
+
         // Uma chave não pode ganhar escopo que a chave que a criou não tem.
         var extra = scopes.Except(caller.Identity.Scopes, StringComparer.Ordinal).ToList();
         if (extra.Count > 0)
@@ -36,6 +58,20 @@ public static class ApiKeyEndpoints
         if (req.ExpiraEm is { } exp && exp <= DateTimeOffset.UtcNow)
         {
             return ApiProblem.Result(400, "ERR_VALIDATION", "expira_em deve estar no futuro");
+        }
+
+        // D-P31 (revisão de segurança A5): uma chave que expira não cria chave eterna nem que viva além dela — senão uma
+        // chave temporária vazada virava acesso permanente.
+        var parentExpiry = await db.InTenantAsync(caller.Identity.Tenant, async (scope, ct) =>
+        {
+            await using var cmd = scope.CreateCommand("SELECT expires_at FROM api_keys WHERE id = $1");
+            cmd.Parameters.Add(new() { Value = caller.Identity.KeyId });
+            return await cmd.ExecuteScalarAsync(ct) is DateTime dt ? new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc)) : (DateTimeOffset?)null;
+        }, http.RequestAborted);
+        if (parentExpiry is { } pe && (req.ExpiraEm is null || req.ExpiraEm > pe))
+        {
+            return ApiProblem.Result(400, "ERR_VALIDATION", "expira_em obrigatória e até a validade da chave atual",
+                $"Esta chave expira em {pe:yyyy-MM-dd HH:mm} UTC; a nova precisa expirar até lá.");
         }
 
         var key = hasher.Generate();
@@ -106,6 +142,12 @@ public static class AdminEndpoints
         if (string.IsNullOrWhiteSpace(req.Nome) || !Cnpj.TryNormalize(req.CnpjRaiz, out var root) || string.IsNullOrWhiteSpace(req.Plano))
         {
             return ApiProblem.Result(400, "ERR_VALIDATION", "nome, cnpj_raiz (válido) e plano são obrigatórios");
+        }
+
+        // Retenção do XML (D-P12): 1 dia a 6 anos (guarda fiscal de 5 anos + margem). Antes: negativo → 500, 999999 aceito.
+        if (req.RetencaoXmlDias is < 1 or > 2192 || req.Nome.Length > 200)
+        {
+            return ApiProblem.Result(400, "ERR_VALIDATION", "Dados inválidos", "retencao_xml_dias deve ficar entre 1 e 2192 (ou ausente para não guardar o XML); nome até 200 caracteres.");
         }
 
         var cnpjs = new List<string>();

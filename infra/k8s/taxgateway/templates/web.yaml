@@ -20,11 +20,12 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: nginx
-          image: "{{ $.Values.image.registry }}/{{ $name }}:{{ $.Values.image.tag }}"
+          image: {{ include "tg.image" (dict "root" $ "name" $name) | quote }}
           imagePullPolicy: {{ $.Values.image.pullPolicy }}
           ports: [{ name: http, containerPort: 8080 }]
           env:
-            - { name: API_UPSTREAM, value: {{ $.Values.web.apiUpstream | quote }} }
+            # Público → API pública (todos os pods, D-P02); backoffice → api-admin (D-P29).
+            - { name: API_UPSTREAM, value: {{ $w.apiUpstream | default $.Values.web.apiUpstream | quote }} }
           resources: {{- toYaml $.Values.web.resources | nindent 12 }}
           readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 5 }
           livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 20 }

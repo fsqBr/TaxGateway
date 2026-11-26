@@ -30,6 +30,7 @@ public sealed class DocsContractTests(GoldenFixture env, ITestOutputHelper outpu
         var checks = new List<(string Key, HttpStatusCode Status, JsonNode? Body)>
         {
             ("GET /v1/me", me.Status, me.Body),
+            await Run(null, null, "GET /version"),
             await Run(key, null, "GET /v1/api-keys"),
             await Run(key, null, "POST /v1/api-keys", "/v1/api-keys", new JsonObject { ["nome"] = "doc", ["scopes"] = new JsonArray("usage:read"), ["expira_em"] = "2030-12-31T23:59:59Z" }),
             await Run(key, null, "GET /v1/usage"),
@@ -37,9 +38,14 @@ public sealed class DocsContractTests(GoldenFixture env, ITestOutputHelper outpu
             await Run(key, null, "GET /v1/oem/cnpjs"),
             await Run(key, null, "GET /v1/oem/usage"),
             await Run(key, null, "GET /v1/auditoria/lotes"),
+            await Run(key, null, "GET /v1/classificacao", "/v1/classificacao?ncm=22021000&data=2027-01-01"),
+            await Run(key, null, "GET /v1/avisos"),
+            await Run(key, null, "GET /v1/primeiros-passos"),
             await Run(key, null, "POST /v1/titulares/localizar", "/v1/titulares/localizar", new JsonObject { ["cpf"] = "52998224725" }),
             await Run(key, null, "POST /v1/calculo/simular", "/v1/calculo/simular", JsonNode.Parse(OpenApiDocs.Catalog["POST /v1/calculo/simular"].Body!.Replace("11222333000181", root, StringComparison.Ordinal))!.AsObject()),
             await Run(key, null, "POST /v1/auditoria/xml", "/v1/auditoria/xml?direction=OUTBOUND", null, Xml()),
+            await Run(key, null, "GET /v1/auditoria/documentos"),
+            await Run(key, null, "GET /v1/auditoria/resumo"),
             await Run(null, GoldenFixture.OperatorKey, "GET /admin/v1/me"),
             await Run(null, GoldenFixture.OperatorKey, "GET /admin/v1/plans"),
             await Run(null, GoldenFixture.OperatorKey, "GET /admin/v1/tenants", "/admin/v1/tenants?busca=Contrato%20docs"),

@@ -1,12 +1,20 @@
-# Deploy (SDD §2.3 passos 4 a 7; D-405).
-# main → imagens da aplicação no GHCR → staging automático → produção só com aprovação do GitHub Environment
-# "production" (revisores obrigatórios: engenharia + responsável fiscal, configurados nas settings do repositório)
-# → canário do Argo Rollouts (5% por 30 min com análise de erro e p95; falhou = rollback automático).
+# Deploy (SDD §2.3 passos 4 a 7; D-405, D-P30).
+# CI verde na main → imagens da aplicação no GHCR (UMA vez, por commit) → staging automático → produção só com
+# aprovação do GitHub Environment "production" (revisores obrigatórios: engenharia + responsável fiscal) → canário do
+# Argo Rollouts (5% por 30 min com análise de erro e p95; falhou = rollback automático).
+# D-P30 (revisão de arquitetura 13/19 e segurança B5):
+#  - só roda DEPOIS do workflow "ci" concluir com sucesso no mesmo commit (antes, push na main implantava com CI vermelho);
+#  - staging e produção recebem as imagens por DIGEST — exatamente o artefato construído e testado, nunca uma tag movida;
+#  - motores: a tag do bundle é imutável — se já existe no registro, não é reconstruída (antes, cada deploy refazia e
+#    sobrescrevia a imagem do mesmo bundle); o digest vai para o Helm;
+#  - actions fixadas por SHA e binários baixados com sha256 conferido.
 # Retenção: imagens "bundle-*" e de releases nunca são apagadas (prazo decadencial + margem, ≥ 6 anos).
 name: deploy
 
 on:
-  push:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
@@ -18,41 +26,73 @@ concurrency:
   group: deploy
   cancel-in-progress: false
 
+env:
+  ARGO_ROLLOUTS_VERSION: v1.8.3
+  ARGO_ROLLOUTS_SHA256: 6f60f3608ffc1e6b59c05ffc979d80ad1acd886d7fcbffb1e8e0c50291674373
+
 jobs:
   images:
-    # D-Q07: só publica/implanta com a variável de repositório DEPLOY_ENABLED=true (ou disparo manual). Antes de existir
-    # cluster e segredos KUBECONFIG_*, cada push na main publicaria imagens e falharia no staging.
-    if: vars.DEPLOY_ENABLED == 'true' || github.event_name == 'workflow_dispatch'
+    # D-Q07: só publica/implanta com a variável de repositório DEPLOY_ENABLED=true (ou disparo manual). Pelo
+    # workflow_run, só quando o CI do commit passou.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (vars.DEPLOY_ENABLED == 'true' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     outputs:
-      tag: ${{ steps.meta.outputs.tag }}
+      sha: ${{ steps.meta.outputs.sha }}
+      helm_args: ${{ steps.digests.outputs.helm_args }}
     steps:
-      - uses: actions/checkout@v4
+      - id: meta
+        run: |
+          sha="${{ github.event.workflow_run.head_sha || github.sha }}"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "tag=${sha::12}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.meta.outputs.sha }}   # o commit que o CI aprovou, não a ponta atual da main
       - name: Registro no GHCR (nome em minúsculas, D-Q07)
         run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/taxgateway" >> "$GITHUB_ENV"
-      - uses: docker/setup-buildx-action@v3
-      - id: meta
-        run: echo "tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Login no GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Build e push (api, workers, migrator)
         run: |
           for t in api workers migrator; do
-            docker build -f src/Dockerfile --target "$t" -t "$REGISTRY/$t:${{ steps.meta.outputs.tag }}" .
+            docker build -f src/Dockerfile --target "$t" --build-arg "BUILD_COMMIT=${{ steps.meta.outputs.sha }}" -t "$REGISTRY/$t:${{ steps.meta.outputs.tag }}" .
             docker push "$REGISTRY/$t:${{ steps.meta.outputs.tag }}"
           done
       - name: Build e push do web (site/portal e backoffice, D-W05)
         run: |
           for t in public backoffice; do
             name=$([ "$t" = public ] && echo web || echo web-backoffice)
-            docker build ./web --target "$t" -t "$REGISTRY/$name:${{ steps.meta.outputs.tag }}"
+            docker build -f web/Dockerfile --target "$t" --build-arg "BUILD_COMMIT=${{ steps.meta.outputs.sha }}" -t "$REGISTRY/$name:${{ steps.meta.outputs.tag }}" .
             docker push "$REGISTRY/$name:${{ steps.meta.outputs.tag }}"
           done
-      - name: Motores do bundle (labels + db_sha256)
+      - name: Motores do bundle (imutáveis — só constrói o que ainda não existe; labels + db_sha256)
         run: |
-          bash infra/rfb/build.sh "$REGISTRY"
-          docker image ls --format '{{.Repository}}:{{.Tag}}' | grep "^$REGISTRY/rtc-" | xargs -n1 docker push
+          bundle="$(python3 -c 'import json;print(json.load(open("infra/rfb/versions.json"))["bundle"])')"
+          if docker manifest inspect "$REGISTRY/rtc-regular:bundle-$bundle" >/dev/null 2>&1 \
+             && docker manifest inspect "$REGISTRY/rtc-simples:bundle-$bundle" >/dev/null 2>&1; then
+            echo "Bundle $bundle já publicado: reutilizado sem rebuild."
+          else
+            bash infra/rfb/build.sh "$REGISTRY"
+            docker image ls --format '{{.Repository}}:{{.Tag}}' | grep "^$REGISTRY/rtc-" | xargs -n1 docker push
+          fi
+      - id: digests
+        name: Digests para a promoção (staging e produção recebem o mesmo artefato)
+        run: |
+          d() { docker buildx imagetools inspect "$1" --format '{{json .Manifest.Digest}}' | tr -d '"'; }
+          bundle="$(python3 -c 'import json;print(json.load(open("infra/rfb/versions.json"))["bundle"])')"
+          args="--set engines.bundle=$bundle"
+          for n in api workers migrator web web-backoffice; do
+            args="$args --set image.digests.$n=$(d "$REGISTRY/$n:${{ steps.meta.outputs.tag }}")"
+          done
+          for e in regular simples; do
+            args="$args --set engines.$e.digest=$(d "$REGISTRY/rtc-$e:bundle-$bundle")"
+          done
+          echo "helm_args=$args" >> "$GITHUB_OUTPUT"
+          echo "$args"
 
   staging:
     needs: images
@@ -60,10 +100,12 @@ jobs:
     environment: staging
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.images.outputs.sha }}
       - name: Registro no GHCR (nome em minúsculas, D-Q07)
         run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/taxgateway" >> "$GITHUB_ENV"
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
       - name: Kubeconfig
         run: echo "${{ secrets.KUBECONFIG_STAGING }}" > "$RUNNER_TEMP/kubeconfig"
       - name: Helm upgrade (migrations rodam no hook pre-upgrade)
@@ -71,8 +113,7 @@ jobs:
           KUBECONFIG: ${{ runner.temp }}/kubeconfig
         run: |
           helm upgrade --install taxgateway infra/k8s/taxgateway -n taxgateway --create-namespace \
-            --set image.registry="$REGISTRY" --set image.tag="${{ needs.images.outputs.tag }}" \
-            --set engines.bundle="$(python3 -c 'import json;print(json.load(open("infra/rfb/versions.json"))["bundle"])')" \
+            --set image.registry="$REGISTRY" ${{ needs.images.outputs.helm_args }} \
             --wait --timeout 20m
 
   production:
@@ -81,23 +122,25 @@ jobs:
     environment: production
     timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.images.outputs.sha }}
       - name: Registro no GHCR (nome em minúsculas, D-Q07)
         run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/taxgateway" >> "$GITHUB_ENV"
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
       - name: Kubeconfig
         run: echo "${{ secrets.KUBECONFIG_PRODUCTION }}" > "$RUNNER_TEMP/kubeconfig"
-      - name: Plugin do Argo Rollouts
+      - name: Plugin do Argo Rollouts (sha256 conferido)
         run: |
-          curl -fsSLo /usr/local/bin/kubectl-argo-rollouts https://github.com/argoproj/argo-rollouts/releases/download/v1.8.3/kubectl-argo-rollouts-linux-amd64
-          chmod +x /usr/local/bin/kubectl-argo-rollouts
+          curl -fsSLo "$RUNNER_TEMP/kubectl-argo-rollouts" "https://github.com/argoproj/argo-rollouts/releases/download/$ARGO_ROLLOUTS_VERSION/kubectl-argo-rollouts-linux-amd64"
+          echo "$ARGO_ROLLOUTS_SHA256  $RUNNER_TEMP/kubectl-argo-rollouts" | sha256sum -c -
+          install -m 0755 "$RUNNER_TEMP/kubectl-argo-rollouts" /usr/local/bin/kubectl-argo-rollouts
       - name: Canário com rollback automático
         env:
           KUBECONFIG: ${{ runner.temp }}/kubeconfig
         run: |
           helm upgrade --install taxgateway infra/k8s/taxgateway -n taxgateway \
-            --set image.registry="$REGISTRY" --set image.tag="${{ needs.images.outputs.tag }}" \
-            --set engines.bundle="$(python3 -c 'import json;print(json.load(open("infra/rfb/versions.json"))["bundle"])')" \
+            --set image.registry="$REGISTRY" ${{ needs.images.outputs.helm_args }} \
             --timeout 20m
           if ! kubectl argo rollouts status api -n taxgateway --timeout 3h; then
             kubectl argo rollouts abort api -n taxgateway

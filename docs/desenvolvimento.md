@@ -123,7 +123,7 @@ bash tests/load/capacity-gate.sh        # → out/capacity/relatorio.md
 
 ```bash
 curl -s http://127.0.0.1:5205/v1/usage -H "X-Api-Key: $KEY"                      # competência corrente
-# Admin (exige ConnectionStrings:Billing = tg_billing; provedor em Billing:Asaas:BaseUrl/ApiKey)
+# Admin (exige ConnectionStrings:Billing = tg_billing; cobrança pela Stripe, ver "Contas, e-mail e cobrança")
 curl -s -X POST 'http://127.0.0.1:5205/admin/v1/billing/close?mes=2026-11' -H "X-Admin-Key: $OP"
 curl -s 'http://127.0.0.1:5205/admin/v1/billing/reconcile?mes=2026-11' -H "X-Admin-Key: $OP"
 curl -s -X POST http://127.0.0.1:5205/admin/v1/billing/adjustments -H "X-Admin-Key: $OP" -H 'Content-Type: application/json' \
@@ -204,8 +204,9 @@ cd web && npm ci && npm run dev            # http://127.0.0.1:5173  ·  /portal 
 npm run typecheck && npm test              # tipos + testes de componente (Vitest)
 
 # Imagens nginx (mesma origem da API) e E2E no navegador (Playwright/Chromium)
-docker build ./web --target public     -t taxgateway/web:dev
-docker build ./web --target backoffice -t taxgateway/web-backoffice:dev
+# contexto = raiz do repositório (VERSION e CHANGELOG.md, D-W11)
+docker build -f web/Dockerfile --target public     --build-arg BUILD_COMMIT=$(git rev-parse HEAD) -t taxgateway/web:dev .
+docker build -f web/Dockerfile --target backoffice --build-arg BUILD_COMMIT=$(git rev-parse HEAD) -t taxgateway/web-backoffice:dev .
 docker run -d --name tg-web -p 127.0.0.1:8088:8080 -e API_UPSTREAM=host.docker.internal:5205 taxgateway/web:dev
 docker run -d --name tg-bo  -p 127.0.0.1:8089:8080 -e API_UPSTREAM=host.docker.internal:5205 taxgateway/web-backoffice:dev
 cd web && npx playwright install chromium && npm run e2e
@@ -215,9 +216,64 @@ docker compose -f docker-compose.yml -f docker-compose.capacity.yml -f docker-co
 # site/portal: http://127.0.0.1:8090 · backoffice: http://127.0.0.1:8091/backoffice (8080 é o motor)
 ```
 
-Login provisório: o portal pede uma **API key** do tenant; o backoffice, a **chave de operador** (em dev,
-`tg_admin_dev_operador_fiscal_a_0000000000`). A credencial fica só na aba (`sessionStorage`).
-Atrás de proxy, configure `Http:TrustedProxyNetworks` na API (CIDR do ingress/nginx), senão `/oauth/token` recusa HTTP.
+Pessoas entram com **conta** (e-mail, senha e MFA; cookie de sessão HttpOnly) — ver a seção abaixo. A chave
+estática de operador (`X-Admin-Key`, em dev `tg_admin_dev_operador_fiscal_a_0000000000`) fica só para automação
+local; em produção ela é recusada (D-P13). Atrás de proxy, configure `Http:TrustedProxyNetworks` na API (CIDR do
+ingress/nginx), senão `/oauth/token` recusa HTTP.
+
+## Contas, e-mail e cobrança (D-U01 a D-U10, D-C01 a D-C09)
+
+```bash
+# E-mails de dev (confirmação, convite, senha, avisos): Mailpit do compose
+open http://127.0.0.1:8025
+
+# Cliente: http://127.0.0.1:8090/cadastro -> confirma pelo e-mail no Mailpit -> entra -> ativa o MFA (app autenticador)
+# Primeiro operador do backoffice (link de primeiro acesso: senha + MFA; também vai por e-mail)
+docker compose -f docker-compose.yml -f docker-compose.capacity.yml -f docker-compose.web.yml exec api \
+  dotnet TaxGateway.Api.dll create-operator --email operador@taxgateway.local --nome "Operador" --escopos admin:commercial,admin:fiscal
+```
+
+- Papéis do cliente: dono, administrador, fiscal, desenvolvimento, financeiro e leitura (escopos em `RoleScopes`).
+- `Accounts:CookieSecure=false` só em http local (o compose usa); em produção o cookie é `__Host-` e `Secure`.
+- **Stripe** (opcional em dev): `Stripe__SecretKey` (API e workers) e `Stripe__WebhookSecret`; webhook em
+  `https://SEU-HOST/webhooks/stripe` com `checkout.session.completed`, `customer.subscription.*` e `invoice.*`. Os
+  workers criam produtos, preços e medidores a partir dos planos do backoffice. Sem chave, as telas de pagamento
+  dizem "não configurado" e o resto funciona.
+- **Avisos** (D-J03): os workers mandam por e-mail (Mailpit em dev) os avisos de franquia, webhook pausado,
+  certificado vencendo e mudança de alíquota; `Workers:Notifications=false` desliga.
+
+## Versão, novidades e central de ajuda (D-W11 a D-W13)
+
+```bash
+curl -i http://127.0.0.1:5205/version         # {"versao":"0.11.0","commit":...}; header X-TaxGateway-Version em toda resposta
+
+# Lançar uma versão: as quatro coisas juntas (o CI confere)
+#   VERSION · web/package.json ("version") · infra/k8s/taxgateway/Chart.yaml (appVersion) · seção "## [x.y.z] - AAAA-MM-DD" no CHANGELOG.md
+# Mudança que afeta integrações vai em "### Mudanças na API" (destacada no modal e em /ajuda/novidades).
+
+# Central de ajuda: http://127.0.0.1:5173/ajuda (conteúdo em web/src/help/articles.ts)
+# Capturas reais do portal (tenant de demonstração; pilha do compose no ar) → web/public/ajuda/img/*.jpg
+cd web && npx playwright install chromium && npm run screenshots   # SHOT_UI=http://127.0.0.1:5173 para usar o dev server
+```
+
+## Produção: travas, Helm e migrations (P1, D-P13 a D-P31)
+
+- **Ambiente:** em `Production` (padrão quando nada é definido) a API e os workers recusam configuração de dev e listam
+  o que falta (`ProductionGuard`, D-P13). Local: `ASPNETCORE_ENVIRONMENT=Development` (dotnet run) ou `Local` (compose).
+- **Helm (`infra/k8s/taxgateway`):** API pública (Rollout com motores como sidecars nativos, K8s ≥ 1.29) e `api-admin`
+  separada (só ela tem `ConnectionStrings__Admin`/`Billing`; só o nginx do backoffice a alcança). Um Secret por workload
+  (`secrets.api`, `secrets.apiAdmin`, `secrets.workers`, `secrets.migrator`) — o conteúdo de cada um está comentado no
+  `values.yaml`. Conferência local: `helm template tg infra/k8s/taxgateway | python infra/k8s/tests/check_render.py`.
+- **Pool de conexões (D-P22):** tetos padrão App 30, Worker 20, Admin/Billing/Relay 5; `Maximum Pool Size=N` na
+  connection string sobrescreve. Com HPA alto, PgBouncer em modo transaction.
+- **Valkey de cache (D-P26):** `ConnectionStrings__ValkeyCache` opcional para o cache de simulação (`allkeys-lru`).
+- **LCR (D-P23):** em produção a API usa `Xml__CrlSource=shared` (lê do bucket); os workers baixam e publicam.
+- **Migrations — expand/contract (D-P27):** cada migration roda com `lock_timeout` de 5 s (tenta de novo até 8 vezes).
+  Mudança de schema em duas releases: (1) **expandir** — adicionar coluna/tabela/função nova, compatível com o código
+  em produção; (2) código novo passa a usar; (3) **contrair** — remover o antigo numa release seguinte. Nunca apagar ou
+  renomear algo que a versão em produção ainda lê, e nunca editar migration já aplicada (checksum).
+- **Deploy (D-P30):** o workflow `deploy` roda após o `ci` verde na main e promove o mesmo digest para staging e
+  produção. Actions por SHA e imagens base por digest — atualizações chegam pelo Dependabot.
 
 ## Varredura completa (antes de entregar)
 

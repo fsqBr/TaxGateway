@@ -1,12 +1,16 @@
-import { Route, Routes } from 'react-router-dom';
-import { Building2, Calculator, DownloadCloud, FileCheck2, Gauge, KeyRound, Layers, UserRoundCheck, Webhook } from 'lucide-react';
+import { Link, Route, Routes } from 'react-router-dom';
+import { Building2, Calculator, CreditCard, DownloadCloud, FileCheck2, FileSearch, Gauge, KeyRound, Layers, ListTree, UserRoundCheck, Users, Webhook } from 'lucide-react';
+import { PlanoCobranca } from './Cobranca';
 import { Shell, type NavItem } from '../components/Shell';
-import { Badge, useLoad } from '../components/ui';
+import { PageHeader, useLoad } from '../components/ui';
 import { portal } from '../lib/api';
-import { cnpj } from '../lib/format';
 import { Overview, Simular, Auditar, Lotes } from './Operacao';
 import { ApiKeys, Webhooks } from './Integracao';
 import { Cnpjs, Dfe, Titulares } from './Cadastros';
+import { Equipe, MinhaConta } from './Conta';
+import { Documentos } from './Documentos';
+import { Classificacao } from './Classificacao';
+import { Avisos, AvisosBell } from './Avisos';
 
 export interface Me {
   tenant_id: string;
@@ -20,40 +24,54 @@ export interface Me {
   limites: { rpm: number; concorrencia: number };
 }
 
+// Cada item só aparece para quem tem o escopo (papel da pessoa, D-U05).
 const nav: NavItem[] = [
   { to: '/portal', label: 'Visão geral', icon: Gauge },
-  { to: '/portal/simular', label: 'Simular', icon: Calculator, section: 'Operação' },
-  { to: '/portal/auditoria', label: 'Auditar XML', icon: FileCheck2, section: 'Operação' },
-  { to: '/portal/lotes', label: 'Lotes', icon: Layers, section: 'Operação' },
-  { to: '/portal/api-keys', label: 'API keys', icon: KeyRound, section: 'Integração' },
-  { to: '/portal/webhooks', label: 'Webhooks', icon: Webhook, section: 'Integração' },
-  { to: '/portal/cnpjs', label: 'CNPJs', icon: Building2, section: 'Cadastro' },
-  { to: '/portal/dfe', label: 'DF-e e certificado', icon: DownloadCloud, section: 'Cadastro' },
-  { to: '/portal/titulares', label: 'LGPD: titulares', icon: UserRoundCheck, section: 'Conformidade' },
+  { to: '/portal/simular', label: 'Simular', icon: Calculator, section: 'Operação', scope: 'simulacao:write' },
+  { to: '/portal/classificacao', label: 'Classificação (NCM/NBS)', icon: ListTree, section: 'Operação', scope: 'simulacao:write' },
+  { to: '/portal/auditoria', label: 'Auditar XML', icon: FileCheck2, section: 'Operação', scope: 'auditoria:write' },
+  { to: '/portal/lotes', label: 'Lotes', icon: Layers, section: 'Operação', scope: 'auditoria:write' },
+  { to: '/portal/documentos', label: 'Documentos auditados', icon: FileSearch, section: 'Operação', scope: 'auditoria:read' },
+  { to: '/portal/api-keys', label: 'API keys', icon: KeyRound, section: 'Integração', scope: 'keys:manage' },
+  { to: '/portal/webhooks', label: 'Webhooks', icon: Webhook, section: 'Integração', scope: 'webhooks:manage' },
+  { to: '/portal/cnpjs', label: 'CNPJs', icon: Building2, section: 'Cadastro', scope: 'cnpjs:manage' },
+  { to: '/portal/dfe', label: 'DF-e e certificado', icon: DownloadCloud, section: 'Cadastro', scope: 'dfe:manage' },
+  { to: '/portal/titulares', label: 'LGPD: titulares', icon: UserRoundCheck, section: 'Conformidade', scope: 'titulares:manage' },
+  { to: '/portal/equipe', label: 'Equipe', icon: Users, section: 'Conta', scope: 'membros:manage' },
+  { to: '/portal/cobranca', label: 'Plano e cobrança', icon: CreditCard, section: 'Conta', scope: 'billing:manage' },
 ];
 
 export default function PortalApp() {
   const me = useLoad(() => portal<Me>('/v1/me'));
-  const workspace = me.data && (
-    <>
-      <strong title={me.data.nome}>{me.data.nome}</strong>
-      <span className="muted small mono">{cnpj(me.data.cnpj_raiz)}</span>
-      <span><Badge tone="info">{me.data.plano}</Badge></span>
-    </>
-  );
   return (
-    <Shell realm="portal" nav={nav} workspace={workspace}>
+    <Shell realm="portal" nav={nav} topbar={<AvisosBell />}>
       <Routes>
         <Route index element={<Overview me={me.data} />} />
         <Route path="simular" element={me.data ? <Simular me={me.data} /> : null} />
-        <Route path="auditoria" element={<Auditar />} />
+        <Route path="auditoria" element={<Auditar me={me.data} />} />
+        <Route path="documentos" element={<Documentos />} />
+        <Route path="classificacao" element={<Classificacao />} />
+        <Route path="avisos" element={<Avisos />} />
         <Route path="lotes" element={<Lotes />} />
         <Route path="api-keys" element={<ApiKeys me={me.data} />} />
         <Route path="webhooks" element={<Webhooks />} />
         <Route path="cnpjs" element={<Cnpjs />} />
         <Route path="dfe" element={<Dfe />} />
         <Route path="titulares" element={<Titulares />} />
+        <Route path="conta" element={<MinhaConta />} />
+        <Route path="equipe" element={<Equipe />} />
+        <Route path="cobranca" element={<PlanoCobranca />} />
+        <Route path="*" element={<NotFound />} />
       </Routes>
     </Shell>
+  );
+}
+
+function NotFound() {
+  return (
+    <>
+      <PageHeader title="Página não encontrada" description="O endereço pode ter mudado ou você não tem acesso a esta área." />
+      <Link to="/portal" className="button">Ir para a visão geral</Link>
+    </>
   );
 }

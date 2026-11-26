@@ -58,8 +58,18 @@ internal static class Seed
             INSERT INTO certificates (id, tenant_id, cnpj, pfx_ciphertext, password_ciphertext, dek_wrapped, thumbprint, not_after)
             VALUES (md5(@t::text || 'cert')::uuid, @t, {Cnpj}, '\x00', '\x00', '\x00', 'thumb', now() + interval '1 year')
             """,
+        ["user_memberships"] = """
+            INSERT INTO users (id, realm, email, name, password_hash, password_salt)
+            VALUES (md5(@t::text || 'user')::uuid, 'customer', 'u' || @n || '@seed.test', 'u', '\x00', '\x00');
+            INSERT INTO user_memberships (user_id, tenant_id, role) VALUES (md5(@t::text || 'user')::uuid, @t, 'owner')
+            """,
+        ["user_invites"] = "INSERT INTO user_invites (token_hash, tenant_id, email, role, invited_by, expires_at) VALUES (sha256(('inv' || @n)::bytea), @t, 'c' || @n || '@seed.test', 'viewer', md5(@t::text || 'user')::uuid, now() + interval '1 day')",
+        ["audit_log"] = "INSERT INTO audit_log (actor_type, actor_id, action, tenant_id) VALUES ('system', 'seed', 'seed', @t)",
+        ["invoices"] = "INSERT INTO invoices (id, tenant_id, status) VALUES ('in_seed_' || @n, @t, 'paid')",
+        ["stripe_usage_reports"] = "INSERT INTO stripe_usage_reports (tenant_id, billing_month, metric, reported_qty) VALUES (@t, '2026-11-01', 'documentos', 1)",
         ["dfe_sync_state"] = $"INSERT INTO dfe_sync_state (tenant_id, cnpj) VALUES (@t, {Cnpj})",
         ["dfe_documents"] = $"INSERT INTO dfe_documents (tenant_id, cnpj, nsu, schema, kind, status) VALUES (@t, {Cnpj}, 1, 'resNFe_v1.01.xsd', 'RESUMO', 'RECEBIDO')",
+        ["tenant_notifications"] = "INSERT INTO tenant_notifications (tenant_id, kind, severity, title, body, dedupe_key) VALUES (@t, 'FRANQUIA_80', 'aviso', 'seed', 'seed', 'seed-' || @n)",
         ["titular_requests"] = "INSERT INTO titular_requests (id, tenant_id, cpf_hmac, action, documents, requested_by) VALUES (md5(@t::text || 'tit')::uuid, @t, '\\x01', 'LOCALIZAR', 0, 'seed')",
     };
 

@@ -24,9 +24,23 @@ public sealed record ParsedCrl(Uri Source, string IssuerName, DateTimeOffset Thi
 /// (revogação posterior não invalida um documento assinado antes). LCR ainda não disponível = "não verificada"
 /// (aviso), ou falha se a política for estrita.
 /// </summary>
-public sealed partial class CrlCache(Func<Uri, CancellationToken, Task<byte[]>> fetch, ILogger<CrlCache> log) : BackgroundService
+public sealed partial class CrlCache : BackgroundService
 {
     private const int MaxCrlBytes = 32 * 1024 * 1024;
+    private readonly Func<Uri, CancellationToken, Task<byte[]>> fetch;
+    private readonly ILogger<CrlCache> log;
+    private readonly TimeSpan _refresh;
+    private readonly ConcurrentDictionary<string, X509Certificate2> _issuers = new(StringComparer.Ordinal);
+
+    /// <param name="refresh">Ciclo de renovação e de nova tentativa das pendentes: 1 h buscando direto; 5 min lendo do
+    /// bucket compartilhado (D-P23), para pegar logo a LCR que os workers acabaram de publicar.</param>
+    public CrlCache(Func<Uri, CancellationToken, Task<byte[]>> fetch, ILogger<CrlCache> log, TimeSpan? refresh = null)
+    {
+        this.fetch = fetch;
+        this.log = log;
+        _refresh = refresh ?? TimeSpan.FromHours(1);
+        TaxGatewayMetrics.CrlMaxAge = () => _crls.IsEmpty ? null : (DateTimeOffset.UtcNow - _crls.Values.Min(c => c.ThisUpdate)).TotalSeconds;
+    }
     private readonly ConcurrentDictionary<string, ParsedCrl> _crls = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, X509Certificate2> _pending = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _signal = new(0);
@@ -123,12 +137,13 @@ public sealed partial class CrlCache(Func<Uri, CancellationToken, Task<byte[]>> 
     {
         var crl = Parse(source, der, issuer);
         _crls[source.AbsoluteUri] = crl;
+        _issuers[source.AbsoluteUri] = issuer;   // para renovar depois (antes o emissor se perdia ao sair da fila)
         return crl;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        using var refresh = new PeriodicTimer(TimeSpan.FromHours(1));
+        using var refresh = new PeriodicTimer(_refresh);
         var tick = refresh.WaitForNextTickAsync(stoppingToken).AsTask();
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -137,7 +152,8 @@ public sealed partial class CrlCache(Func<Uri, CancellationToken, Task<byte[]>> 
             if (done == tick)
             {
                 // Renova as LCRs perto do nextUpdate.
-                foreach (var c in _crls.Values.Where(c => c.NextUpdate is null || c.NextUpdate < DateTimeOffset.UtcNow.AddHours(2)))
+                foreach (var c in _crls.Values.Where(c => c.NextUpdate is null || c.NextUpdate < DateTimeOffset.UtcNow.AddHours(2)
+                                                          || c.ThisUpdate < DateTimeOffset.UtcNow.AddHours(-6)))
                 {
                     if (FindIssuer(c) is { } issuer)
                     {
@@ -170,7 +186,8 @@ public sealed partial class CrlCache(Func<Uri, CancellationToken, Task<byte[]>> 
         }
     }
 
-    private X509Certificate2? FindIssuer(ParsedCrl c) => _pending.Values.FirstOrDefault(i => i.Subject == c.IssuerName);
+    private X509Certificate2? FindIssuer(ParsedCrl c) =>
+        _issuers.TryGetValue(c.Source.AbsoluteUri, out var i) ? i : _pending.Values.FirstOrDefault(p => p.Subject == c.IssuerName);
 
     private static ParsedCrl Parse(Uri source, byte[] der, X509Certificate2 issuer)
     {

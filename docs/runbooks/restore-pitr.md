@@ -16,7 +16,7 @@
    * `SELECT max(version) FROM migrations.history` = versão esperada da aplicação;
    * contagens recentes de `fiscal_documents` / `simulations` coerentes com o alvo;
    * roles presentes e **nenhum role de aplicação com BYPASSRLS** (`SELECT rolname FROM pg_roles WHERE rolbypassrls`);
-   * partições futuras existentes (o `/health/ready` da API checa).
+   * partições futuras existentes (o `/health/full` da API checa; o readiness não depende do banco, D-P18).
 5. **Trocar a connection string** no secret (`ConnectionStrings__*`) e retomar API e workers.
 6. **Reconciliar o intervalo perdido** (entre o alvo e a parada):
    * cobrança: `GET /admin/v1/billing/reconcile?mes=` (o ledger é a fonte; o Asaas deduplica por `externalReference`);

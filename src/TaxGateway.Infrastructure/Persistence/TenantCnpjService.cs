@@ -46,16 +46,29 @@ public sealed class TenantCnpjService(ITenantDb db, IMemoryCache cache)
         }
 
         // Um CNPJ desativado pelo tenant (DELETE /v1/oem/cnpjs) NÃO volta pelo auto-provisionamento: só um POST
-        // explícito o reativa (D-806). ON CONFLICT DO NOTHING devolve 0 linhas nesse caso.
-        var inserted = await db.InTenantAsync(tenant, async (s, c) =>
+        // explícito o reativa (D-806). Corrida (D-P06): com várias requisições simultâneas de um CNPJ novo, só uma
+        // insere; as outras recebiam 0 linhas e eram tratadas como "não permitido" (403 falso). Agora o resultado
+        // é o estado da linha depois do INSERT: ativa = permitido, inclusive quando outra requisição inseriu.
+        var allowed = await db.InTenantAsync(tenant, async (s, c) =>
         {
-            await using var cmd = s.CreateCommand("INSERT INTO tenant_cnpjs (tenant_id, cnpj) VALUES ($1, $2) ON CONFLICT DO NOTHING");
-            cmd.Parameters.Add(new() { Value = tenant.Value });
-            cmd.Parameters.Add(new() { Value = cnpj });
-            return await cmd.ExecuteNonQueryAsync(c).ConfigureAwait(false);
+            await using (var ins = s.CreateCommand("INSERT INTO tenant_cnpjs (tenant_id, cnpj) VALUES ($1, $2) ON CONFLICT DO NOTHING"))
+            {
+                ins.Parameters.Add(new() { Value = tenant.Value });
+                ins.Parameters.Add(new() { Value = cnpj });
+                if (await ins.ExecuteNonQueryAsync(c).ConfigureAwait(false) == 1)
+                {
+                    return true;
+                }
+            }
+
+            // Comando separado = snapshot novo (READ COMMITTED): enxerga a linha que a requisição concorrente acabou de
+            // confirmar (no mesmo comando do INSERT ela ficaria invisível).
+            await using var sel = s.CreateCommand("SELECT is_active FROM tenant_cnpjs WHERE cnpj = $1");
+            sel.Parameters.Add(new() { Value = cnpj });
+            return await sel.ExecuteScalarAsync(c).ConfigureAwait(false) is true;
         }, ct).ConfigureAwait(false);
         cache.Remove(key);
-        return inserted == 1;
+        return allowed;
     }
 
     /// <summary>Cadastra ou reativa (POST /v1/oem/cnpjs). true se passou a ativo agora; false se já estava ativo.</summary>

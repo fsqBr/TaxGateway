@@ -36,7 +36,7 @@ public sealed record AuditRecord(
     decimal CreditPotential = 0,
     string? CreditStatus = null);
 
-public sealed record StoredAudit(Guid Id, DateOnly BillingMonth, string Status, string ResponseJson, bool IsBillable);
+public sealed record StoredAudit(Guid Id, DateOnly BillingMonth, string Status, string ResponseJson, bool IsBillable, byte[] XmlSha256);
 
 public enum SaveResult { Saved, Replay }
 
@@ -54,7 +54,7 @@ public sealed class AuditRepository(ITenantDb db)
         db.InTenantAsync(tenant, async (s, c) =>
         {
             await using var cmd = s.CreateCommand("""
-                SELECT f.id, f.billing_month, f.audit_status, f.recalculated->>'resposta', f.is_billable
+                SELECT f.id, f.billing_month, f.audit_status, f.recalculated->>'resposta', f.is_billable, f.xml_sha256
                   FROM document_registry r
                   JOIN fiscal_documents f ON f.tenant_id = r.tenant_id AND f.id = r.latest_document_id AND f.access_key = r.access_key
                  WHERE r.idempotency_hash = $1
@@ -62,7 +62,7 @@ public sealed class AuditRepository(ITenantDb db)
             cmd.Parameters.Add(new() { Value = IdempotencyHash(kind, accessKey) });
             await using var r = await cmd.ExecuteReaderAsync(c).ConfigureAwait(false);
             return await r.ReadAsync(c).ConfigureAwait(false)
-                ? new StoredAudit(r.GetGuid(0), r.GetFieldValue<DateOnly>(1), r.GetString(2), r.GetString(3), r.GetBoolean(4))
+                ? new StoredAudit(r.GetGuid(0), r.GetFieldValue<DateOnly>(1), r.GetString(2), r.GetString(3), r.GetBoolean(4), r.GetFieldValue<byte[]>(5))
                 : null;
         }, ct);
 

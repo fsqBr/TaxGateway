@@ -1,10 +1,14 @@
 import { Fragment, useState, type FormEvent } from 'react';
 import { Route, Routes } from 'react-router-dom';
-import { Ban, Building2, Percent, Receipt } from 'lucide-react';
+import { Ban, Building2, History, Layers3, Percent, Receipt, UserCog } from 'lucide-react';
+import { Operadores, Trilha } from './Operadores';
+import { Planos } from './Planos';
 import { Shell, type NavItem } from '../components/Shell';
+import { ConfirmButton } from '../components/ConfirmDialog';
 import { Alert, Badge, Card, Confirm, Field, Json, Loading, PageHeader, SecretOnce, StatusBadge, Table, useAction, useLoad } from '../components/ui';
 import { backoffice } from '../lib/api';
-import { cnpj, currentMonth, dateTime, money, onlyCnpjChars } from '../lib/format';
+import { cnpj, currentMonth, dateTime, integer, money, onlyCnpjChars } from '../lib/format';
+import { Drawer } from '../components/inputs';
 import { ALL_SCOPES } from '../lib/scopes';
 
 interface Operador { operador: string; scopes: string[] }
@@ -12,8 +16,11 @@ interface Operador { operador: string; scopes: string[] }
 const nav: NavItem[] = [
   { to: '/backoffice', label: 'Tenants', icon: Building2, section: 'Clientes' },
   { to: '/backoffice/tokens', label: 'Revogar token', icon: Ban, section: 'Clientes' },
-  { to: '/backoffice/aliquotas', label: 'Alíquotas', icon: Percent, section: 'Fiscal' },
+  { to: '/backoffice/aliquotas', label: 'Alíquotas', icon: Percent, section: 'Fiscal', scope: 'admin:fiscal' },
+  { to: '/backoffice/planos', label: 'Planos', icon: Layers3, section: 'Financeiro', scope: 'admin:commercial' },
   { to: '/backoffice/faturamento', label: 'Faturamento', icon: Receipt, section: 'Financeiro' },
+  { to: '/backoffice/operadores', label: 'Operadores', icon: UserCog, section: 'Segurança', scope: 'admin:commercial' },
+  { to: '/backoffice/trilha', label: 'Trilha de auditoria', icon: History, section: 'Segurança', scope: 'admin:commercial' },
 ];
 
 export default function BackofficeApp() {
@@ -35,6 +42,9 @@ export default function BackofficeApp() {
         <Route path="aliquotas" element={<Aliquotas />} />
         <Route path="faturamento" element={<Faturamento />} />
         <Route path="tokens" element={<Tokens />} />
+        <Route path="operadores" element={<Operadores />} />
+        <Route path="planos" element={<Planos />} />
+        <Route path="trilha" element={<Trilha />} />
       </Routes>
     </Shell>
   );
@@ -45,10 +55,15 @@ interface Tenant {
   retencao_xml_dias: number | null; criado_em: string; clientes_oauth: { client_id: string; nome: string; revogado_em: string | null; criado_em: string }[];
 }
 
+const PAGE = 25;
+
 export function Tenants() {
   const [busca, setBusca] = useState('');
   const [q, setQ] = useState('');
-  const list = useLoad(() => backoffice<{ tenants: Tenant[] }>('/admin/v1/tenants', { query: { busca: q } }), [q]);
+  const [pagina, setPagina] = useState(1);
+  const [detalhe, setDetalhe] = useState<Tenant>();
+  const list = useLoad(() => backoffice<{ tenants: Tenant[]; total: number; pagina: number }>('/admin/v1/tenants', { query: { busca: q, limite: PAGE, pagina } }), [q, pagina]);
+  const paginas = Math.max(1, Math.ceil((list.data?.total ?? 0) / PAGE));
   const plans = useLoad(() => backoffice<{ planos: { codigo: string }[] }>('/admin/v1/plans'));
   const [secret, setSecret] = useState<{ label: string; value: string }>();
   const [open, setOpen] = useState<string>();
@@ -103,7 +118,7 @@ export function Tenants() {
       <Card
         title="Tenants"
         actions={
-          <form className="row" onSubmit={(e) => { e.preventDefault(); setQ(busca); }}>
+          <form className="row" onSubmit={(e) => { e.preventDefault(); setPagina(1); setQ(busca); }}>
             <input aria-label="Buscar" placeholder="Nome ou CNPJ" value={busca} onChange={(e) => setBusca(e.target.value)} style={{ width: 220 }} />
             <button type="submit" className="secondary">Buscar</button>
           </form>
@@ -123,8 +138,13 @@ export function Tenants() {
                   <td className="nowrap">{t.retencao_xml_dias ? `${t.retencao_xml_dias} dias` : 'não guarda'}</td>
                   <td className="nowrap">{dateTime(t.criado_em)}</td>
                   <td className="actions"><div className="row">
-                    {t.situacao === 'ACTIVE' && <Confirm label="Suspender" onConfirm={() => void act(() => backoffice(`/admin/v1/tenants/${t.tenant_id}/suspend`, { method: 'POST' }))} />}
+                    {t.situacao === 'ACTIVE' && (
+                      <ConfirmButton label="Suspender" title={`Suspender ${t.nome}?`} confirmLabel="Suspender cliente" typeToConfirm="SUSPENDER"
+                        impact={`Todas as chamadas de ${t.nome} (${cnpj(t.cnpj_raiz)}) — API keys, tokens OAuth e portal — passam a ser recusadas com 403 em até 5 segundos. A ação fica registrada na trilha de auditoria.`}
+                        onConfirm={() => void act(() => backoffice(`/admin/v1/tenants/${t.tenant_id}/suspend`, { method: 'POST' }))} />
+                    )}
                     {t.situacao === 'SUSPENDED' && <button className="secondary" onClick={() => void act(() => backoffice(`/admin/v1/tenants/${t.tenant_id}/reactivate`, { method: 'POST' }))}>Reativar</button>}
+                    <button className="secondary" onClick={() => setDetalhe(t)}>Detalhe</button>
                     <button className="secondary" onClick={() => setOpen(open === t.tenant_id ? undefined : t.tenant_id)}>OAuth ({t.clientes_oauth.filter((c) => !c.revogado_em).length})</button>
                   </div></td>
                 </tr>
@@ -139,8 +159,89 @@ export function Tenants() {
             ))}
           </Table>
         )}
+        {list.data && list.data.total > PAGE && (
+          <nav className="pager" aria-label="Páginas">
+            <button className="secondary" disabled={pagina <= 1} onClick={() => setPagina(pagina - 1)}>Anterior</button>
+            <span className="muted small">Página {pagina} de {paginas} · {list.data.total} tenants</span>
+            <button className="secondary" disabled={pagina >= paginas} onClick={() => setPagina(pagina + 1)}>Próxima</button>
+          </nav>
+        )}
       </Card>
+      {detalhe && <TenantDetalhe tenant={detalhe} planos={(plans.data?.planos ?? []).map((p) => p.codigo)} onClose={() => setDetalhe(undefined)} onChange={() => void list.reload()} />}
     </>
+  );
+}
+
+interface TenantDetail {
+  tenant: { tenant_id: string; nome: string; cnpj_raiz: string; plano: string; situacao: string; criado_em: string;
+    cobranca: { provedor: string | null; cliente: string | null; assinatura: string | null; situacao_assinatura: string | null; fim_do_periodo: string | null } };
+  pessoas: { nome: string; email: string; papel: string; mfa: boolean; situacao: string; ultimo_acesso: string | null }[];
+  cnpjs: { cnpj: string; ativo: boolean; criado_em: string }[];
+  api_keys: { nome: string; prefixo: string; scopes: string[]; expira_em: string | null; revogada_em: string | null; ultimo_uso: string | null; criada_em: string }[];
+  consumo: { competencia: string; documentos: number | null; simulacoes: number | null }[];
+  faturas: { numero: string | null; situacao: string; valor_cents: number; pago_cents: number; inicio: string | null; fim: string | null }[];
+}
+
+/** Detalhe do cliente para o atendimento (D-J07): quem acessa, CNPJs, chaves, consumo, faturas e troca de plano. */
+function TenantDetalhe({ tenant, planos, onClose, onChange }: { tenant: Tenant; planos: string[]; onClose: () => void; onChange: () => void }) {
+  const d = useLoad(() => backoffice<TenantDetail>(`/admin/v1/tenants/${tenant.tenant_id}`), [tenant.tenant_id]);
+  const [plano, setPlano] = useState(tenant.plano);
+  const { busy, error, run } = useAction();
+  const trocar = async () => {
+    if (await run(() => backoffice(`/admin/v1/tenants/${tenant.tenant_id}/plano`, { method: 'POST', body: { plano } })) !== undefined) {
+      onChange();
+      await d.reload();
+    }
+  };
+  const t = d.data?.tenant;
+  return (
+    <Drawer title={tenant.nome} onClose={onClose} wide>
+      {d.loading && <Loading />}
+      <Alert>{d.error ?? error}</Alert>
+      {d.data && t && (
+        <div className="stack">
+          <dl className="kv">
+            <div><dt>CNPJ raiz</dt><dd className="mono">{cnpj(t.cnpj_raiz)}</dd></div>
+            <div><dt>Situação</dt><dd><StatusBadge status={t.situacao} /></dd></div>
+            <div><dt>Plano</dt><dd>{t.plano}</dd></div>
+            <div><dt>Assinatura</dt><dd>{t.cobranca.situacao_assinatura ?? 'sem assinatura'}{t.cobranca.fim_do_periodo && <span className="sub">até {dateTime(t.cobranca.fim_do_periodo)}</span>}</dd></div>
+            <div><dt>Cliente desde</dt><dd>{dateTime(t.criado_em)}</dd></div>
+          </dl>
+          <Card title="Trocar plano" description="Vale na hora para limites e franquia; a cobrança da Stripe segue a assinatura do cliente. Fica na trilha de auditoria.">
+            <div className="row">
+              <select aria-label="Novo plano" value={plano} onChange={(e) => setPlano(e.target.value)} style={{ width: 'auto' }}>
+                {planos.map((p) => <option key={p}>{p}</option>)}
+              </select>
+              <ConfirmButton label="Aplicar" tone="secondary" disabled={busy || plano === t.plano} title={`Trocar ${t.nome} para ${plano}?`}
+                impact={`Limites, franquia e excedente de ${plano} passam a valer imediatamente para ${t.nome}.`} confirmLabel="Trocar plano" onConfirm={trocar} />
+            </div>
+          </Card>
+          <h3>Pessoas com acesso</h3>
+          <Table head={['Nome', 'E-mail', 'Papel', 'MFA', 'Último acesso']} empty={d.data.pessoas.length === 0} emptyText="Nenhuma pessoa (cliente só por API).">
+            {d.data.pessoas.map((p) => (
+              <tr key={p.email}><td data-label="Nome">{p.nome}</td><td data-label="E-mail">{p.email}</td><td data-label="Papel">{p.papel}</td>
+                <td data-label="MFA">{p.mfa ? <Badge tone="ok">ativo</Badge> : <Badge tone="warn">pendente</Badge>}</td><td data-label="Último acesso">{dateTime(p.ultimo_acesso)}</td></tr>
+            ))}
+          </Table>
+          <h3>Consumo (últimos 3 meses)</h3>
+          <Table head={['Competência', 'Documentos', 'Simulações']} empty={d.data.consumo.length === 0}>
+            {d.data.consumo.map((c) => <tr key={c.competencia}><td data-label="Competência">{c.competencia}</td><td data-label="Documentos" className="num">{integer(c.documentos ?? 0)}</td><td data-label="Simulações" className="num">{integer(c.simulacoes ?? 0)}</td></tr>)}
+          </Table>
+          <h3>CNPJs ({d.data.cnpjs.length})</h3>
+          <Table head={['CNPJ', 'Situação', 'Desde']} empty={d.data.cnpjs.length === 0}>
+            {d.data.cnpjs.slice(0, 50).map((c) => <tr key={c.cnpj}><td data-label="CNPJ" className="mono">{cnpj(c.cnpj)}</td><td data-label="Situação">{c.ativo ? 'ativo' : 'inativo'}</td><td data-label="Desde">{dateTime(c.criado_em)}</td></tr>)}
+          </Table>
+          <h3>API keys</h3>
+          <Table head={['Nome', 'Prefixo', 'Escopos', 'Último uso', 'Situação']} empty={d.data.api_keys.length === 0}>
+            {d.data.api_keys.map((k) => <tr key={k.prefixo}><td data-label="Nome">{k.nome}</td><td data-label="Prefixo" className="mono">{k.prefixo}</td><td data-label="Escopos" className="small">{k.scopes.join(', ')}</td><td data-label="Último uso">{dateTime(k.ultimo_uso)}</td><td data-label="Situação">{k.revogada_em ? <Badge tone="bad">revogada</Badge> : <Badge tone="ok">ativa</Badge>}</td></tr>)}
+          </Table>
+          <h3>Faturas</h3>
+          <Table head={['Número', 'Situação', 'Valor', 'Período']} empty={d.data.faturas.length === 0} emptyText="Nenhuma fatura ainda.">
+            {d.data.faturas.map((f, i) => <tr key={f.numero ?? i}><td data-label="Número">{f.numero ?? '—'}</td><td data-label="Situação">{f.situacao}</td><td data-label="Valor" className="num">{money(f.valor_cents / 100)}</td><td data-label="Período">{dateTime(f.inicio)} – {dateTime(f.fim)}</td></tr>)}
+          </Table>
+        </div>
+      )}
+    </Drawer>
   );
 }
 
@@ -158,7 +259,9 @@ function OAuthClients({ tenant, onSecret, onChange }: { tenant: Tenant; onSecret
             <td>{c.nome}</td>
             <td>{dateTime(c.criado_em)}</td>
             <td>{c.revogado_em ? <Badge tone="bad">revogado</Badge> : <Badge tone="ok">ativo</Badge>}</td>
-            <td>{!c.revogado_em && <Confirm label="Revogar" onConfirm={() => void run(() => backoffice(`/admin/v1/oauth-clients/${c.client_id}`, { method: 'DELETE' })).then(onChange)} />}</td>
+            <td>{!c.revogado_em && <ConfirmButton label="Revogar" title={`Revogar o cliente OAuth "${c.nome}"?`} confirmLabel="Revogar cliente"
+              impact="Tokens já emitidos para este cliente deixam de valer na hora e ele não consegue emitir novos."
+              onConfirm={() => void run(() => backoffice(`/admin/v1/oauth-clients/${c.client_id}`, { method: 'DELETE' })).then(onChange)} />}</td>
           </tr>
         ))}
       </Table>

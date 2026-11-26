@@ -1,9 +1,51 @@
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ArrowRight, BadgeCheck, Building2, Calculator, CheckCircle2, Cpu, DownloadCloud, FileCheck2, Fingerprint, KeyRound,
   Layers, Lock, MapPin, ScrollText, ShieldCheck, Webhook,
 } from 'lucide-react';
 import { Logo } from '../components/Logo';
+import { VersionTag } from '../components/VersionNotice';
+
+// Capturas reais do portal com dados de demonstração (D-W13), geradas por `npm run screenshots`.
+const showcase = [
+  { key: 'simular', label: 'Simular', path: '/portal/simular', title: 'Simulação por tributo, na hora', text: 'O mesmo JSON da API, com o resultado de CBS, IBS estadual, IBS municipal e IS por item, a fonte de cada alíquota e os avisos do motor.', help: '/ajuda/simulacao' },
+  { key: 'auditoria', label: 'Auditoria', path: '/portal/auditoria', title: 'Cada ocorrência com regra e fundamento', text: 'Envie o XML autorizado e veja a situação, os valores declarados contra os recalculados e cada ocorrência com o campo do XML e a base legal.', help: '/ajuda/auditoria' },
+  { key: 'lotes', label: 'Lotes', path: '/portal/lotes', title: 'Milhares de notas num ZIP', text: 'Acompanhe o processamento de cada lote e baixe o relatório CSV com uma linha por nota.', help: '/ajuda/lotes' },
+  { key: 'visao-geral', label: 'Consumo', path: '/portal', title: 'Consumo e limites à vista', text: 'Documentos auditados, simulações, CNPJs ativos e o limite do plano na competência.', help: '/ajuda/primeiros-passos' },
+  { key: 'webhooks', label: 'Webhooks', path: '/portal/webhooks', title: 'Eventos com histórico e reenvio', text: 'Cadastre URLs, gire o segredo sem parar a integração e reenvie entregas que falharam.', help: '/ajuda/webhooks' },
+] as const;
+
+function Showcase() {
+  const [i, setI] = useState(0);
+  const cur = showcase[i];
+  return (
+    <section className="section" id="funcionando">
+      <div className="section-head">
+        <div className="eyebrow">Veja funcionando</div>
+        <h2>O portal, com dados de verdade.</h2>
+        <p>Telas reais do TaxGateway rodando os motores oficiais, com um cliente de demonstração.</p>
+      </div>
+      <div className="showcase-tabs" role="tablist" aria-label="Telas do portal">
+        {showcase.map((s, j) => (
+          <button key={s.key} type="button" role="tab" aria-selected={j === i} className={j === i ? 'active' : ''} onClick={() => setI(j)}>{s.label}</button>
+        ))}
+      </div>
+      <div className="showcase" role="tabpanel">
+        <div className="showcase-frame">
+          <div className="window-bar"><i /><i /><i /> taxgateway{cur.path}</div>
+          <img src={`/ajuda/img/${cur.key}.jpg`} alt={`Tela ${cur.label} do portal TaxGateway`} width={1440} height={900} loading="lazy" decoding="async" />
+        </div>
+        <div className="showcase-text">
+          <div className="eyebrow">{cur.label}</div>
+          <h3>{cur.title}</h3>
+          <p>{cur.text}</p>
+          <Link to={cur.help} className="button secondary" style={{ marginTop: 12 }}>Como funciona <ArrowRight size={16} aria-hidden="true" /></Link>
+        </div>
+      </div>
+    </section>
+  );
+}
 
 // Conteúdo só com fatos do produto (D-W09): nada de clientes, números de mercado ou preços inventados.
 const features = [
@@ -31,10 +73,14 @@ export default function Landing() {
           <Link to="/" aria-label="Início"><Logo size={30} /></Link>
           <nav className="site-nav" aria-label="Principal">
             <a href="#produto" className="hide-sm">Produto</a>
+            <a href="#funcionando" className="hide-sm">Veja funcionando</a>
+            <Link to="/planos" className="hide-sm">Planos</Link>
             <a href="#seguranca" className="hide-sm">Segurança</a>
             <a href="#desenvolvedores" className="hide-sm">Desenvolvedores</a>
-            <a href="/docs/">Documentação</a>
-            <Link className="button" to="/portal">Entrar</Link>
+            <Link to="/ajuda">Ajuda</Link>
+            <a href="/docs/" className="hide-sm">Documentação</a>
+            <Link to="/portal" className="hide-sm">Entrar</Link>
+            <Link className="button" to="/cadastro">Criar conta grátis</Link>
           </nav>
         </div>
       </header>
@@ -49,10 +95,10 @@ export default function Landing() {
               leitura do XML, regras de auditoria, lotes, captura de DF-e e operação multiempresa — com segurança e LGPD de verdade.
             </p>
             <div className="row">
-              <Link className="button lg" to="/portal">Acessar o portal <ArrowRight size={16} aria-hidden="true" /></Link>
-              <a className="button secondary lg" href="/docs/">Ler a documentação</a>
+              <Link className="button lg" to="/cadastro">Criar conta grátis <ArrowRight size={16} aria-hidden="true" /></Link>
+              <Link className="button secondary lg" to="/portal">Acessar o portal</Link>
             </div>
-            <p className="hero-note">Simulação e auditoria com o mesmo motor que a Receita Federal publica.</p>
+            <p className="hero-note">Plano Sandbox sem cartão, com o mesmo motor que a Receita Federal publica.</p>
           </div>
           <div aria-label="Exemplo de chamada e resposta">
             <div className="window">
@@ -141,6 +187,8 @@ export default function Landing() {
         </div>
       </section>
 
+      <Showcase />
+
       <section className="band-dark" id="seguranca">
         <div className="section">
           <div className="section-head">
@@ -183,7 +231,7 @@ export default function Landing() {
             <p style={{ marginTop: 6 }}>Comece pelo portal ou explore a referência completa da API.</p>
           </div>
           <div className="row">
-            <Link className="button lg" to="/portal">Acessar o portal</Link>
+            <Link className="button lg" to="/cadastro">Criar conta grátis</Link>
             <a className="button secondary lg" href="/docs/">Referência da API</a>
           </div>
         </div>
@@ -195,11 +243,11 @@ export default function Landing() {
             <Logo size={26} />
             <p className="muted small" style={{ marginTop: 10, maxWidth: 320 }}>Cálculo e auditoria de IBS, CBS e Imposto Seletivo sobre os motores oficiais da Receita Federal.</p>
           </div>
-          <div><h4>Produto</h4><ul><li><a href="#produto">Recursos</a></li><li><a href="#seguranca">Segurança</a></li></ul></div>
-          <div><h4>Desenvolvedores</h4><ul><li><a href="/docs/">Referência da API</a></li><li><a href="/openapi/v1.json">OpenAPI (JSON)</a></li></ul></div>
-          <div><h4>Acesso</h4><ul><li><Link to="/portal">Portal do cliente</Link></li></ul></div>
+          <div><h4>Produto</h4><ul><li><a href="#produto">Recursos</a></li><li><a href="#seguranca">Segurança</a></li><li><Link to="/ajuda/novidades">Novidades</Link></li></ul></div>
+          <div><h4>Desenvolvedores</h4><ul><li><Link to="/ajuda">Central de ajuda</Link></li><li><a href="/docs/">Referência da API</a></li><li><a href="/openapi/v1.json">OpenAPI (JSON)</a></li></ul></div>
+          <div><h4>Acesso</h4><ul><li><Link to="/cadastro">Criar conta</Link></li><li><Link to="/portal">Portal do cliente</Link></li><li><Link to="/termos">Termos de Uso</Link></li><li><Link to="/privacidade">Privacidade</Link></li></ul></div>
         </div>
-        <div className="legal"><div className="inner"><span>© TaxGateway</span><span>Indícios não constituem parecer tributário.</span></div></div>
+        <div className="legal"><div className="inner"><span>© TaxGateway · <VersionTag className="" /></span><span>Indícios não constituem parecer tributário.</span></div></div>
       </footer>
     </div>
   );

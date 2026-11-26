@@ -5,3 +5,9 @@ out/
 **/bin/
 **/obj/
 tests/
+web/node_modules/
+web/dist/
+web/dist-*/
+web/test-results/
+web/playwright-report/
+web/*.tsbuildinfo

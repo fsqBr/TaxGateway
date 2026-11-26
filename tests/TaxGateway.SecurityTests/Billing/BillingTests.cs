@@ -14,7 +14,7 @@ using TaxGateway.SecurityTests.Rls;
 
 namespace TaxGateway.SecurityTests.Billing;
 
-/// <summary>Provedor em memória com a mesma semântica de deduplicação do Asaas (externalReference).</summary>
+/// <summary>Provedor em memória com a mesma semântica de deduplicação do provedor real (chave idempotente).</summary>
 public sealed class FakeProvider : IBillingProvider
 {
     public ConcurrentDictionary<string, (string Ref, long Amount)> Charges { get; } = new();
@@ -170,49 +170,136 @@ public sealed class BillingTests(PostgresFixture db)
     }
 }
 
-/// <summary>Adaptador do Asaas contra um servidor HTTP falso com a mesma API (GET/POST /payments).</summary>
-public sealed class AsaasProviderTests
+/// <summary>Cliente da Stripe (D-C03) contra um servidor HTTP falso com a semântica que importa: Idempotency-Key, busca, formulário.</summary>
+public sealed class StripeClientTests
 {
-    private sealed class FakeAsaas : HttpMessageHandler
+    private sealed class FakeStripe : HttpMessageHandler
     {
-        public List<JsonObject> Payments { get; } = [];
-        public int Posts;
+        public List<(string Method, string Path, Dictionary<string, string> Form, string? Idem, string? Version)> Calls { get; } = [];
+        public Dictionary<string, JsonObject> ByIdempotency { get; } = [];
+        public List<JsonObject> Invoices { get; } = [];
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            if (request.Headers.GetValues("access_token").Single() != "chave-teste")
+            if (request.Headers.Authorization?.Parameter != "sk_test_fake")
             {
-                return new HttpResponseMessage(HttpStatusCode.Unauthorized);
+                return new HttpResponseMessage(HttpStatusCode.Unauthorized) { Content = JsonContent.Create(new JsonObject { ["error"] = new JsonObject { ["message"] = "chave" } }) };
             }
 
-            if (request.Method == HttpMethod.Get)
+            var form = request.Content is null ? [] : (await request.Content.ReadAsStringAsync(cancellationToken)).Split('&', StringSplitOptions.RemoveEmptyEntries)
+                .Select(p => p.Split('=', 2)).ToDictionary(p => Uri.UnescapeDataString(p[0].Replace('+', ' ')), p => Uri.UnescapeDataString(p[1].Replace('+', ' ')));
+            var idem = request.Headers.TryGetValues("Idempotency-Key", out var i) ? i.Single() : null;
+            var version = request.Headers.TryGetValues("Stripe-Version", out var v) ? v.Single() : null;
+            var path = request.RequestUri!.AbsolutePath;
+            Calls.Add((request.Method.Method, path, form, idem, version));
+            if (idem is not null && ByIdempotency.TryGetValue(idem, out var cached))
             {
-                var reference = Uri.UnescapeDataString(request.RequestUri!.Query.Split("externalReference=")[1]);
-                var found = Payments.Where(p => p["externalReference"]!.GetValue<string>() == reference).Select(p => (JsonNode)p.DeepClone()).ToArray();
-                return new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(new JsonObject { ["data"] = new JsonArray(found) }) };
+                return Ok(cached);
             }
 
-            Posts++;
-            var body = (await request.Content!.ReadFromJsonAsync<JsonObject>(cancellationToken))!;
-            body["id"] = $"pay_{Payments.Count + 1}";
-            Payments.Add(body);
-            return new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(body) };
+            JsonObject result = path switch
+            {
+                "/v1/billing/meters" when request.Method == HttpMethod.Get => new JsonObject { ["data"] = new JsonArray() },
+                "/v1/invoices/search" => new JsonObject { ["data"] = new JsonArray([.. Invoices.Where(x => request.RequestUri.Query.Contains(Uri.EscapeDataString(x["metadata"]!["idempotency_key"]!.GetValue<string>()), StringComparison.Ordinal)).Select(x => (JsonNode)x.DeepClone())]) },
+                "/v1/invoices" => NewInvoice(form),
+                "/v1/checkout/sessions" => new JsonObject { ["id"] = "cs_1", ["url"] = "https://checkout.stripe.test/c/pay/cs_1" },
+                _ => new JsonObject { ["id"] = $"obj_{Calls.Count}" },
+            };
+            if (idem is not null)
+            {
+                ByIdempotency[idem] = result;
+            }
+
+            return Ok(result);
         }
+
+        private JsonObject NewInvoice(Dictionary<string, string> form)
+        {
+            var inv = new JsonObject { ["id"] = $"in_{Invoices.Count + 1}", ["amount_due"] = 0, ["status"] = "draft", ["metadata"] = new JsonObject { ["idempotency_key"] = form["metadata[idempotency_key]"] } };
+            Invoices.Add(inv);
+            return inv;
+        }
+
+        private static HttpResponseMessage Ok(JsonObject o) => new(HttpStatusCode.OK) { Content = JsonContent.Create(o) };
+    }
+
+    private static (StripeClient Client, FakeStripe Fake) New()
+    {
+        var fake = new FakeStripe();
+        return (new StripeClient(new HttpClient(fake), Options.Create(new StripeOptions { SecretKey = "sk_test_fake", ApiBase = new Uri("https://stripe.test/") })), fake);
     }
 
     [Fact]
-    public async Task Resending_the_same_key_returns_the_existing_payment()
+    public async Task Preco_medido_e_graduado_com_franquia_a_zero_e_versao_da_api_fixa()
     {
-        var fake = new FakeAsaas();
-        var asaas = new AsaasBillingProvider(new HttpClient(fake), Options.Create(new AsaasOptions { BaseUrl = new Uri("https://asaas.teste/v3/"), ApiKey = "chave-teste" }));
-        var charge = new BillingCharge("cus_1", 123456, "TaxGateway 11/2026", "t:2026-11:v1", new DateOnly(2026, 12, 10));
+        var (stripe, fake) = New();
+        await stripe.CreateMeteredPriceAsync("prod_1", "PROFISSIONAL", "documentos", "mtr_1", 15000, 5000, "v1", CancellationToken.None);
+        var call = fake.Calls.Single();
+        Assert.Equal("2025-03-31.basil", call.Version);
+        Assert.Equal("price:PROFISSIONAL:documentos:v1", call.Idem);
+        Assert.Equal("metered", call.Form["recurring[usage_type]"]);
+        Assert.Equal("mtr_1", call.Form["recurring[meter]"]);
+        Assert.Equal("graduated", call.Form["tiers_mode"]);
+        Assert.Equal("15000", call.Form["tiers[0][up_to]"]);
+        Assert.Equal("0", call.Form["tiers[0][unit_amount]"]);
+        Assert.Equal("inf", call.Form["tiers[1][up_to]"]);
+        Assert.Equal("5", call.Form["tiers[1][unit_amount_decimal]"]);   // 5000 milésimos de centavo = 5 centavos = R$ 0,05
+    }
 
-        var first = await asaas.ChargeAsync(charge, CancellationToken.None);
-        var again = await asaas.ChargeAsync(charge, CancellationToken.None);
+    [Fact]
+    public async Task Checkout_leva_tenant_e_plano_nos_metadados_e_preco_medido_sem_quantidade()
+    {
+        var (stripe, fake) = New();
+        var tenant = Guid.NewGuid();
+        var url = await stripe.CreateCheckoutSessionAsync("cus_1", tenant, "ESSENCIAL", [("price_fixed", false), ("price_docs", true)],
+            "https://app/ok", "https://app/cancel", CancellationToken.None);
+        Assert.StartsWith("https://checkout.stripe.test/", url, StringComparison.Ordinal);
+        var f = fake.Calls.Single().Form;
+        Assert.Equal("subscription", f["mode"]);
+        Assert.Equal(tenant.ToString(), f["subscription_data[metadata][tenant_id]"]);
+        Assert.Equal("ESSENCIAL", f["subscription_data[metadata][plan_code]"]);
+        Assert.Equal("1", f["line_items[0][quantity]"]);
+        Assert.False(f.ContainsKey("line_items[1][quantity]"));   // preço medido não aceita quantidade
+        Assert.Equal("pt-BR", f["locale"]);
+    }
+
+    [Fact]
+    public async Task Cobranca_avulsa_reenviada_com_a_mesma_chave_nao_duplica()
+    {
+        var (stripe, fake) = New();
+        var provider = new StripeBillingProvider(stripe);
+        var charge = new BillingCharge("cus_1", 123456, "TaxGateway ajuste 11/2026", "t:2026-11:v2", new DateOnly(2026, 12, 10));
+        var first = await provider.ChargeAsync(charge, CancellationToken.None);
+        var again = await provider.ChargeAsync(charge, CancellationToken.None);
         Assert.Equal(first, again);
-        Assert.Equal(1, fake.Posts);
-        Assert.Equal(1234.56m, fake.Payments[0]["value"]!.GetValue<decimal>());
-        Assert.Equal("t:2026-11:v1", fake.Payments[0]["externalReference"]!.GetValue<string>());
-        Assert.Equal((first, 123456L), (await asaas.FindAsync("t:2026-11:v1", CancellationToken.None))!.Value);
+        Assert.Single(fake.Invoices);
+        Assert.Equal("123456", fake.Calls.Single(c => c.Path == "/v1/invoiceitems").Form["amount"]);
+        Assert.All(fake.Calls.Where(c => c.Method == "POST"), c => Assert.NotNull(c.Idem));   // toda criação é idempotente
+    }
+
+    [Fact]
+    public void Assinatura_do_webhook_da_Stripe_e_verificada_com_tolerancia()
+    {
+        const string secret = "whsec_teste_stripe";
+        var body = "{\"id\":\"evt_1\",\"type\":\"invoice.paid\"}"u8.ToArray();
+        var now = DateTimeOffset.FromUnixTimeSeconds(1_800_000_000);
+        byte[] signed = [.. "1800000000."u8.ToArray(), .. body];
+        var mac = Convert.ToHexStringLower(System.Security.Cryptography.HMACSHA256.HashData(System.Text.Encoding.UTF8.GetBytes(secret), signed));
+        var header = $"t=1800000000,v1={mac}";
+        Assert.True(StripeClient.VerifyWebhook(header, body, secret, now));
+        Assert.False(StripeClient.VerifyWebhook(header, body, secret + "x", now));
+        Assert.False(StripeClient.VerifyWebhook(header, [.. body, 32], secret, now));
+        Assert.False(StripeClient.VerifyWebhook(header, body, secret, now.AddMinutes(6)));
+        Assert.False(StripeClient.VerifyWebhook(null, body, secret, now));
+        Assert.False(StripeClient.VerifyWebhook(header, body, "", now));   // sem segredo configurado, nada passa
+    }
+
+    [Fact]
+    public async Task Sem_chave_configurada_o_cliente_recusa_com_503()
+    {
+        var stripe = new StripeClient(new HttpClient(new FakeStripe()), Options.Create(new StripeOptions()));
+        Assert.False(stripe.Enabled);
+        var ex = await Assert.ThrowsAsync<StripeException>(() => stripe.CreateCustomerAsync(Guid.NewGuid(), "x", null, null, CancellationToken.None));
+        Assert.Equal(503, ex.Status);
     }
 }

@@ -1,0 +1,52 @@
+{{- if .Values.apiAdmin.enabled }}
+# Plano administrativo separado (D-P29; revisão de arquitetura 7 e segurança B2/B8). Mesma imagem da API, mas:
+#  - Secret PRÓPRIO, o único com ConnectionStrings__Admin (tg_admin) e Billing (tg_billing) — a API pública não tem
+#    essas credenciais, então nem mapeia /admin/v1 nem o login de operador;
+#  - só o nginx do backoffice alcança estes pods (NetworkPolicy em network-policies.yaml);
+#  - calcula pelos motores de lote (rtc-*-batch), sem disputar os sidecars do caminho síncrono.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-admin
+  labels: {{- include "tg.labels" . | nindent 4 }}
+    app.kubernetes.io/name: api-admin
+spec:
+  replicas: {{ .Values.apiAdmin.replicas }}
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  selector:
+    matchLabels: { app.kubernetes.io/name: api-admin }
+  template:
+    metadata:
+      labels: {{- include "tg.labels" . | nindent 8 }}
+        app.kubernetes.io/name: api-admin
+        taxgateway/engine-client: "true"
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { fsGroup: 10001 }
+      terminationGracePeriodSeconds: {{ .Values.api.terminationGracePeriodSeconds }}
+      containers:
+        {{- include "tg.apiContainer" (dict "root" . "secret" .Values.secrets.apiAdmin "resources" .Values.apiAdmin.resources
+              "regular" (printf "http://rtc-regular-batch:%v/api/" .Values.engines.regular.port)
+              "simples" (printf "http://rtc-simples-batch:%v/api/" .Values.engines.simples.port)) | nindent 8 }}
+      volumes:
+        - { name: tmp-api, emptyDir: { sizeLimit: 512Mi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-admin
+  labels: {{- include "tg.labels" . | nindent 4 }}
+spec:
+  selector: { app.kubernetes.io/name: api-admin }
+  ports: [{ name: http, port: 80, targetPort: http }, { name: metrics, port: {{ .Values.api.metricsPort }}, targetPort: metrics }]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api-admin
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: api-admin }
+{{- end }}

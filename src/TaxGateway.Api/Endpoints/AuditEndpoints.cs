@@ -12,7 +12,7 @@ public static class AuditEndpoints
     public static RouteGroupBuilder MapAudit(this RouteGroupBuilder v1)
     {
         v1.MapPost("/auditoria/xml", AuditXmlAsync)
-            .WithMetadata(new RequiredScope(Scopes.AuditoriaWrite), new RequestSizeLimitAttribute(SecureXmlLoader.DefaultMaxCharacters + 1024))
+            .WithMetadata(new RequiredScope(Scopes.AuditoriaWrite), new QuotaMetric("DOC_AUDIT"), new RequestSizeLimitAttribute(SecureXmlLoader.DefaultMaxCharacters + 1024))
             .WithName("AuditarXml")
             .ProducesProblem(400).ProducesProblem(401).ProducesProblem(403).ProducesProblem(409)
             .ProducesProblem(422).ProducesProblem(429).ProducesProblem(503);

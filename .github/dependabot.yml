@@ -1,0 +1,22 @@
+# D-P30: com actions por SHA e imagens base por digest, as atualizações de segurança chegam por PR (revisado e com CI),
+# nunca por uma tag que muda sozinha.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    groups: { actions: { patterns: ["*"] } }
+  - package-ecosystem: docker
+    directory: /src
+    schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directory: /web
+    schedule: { interval: weekly }
+  - package-ecosystem: nuget
+    directory: /
+    schedule: { interval: weekly }
+    groups: { nuget: { patterns: ["*"] } }
+  - package-ecosystem: npm
+    directory: /web
+    schedule: { interval: weekly }
+    groups: { npm: { patterns: ["*"] } }

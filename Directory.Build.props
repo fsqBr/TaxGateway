@@ -11,6 +11,14 @@
     <Deterministic>true</Deterministic>
   </PropertyGroup>
 
+  <!-- D-W11: versão única do produto no arquivo VERSION (raiz). O commit vem de BUILD_COMMIT (CI/Docker) e entra na
+       InformationalVersion (ex.: 0.10.0+66eb2cf5aed5), exposta em GET /version e no header X-TaxGateway-Version. -->
+  <PropertyGroup>
+    <TaxGatewayVersion>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)VERSION').Trim())</TaxGatewayVersion>
+    <Version>$(TaxGatewayVersion)</Version>
+    <SourceRevisionId Condition="'$(BUILD_COMMIT)' != ''">$(BUILD_COMMIT)</SourceRevisionId>
+  </PropertyGroup>
+
   <!-- Caminho crítico (SDD §16.2): Server GC, PGO dinâmico, ReadyToRun no publish. -->
   <PropertyGroup Condition="'$(MSBuildProjectName)' == 'TaxGateway.Api' Or '$(MSBuildProjectName)' == 'TaxGateway.Workers'">
     <ServerGarbageCollection>true</ServerGarbageCollection>

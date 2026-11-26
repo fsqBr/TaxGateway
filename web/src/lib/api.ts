@@ -1,27 +1,15 @@
-// Cliente HTTP do portal e do backoffice (D-W03). Mesma origem da API: sem CORS e sem token em URL.
-// A credencial fica em sessionStorage (some ao fechar a aba) e vai só em header; nunca em localStorage.
+// Cliente HTTP do portal e do backoffice (D-W03, D-U01). Mesma origem da API, sem CORS e sem token em URL.
+// Pessoas entram com conta (e-mail, senha e MFA): a sessão é um cookie HttpOnly que o JavaScript não lê. Toda
+// requisição leva o header anti-CSRF; API keys ficam para os sistemas (ERP → API), nunca no navegador.
 
 export type Realm = 'portal' | 'backoffice';
 
-const STORAGE: Record<Realm, string> = { portal: 'tg.portal.key', backoffice: 'tg.backoffice.key' };
-const HEADER: Record<Realm, string> = { portal: 'X-Api-Key', backoffice: 'X-Admin-Key' };
+export const CSRF_HEADER = 'X-TaxGateway-Csrf';
 
-export function getCredential(realm: Realm): string | null {
-  try {
-    return sessionStorage.getItem(STORAGE[realm]);
-  } catch {
-    return null;
-  }
-}
-
-export function setCredential(realm: Realm, value: string | null): void {
-  try {
-    if (value) sessionStorage.setItem(STORAGE[realm], value);
-    else sessionStorage.removeItem(STORAGE[realm]);
-  } catch {
-    // navegação privada sem storage: o usuário precisa entrar de novo a cada recarga
-  }
-}
+/** Rotas de conta de cada área. */
+export const ACCOUNT_BASE: Record<Realm, string> = { portal: '/v1/conta', backoffice: '/admin/v1/conta' };
+export const LOGIN_PATH: Record<Realm, string> = { portal: '/portal/entrar', backoffice: '/backoffice/entrar' };
+export const MFA_PATH: Record<Realm, string> = { portal: '/portal/mfa', backoffice: '/backoffice/mfa' };
 
 /** Erro no formato application/problem+json da API (campo `code` estável, ex.: ERR_FORBIDDEN_SCOPE). */
 export class ApiError extends Error {
@@ -42,13 +30,16 @@ export interface RequestOptions {
   contentType?: string;
   query?: Record<string, string | number | boolean | undefined | null>;
   idempotent?: boolean;
-  credential?: string;
+  /** Não avisar a aplicação em 401/MFA (ex.: a própria checagem de sessão). */
+  silent?: boolean;
 }
 
+/** Evento global: a sessão acabou (401) ou falta o MFA (403 ERR_MFA_NECESSARIO). O app leva para a tela certa. */
+export const AUTH_EVENT = 'tg:auth';
+export interface AuthEventDetail { realm: Realm; code: string }
+
 export async function request<T = unknown>(realm: Realm, path: string, opts: RequestOptions = {}): Promise<T> {
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  const credential = opts.credential ?? getCredential(realm);
-  if (credential) headers[HEADER[realm]] = credential;
+  const headers: Record<string, string> = { Accept: 'application/json', [CSRF_HEADER]: '1' };
   let body: BodyInit | undefined;
   if (opts.rawBody !== undefined) {
     body = opts.rawBody;
@@ -66,12 +57,16 @@ export async function request<T = unknown>(realm: Realm, path: string, opts: Req
         .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
         .join('&')
     : '';
-  const resp = await fetch(path + (qs === '?' ? '' : qs), { method: opts.method ?? 'GET', headers, body, credentials: 'omit' });
+  const resp = await fetch(path + (qs === '?' ? '' : qs), { method: opts.method ?? 'GET', headers, body, credentials: 'same-origin' });
   const text = await resp.text();
   const json = text && (resp.headers.get('content-type') ?? '').includes('json') ? safeParse(text) : undefined;
   if (!resp.ok) {
     const p = (json ?? {}) as { code?: string; title?: string; detail?: string; error?: string; error_description?: string };
-    throw new ApiError(resp.status, p.code ?? p.error ?? `HTTP_${resp.status}`, p.title ?? p.error_description ?? resp.statusText ?? 'Erro', p.detail);
+    const err = new ApiError(resp.status, p.code ?? p.error ?? `HTTP_${resp.status}`, p.title ?? p.error_description ?? resp.statusText ?? 'Erro', p.detail);
+    if (!opts.silent && (resp.status === 401 || err.code === 'ERR_MFA_NECESSARIO')) {
+      window.dispatchEvent(new CustomEvent<AuthEventDetail>(AUTH_EVENT, { detail: { realm, code: err.code } }));
+    }
+    throw err;
   }
   return (json ?? (text as unknown)) as T;
 }
@@ -86,13 +81,49 @@ function safeParse(text: string): unknown {
 
 export const portal = <T = unknown>(path: string, opts?: RequestOptions) => request<T>('portal', path, opts);
 export const backoffice = <T = unknown>(path: string, opts?: RequestOptions) => request<T>('backoffice', path, opts);
+export const account = <T = unknown>(realm: Realm, path: string, opts?: RequestOptions) => request<T>(realm, ACCOUNT_BASE[realm] + path, opts);
+
+/** Mensagens com o que fazer, para os erros mais comuns (UX B1/C3). O código fica disponível em `codeOf`. */
+const FRIENDLY: Record<string, string> = {
+  ERR_CNPJ_NOT_PROVISIONED: 'O CNPJ desta operação não está entre os CNPJs atendidos da sua empresa. Cadastre-o em CNPJs e tente de novo.',
+  ERR_FORBIDDEN_SCOPE: 'Seu acesso não permite esta ação. Peça a quem administra a conta.',
+  ERR_TENANT_SUSPENDED: 'A conta da empresa está suspensa. Fale com o suporte do TaxGateway.',
+  ERR_SEM_EMPRESA: 'Escolha a empresa no menu lateral para continuar.',
+  ERR_CREDENCIAIS: 'E-mail ou senha incorretos.',
+};
 
 /** Mensagem legível para o usuário a partir de qualquer erro. */
 export function describeError(e: unknown): string {
   if (e instanceof ApiError) {
-    if (e.status === 401) return 'Credencial inválida, revogada ou expirada. Entre novamente.';
-    if (e.status === 429) return 'Limite do plano atingido. Tente em alguns segundos.';
-    return `${e.message} (${e.code})`;
+    if (e.status === 401 && e.code !== 'ERR_CREDENCIAIS') return 'Sua sessão terminou. Entre novamente.';
+    if (e.status === 429) return 'Muitas requisições. Aguarde alguns segundos e tente de novo.';
+    if (FRIENDLY[e.code]) return FRIENDLY[e.code];
+    return e.detail ? `${e.title}. ${e.detail}` : e.title;
   }
   return e instanceof Error ? e.message : String(e);
+}
+
+export const codeOf = (e: unknown): string | undefined => (e instanceof ApiError ? e.code : undefined);
+
+/** Baixa um arquivo de uma rota da API (CSV, relatório) com a sessão e o header anti-CSRF. */
+export async function downloadFile(path: string, filename: string, query?: Record<string, string | undefined>): Promise<void> {
+  const qs = query ? Object.entries(query).filter(([, v]) => v).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v!)}`).join('&') : '';
+  const resp = await fetch(path + (qs ? `?${qs}` : ''), { credentials: 'same-origin', headers: { [CSRF_HEADER]: '1' } });
+  if (!resp.ok) {
+    let detail: string | undefined;
+    try {
+      const p = (await resp.json()) as { title?: string; detail?: string; code?: string };
+      throw new ApiError(resp.status, p.code ?? `HTTP_${resp.status}`, p.title ?? 'Falha no download', p.detail);
+    } catch (e) {
+      if (e instanceof ApiError) throw e;
+      detail = resp.statusText;
+    }
+    throw new ApiError(resp.status, `HTTP_${resp.status}`, 'Falha no download', detail);
+  }
+  const url = URL.createObjectURL(await resp.blob());
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
 }

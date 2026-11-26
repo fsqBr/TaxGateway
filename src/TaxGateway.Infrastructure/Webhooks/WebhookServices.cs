@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -42,7 +43,8 @@ public sealed record DeliveryInfo(Guid Id, Guid WebhookId, string Event, string 
 /// Cadastro de webhooks e entregas (SDD §7; D-603/D-605). Segredos de assinatura cifrados por envelope com a KEK
 /// do tenant (o banco só guarda texto cifrado); rotação mantém o segredo anterior válido por um período de graça.
 /// </summary>
-public sealed class WebhookRepository(ITenantDb db, IKeyVault vault, TenantSettingsService settings, IOptions<WebhookOptions> options)
+public sealed class WebhookRepository(ITenantDb db, IKeyVault vault, TenantSettingsService settings, IOptions<WebhookOptions> options,
+    Microsoft.Extensions.Caching.Memory.IMemoryCache cache)
 {
     private sealed record Secret(string S, DateTimeOffset? Exp);
 
@@ -166,9 +168,22 @@ public sealed class WebhookRepository(ITenantDb db, IKeyVault vault, TenantSetti
             return await cmd.ExecuteNonQueryAsync(c).ConfigureAwait(false);
         }, ct);
 
+    /// <summary>
+    /// Segredos ativos para assinar (D-P21): cache de 5 min por webhook — antes cada entrega fazia uma chamada ao KMS. Depois
+    /// de uma rotação, o segredo anterior segue válido por 24 h, então assinar com ele por até 5 min não quebra o cliente.
+    /// </summary>
     internal async Task<IReadOnlyList<string>?> ActiveSecretsAsync(TenantId tenant, Guid webhookId, CancellationToken ct)
     {
-        var list = await LoadSecretsAsync(tenant, webhookId, ct).ConfigureAwait(false);
+        var key = $"whsecrets:{webhookId}";
+        if (!cache.TryGetValue(key, out List<Secret>? list))
+        {
+            list = await LoadSecretsAsync(tenant, webhookId, ct).ConfigureAwait(false);
+            if (list is not null)
+            {
+                cache.Set(key, list, new Microsoft.Extensions.Caching.Memory.MemoryCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5), Size = 1 });
+            }
+        }
+
         return list?.Where(x => x.Exp is null || x.Exp > DateTimeOffset.UtcNow).Select(x => x.S).ToList();
     }
 
@@ -298,9 +313,35 @@ public sealed partial class WebhookSender(ITenantDb db, WebhookRepository repo, 
             _ => ("RETRYING", DateTimeOffset.UtcNow.AddSeconds(delays[attempts - 1]), null),
         };
 
+        // Disjuntor por endpoint (D-P21): 5 falhas seguidas pausam o endpoint (5 min, dobrando até 1 h); um sucesso zera.
+        var delivered = status == "DELIVERED";
         await db.InTenantAsync(tenant, async (s, c) =>
         {
             await using var batch = s.CreateBatch();
+            var breaker = new Npgsql.NpgsqlBatchCommand("""
+                UPDATE tenant_webhooks SET
+                       consecutive_failures = CASE WHEN $2 THEN 0 ELSE consecutive_failures + 1 END,
+                       paused_until = CASE WHEN $2 THEN NULL
+                                           WHEN consecutive_failures + 1 >= 5
+                                           THEN now() + least(interval '1 hour', interval '5 minutes' * power(2, least(consecutive_failures + 1 - 5, 4)))
+                                           ELSE paused_until END
+                 WHERE id = $1
+                """);
+            breaker.Parameters.Add(new() { Value = d.Webhook });
+            breaker.Parameters.Add(new() { Value = delivered });
+            batch.BatchCommands.Add(breaker);
+            // Ao abrir o disjuntor (5ª falha seguida), avisa no portal e por e-mail (D-J03) — um aviso por endpoint por dia.
+            var paused = new Npgsql.NpgsqlBatchCommand("""
+                INSERT INTO tenant_notifications (tenant_id, kind, severity, title, body, link, audience, dedupe_key)
+                SELECT w.tenant_id, 'WEBHOOK_PAUSADO', 'critico', 'Webhook pausado por falhas seguidas',
+                       'O endpoint ' || left(w.target_url, 200) || ' falhou 5 vezes seguidas e as entregas estão pausadas; elas retomam '
+                       || 'sozinhas (de 5 min até 1 h) e nada se perde. Confira o endpoint e as entregas em Webhooks.',
+                       '/portal/webhooks', '{owner,admin,developer}', 'webhook:' || w.id::text || ':' || to_char(now(), 'YYYYMMDD')
+                  FROM tenant_webhooks w WHERE w.id = $1 AND w.consecutive_failures = 5
+                ON CONFLICT (tenant_id, dedupe_key) DO NOTHING
+                """);
+            paused.Parameters.Add(new() { Value = d.Webhook });
+            batch.BatchCommands.Add(paused);
             var upd = new Npgsql.NpgsqlBatchCommand("UPDATE webhook_deliveries SET status = $2, attempts = $3, next_attempt_at = $4, last_status_code = $5 WHERE id = $1");
             upd.Parameters.Add(new() { Value = deliveryId });
             upd.Parameters.Add(new() { Value = status });

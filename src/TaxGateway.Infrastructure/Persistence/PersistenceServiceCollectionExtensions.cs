@@ -10,9 +10,9 @@ public static class PersistenceServiceCollectionExtensions
     /// Registra o acesso a dados do runtime. <paramref name="connectionString"/> é de um role de runtime
     /// (<c>tg_app</c> na API, <c>tg_worker</c> nos workers), nunca do <c>tg_owner</c>.
     /// </summary>
-    public static IServiceCollection AddTaxGatewayPersistence(this IServiceCollection services, string connectionString)
+    public static IServiceCollection AddTaxGatewayPersistence(this IServiceCollection services, string connectionString, int defaultMaxPoolSize = DbPools.App)
     {
-        var builder = new NpgsqlConnectionStringBuilder(connectionString)
+        var builder = new NpgsqlConnectionStringBuilder(DbPools.Normalize(connectionString, defaultMaxPoolSize))
         {
             // D-110: o contexto de tenant é local à transação (set_config(..., true)); não há estado de sessão
             // a limpar, então pulamos o reset na devolução ao pool e mantemos os prepared statements.

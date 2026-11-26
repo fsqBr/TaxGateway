@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react';
-import { Alert, Badge, Card, Confirm, Field, Loading, PageHeader, Table, statusLabel, statusTone, useAction, useLoad } from '../components/ui';
+import { ConfirmButton } from '../components/ConfirmDialog';
+import { Alert, Badge, Card, Field, Loading, PageHeader, Table, statusLabel, statusTone, useAction, useLoad } from '../components/ui';
 import { ApiError, portal } from '../lib/api';
 import { cnpj, currentMonth, dateTime, fileToBase64, integer, onlyCnpjChars } from '../lib/format';
 
@@ -46,7 +47,9 @@ export function Cnpjs() {
                   <td>{dateTime(c.criado_em)}</td>
                   <td>
                     {c.ativo && (
-                      <Confirm label="Desativar" onConfirm={() => void run(() => portal(`/v1/oem/cnpjs/${c.cnpj}`, { method: 'DELETE' })).then(() => list.reload())} />
+                      <ConfirmButton label="Desativar" title={`Desativar o CNPJ ${cnpj(c.cnpj)}?`} confirmLabel="Desativar CNPJ"
+                        impact="Chamadas em nome deste CNPJ passam a ser recusadas na hora (403). A cobrança dele termina na próxima competência. Ele só volta se for cadastrado de novo — o auto-cadastro não o reativa."
+                        onConfirm={() => void run(() => portal(`/v1/oem/cnpjs/${c.cnpj}`, { method: 'DELETE' })).then(() => list.reload())} />
                     )}
                   </td>
                 </tr>
@@ -135,7 +138,9 @@ export function Dfe() {
                 <p><strong>{cert.data.titular}</strong></p>
                 <p className="muted mono">{cert.data.thumbprint}</p>
                 <p>Vence em {dateTime(cert.data.vence_em)}</p>
-                <Confirm label="Remover certificado" onConfirm={() => void run(() => portal(`/v1/cnpjs/${selected}/certificado`, { method: 'DELETE' })).then(() => cert.reload())} />
+                <ConfirmButton label="Remover certificado" title="Remover o certificado A1?" confirmLabel="Remover certificado" typeToConfirm="REMOVER"
+                  impact="A captura automática de notas (DF-e) deste CNPJ para na próxima consulta. O PFX e a senha são apagados e não podem ser recuperados — para voltar, envie o arquivo de novo."
+                  onConfirm={() => void run(() => portal(`/v1/cnpjs/${selected}/certificado`, { method: 'DELETE' })).then(() => cert.reload())} />
               </>
             ) : (!cert.loading && <p className="muted">Nenhum certificado enviado.</p>)}
             <form className="stack" onSubmit={upload} style={{ marginTop: 12 }}>
@@ -204,8 +209,12 @@ export function Titulares() {
           <Card
             title={`${result.documentos.length} documento(s)`}
             actions={result.documentos.length > 0 && (
-              <Confirm
+              <ConfirmButton
                 label="Expurgar dados deste titular"
+                title="Expurgar os dados deste titular?"
+                confirmLabel="Expurgar definitivamente"
+                typeToConfirm="EXPURGAR"
+                impact={`Apaga definitivamente ${result.documentos.filter((d) => d.xml_armazenado).length} XML(s) guardado(s) e o vínculo com o CPF em ${result.documentos.length} documento(s). Os valores fiscais e os achados continuam, sem dado pessoal. Não pode ser desfeito; o pedido fica registrado para a sua prestação de contas (LGPD).`}
                 onConfirm={async () => {
                   const r = await run(() => portal<Localizados>('/v1/titulares/expurgar', { method: 'POST', body: body() }));
                   if (r) {

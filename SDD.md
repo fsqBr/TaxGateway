@@ -1,6 +1,6 @@
 # SOFTWARE DESIGN DOCUMENT (SDD) — TAXGATEWAY IBS/CBS/IS ENGINE
 
-**Versão:** 2.14 (Fases 0 a 9, Hardening técnico e interfaces web com identidade visual implementados; NFS-e e homologação real da Fase 9 pendentes; decisões de implementação em `docs/decisoes.md`. Substitui a 1.0 — ver §0 para o mapa de mudanças; fatos validados em 25/11/2026 contra a legislação, as NTs e o código dos motores)
+**Versão:** 2.16 (Fases 0 a 9, Hardening técnico, interfaces web, central de ajuda e versionamento implementados; revisão multidisciplinar aplicada — correções P0, contas com MFA, planos e cobrança pela Stripe, plataforma P1 e jornadas de produto; NFS-e, homologação real da Fase 9 e itens externos pendentes; decisões de implementação em `docs/decisoes.md`. Substitui a 1.0 — ver §0 para o mapa de mudanças; fatos validados em 25/11/2026 contra a legislação, as NTs e o código dos motores)
 **Data:** Novembro de 2026
 **Stack Principal:** .NET 10 (C# 14), PostgreSQL 18 (`uuidv7()` nativo; mínimo 17), Valkey 8+ (BSD), Object Storage S3-compatível, RabbitMQ 4 (quorum queues), Docker/Kubernetes
 **Motores Fiscais (Sidecars):** imagens próprias construídas a partir dos repositórios oficiais MIT `ReceitaFederal/calculadora-rtc-regime-regular` e `ReceitaFederal/calculadora-rtc-simples-nacional` (Java 25, Spring Boot 4.1, SQLite somente leitura gerado via Flyway)
@@ -43,6 +43,11 @@
 | 30 | *(análise do código)* Sem orçamento de latência | Motor no mesmo pod, referência em memória, cache determinístico, tuning do motor por variável de ambiente, SLOs agressivos medidos | §16 |
 | 31 | *(Fase 1)* `tg_auth` com `BYPASSRLS`; modelo só no documento | Nenhum role com `BYPASSRLS` (políticas nomeadas por role, D-103); migrations SQL versionadas como fonte de verdade (D-101) | §4.1, §9, `docs/decisoes.md` |
 | 32 | *(Fase 2)* `COPY` binário numa tabela com RLS; `xml_snippet` em toda simulação; corte do Valkey em 2 ms; escrita de parâmetros sem role | INSERT com `unnest` por tenant (D-213); grupos oficiais do DF-e devolvidos sem segunda chamada (D-202); corte de 50 ms (D-211); role `tg_admin`, histórico do catálogo e fluxo de duas pessoas (D-203, D-204, D-214) | §6.1, §15, §16.2, `docs/decisoes.md` |
+| 48 | *(Revisão de produto e UX)* Sem consulta de auditorias nem histórico; escolha de cClassTrib sem apoio; nenhum alerta ao cliente; primeira auditoria falhava sem caminho; portal só com JSON e inutilizável no celular; contrato aceitava campo desconhecido | Documentos auditados com filtros, detalhe por item e CSV (`auditoria:read`); consulta de CST/cClassTrib por NCM/NBS; avisos no portal e por e-mail; primeiros passos; XML de exemplo e "cadastrar este CNPJ"; simulação por formulário; layout móvel; contrato estrito (D-J01 a D-J08) | §6, §9, `docs/decisoes.md` |
+| 47 | *(Revisão de plataforma)* Produção subia com configuração de dev; Admin API no mesmo pod e Secret da API pública; LCR inalcançável em produção; readiness dependente do banco; memória e conexões sem teto; webhooks sem justiça; deploy com CI vermelho e tags mutáveis | Travas de produção; `api-admin` separada com Secrets por workload e NetworkPolicy default-deny; LCR publicada pelos workers; readiness local; tetos de memória e pool; disjuntor e rodízio de webhooks; sidecars nativos e preStop; deploy após o CI por digest, actions por SHA (D-P13 a D-P31) | §2, §4, §5, §7, §16 |
+| 46 | *(Revisão de produto)* Acesso de pessoas por API key no navegador; planos sem preço nem cadastro; cobrança só desenhada para Asaas | Contas com e-mail, senha e MFA obrigatório, papéis e convites; operadores com conta; planos de mercado editáveis no backoffice com histórico; Stripe (assinatura, Billing Meters, portal e webhooks) no lugar do Asaas (D-U01 a D-U10, D-C01 a D-C09) | §3, §10 |
+| 45 | *(Revisão multidisciplinar)* 12 problemas P0: motor do Simples ausente no Kubernetes, canário sem tráfego, lote sem idempotência, reprocessamento gratuito para qualquer nota, 500 no OAuth, faturamento duplicável, cache do Valkey adulterável, entre outros | Correções com teste de regressão cada (D-P01 a D-P12); relatório em `docs/revisao-multidisciplinar.md` | §2, §6, §8, §10 |
+| 44 | *(Ajuda e versão)* Sem versão visível nem forma de avisar mudanças; sem material para quem não é desenvolvedor | Versão única em `VERSION` (assemblies, `GET /version`, header `X-TaxGateway-Version`, OpenAPI, app); `CHANGELOG.md` alimenta o modal de novidades e `/ajuda/novidades`; aviso de novo deploy; central `/ajuda` com exemplos e capturas reais reproduzíveis (D-W11 a D-W15) | `CHANGELOG.md`, `docs/decisoes.md`, `web/src/help/` |
 | 43 | *(Varredura de qualidade)* Tag do motor republicada pela RFB não era detectada e quebrava o rebuild; finais de linha inconsistentes; dependência do front vulnerável | Build por commit fixado; detector de `retag`; LF padronizado; dependências atualizadas e open redirect mitigado; roteiro ponta a ponta da pilha (D-Q01 a D-Q06) | §2.2, §2.3, `docs/decisoes.md` |
 | 42 | *(Revisão de UI e docs)* Referência da API com grupos vazios, sem respostas nem erros documentados; UI sem identidade | Grupos refeitos com descrição; códigos, exemplos reais e erros problem+json em todas as rotas, verificados por teste de contrato; marca e sistema de design aplicados em site, portal, backoffice e /docs (D-W08 a D-W10) | `docs/marca.md`, `docs/decisoes.md` |
 | 41 | *(Interfaces web)* Backoffice previsto no Marco C não existia; sem portal, landing nem referência navegável; `/oauth/token` falharia atrás do ingress | Referência `/docs` (Scalar) com documentos público e admin separados; app React com alvos público (site + portal) e backoffice; nginx na mesma origem com CSP estrita; X-Forwarded-* só de redes confiáveis (D-W01 a D-W07) | §3.1, §15, `docs/decisoes.md`, `web/` |
@@ -1032,8 +1037,8 @@ COMMIT;
 4. Muda o status para `INVOICED`. Ajustes posteriores geram `v2` (nota de crédito ou débito), nunca uma edição da `v1`.
 
 ### 10.4. Provedores (`IBillingProvider`)
-* **Asaas (padrão):** cliente, assinatura (mensalidade) e cobrança avulsa de excedente no fechamento, com PIX/boleto/cartão e emissão da NFS-e do próprio serviço.
-* **Stripe (opcional, cartão/internacional):** *Billing Meters*. A API de usage records foi removida na versão `2025-03-31.basil`.
+* **Stripe (padrão desde a v2.16, D-C01 a D-C09):** cliente, assinatura com a mensalidade do plano e o excedente medido por *Billing Meters* (documentos e CNPJs ativos), Checkout para assinar, portal do cliente para cartão e faturas, webhook assinado (eventos gravados em `stripe_events` e processados pelos workers) e cobrança avulsa idempotente no fechamento. A API de usage records foi removida na versão `2025-03-31.basil`.
+* **Asaas:** substituído pela Stripe por decisão de produto (D-C01); a abstração `IBillingProvider` continua, se um provedor local voltar a ser necessário (PIX/boleto).
   * O worker envia *meter events* incrementais a partir de um *watermark* do ledger, com `identifier` único por lote de eventos.
   * O Stripe só garante a unicidade do `identifier` numa janela de pelo menos 24 h. A deduplicação definitiva é o watermark gravado no Postgres.
 * O adapter é escolhido por `tenants.billing_provider`.
@@ -1187,7 +1192,7 @@ Cada fase termina com **build verde, testes passando e o critério de saída ate
   * reconciliação zerada, valor conferido pela fórmula do plano;
   * reenvio sem duplicar; ajustes v2/v3;
   * `GET /v1/usage`.
-* *Pendente:* teste no sandbox real do Asaas; Stripe Meters só sob demanda.
+* *Pendente:* teste com a conta Stripe real (modo de teste) — chaves, webhook e portal do cliente configurados (ver `docs/decisoes.md`, "Para ligar em produção").
 
 ### Marco C — GA (Disponibilidade Geral)
 

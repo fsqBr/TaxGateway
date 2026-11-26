@@ -26,6 +26,14 @@ public sealed class IdentityTests(GoldenFixture env, ITestOutputHelper output)
         // Segredo errado e escopo não concedido.
         var bad = await TokenAsync(env.Api, clientId, secret + "x");
         Assert.Equal("invalid_client", bad.Body!["error"]!.GetValue<string>());
+        // D-P05: a descrição vai para o header WWW-Authenticate; fora do ASCII o Kestrel lançava exceção (500 em produção,
+        // o TestServer não valida). Toda rejeição precisa ser 4xx com corpo e header só ASCII.
+        foreach (var (status, body, wwwAuth) in new[] { bad, await TokenAsync(env.Api, "tgc_naoexiste", "x"), await TokenAsync(env.Api, clientId, secret, "keys:manage") })
+        {
+            Assert.InRange((int)status, 400, 499);
+            Assert.All(body!["error_description"]?.GetValue<string>() ?? "", c => Assert.InRange(c, ' ', '~'));
+            Assert.All(wwwAuth, c => Assert.InRange(c, ' ', '~'));
+        }
         var badScope = await TokenAsync(env.Api, clientId, secret, "keys:manage");
         Assert.Equal("invalid_scope", badScope.Body!["error"]!.GetValue<string>());
 
@@ -219,7 +227,7 @@ public sealed class IdentityTests(GoldenFixture env, ITestOutputHelper output)
         return (body["client_id"]!.GetValue<string>(), body["client_secret"]!.GetValue<string>());
     }
 
-    private static async Task<(HttpStatusCode Status, JsonNode? Body)> TokenAsync(HttpClient http, string clientId, string secret, string? scope = null)
+    private static async Task<(HttpStatusCode Status, JsonNode? Body, string WwwAuthenticate)> TokenAsync(HttpClient http, string clientId, string secret, string? scope = null)
     {
         var form = new Dictionary<string, string> { ["grant_type"] = "client_credentials", ["client_id"] = clientId, ["client_secret"] = secret };
         if (scope is not null)
@@ -230,7 +238,7 @@ public sealed class IdentityTests(GoldenFixture env, ITestOutputHelper output)
         using var content = new FormUrlEncodedContent(form);
         using var resp = await http.PostAsync(new Uri("/oauth/token", UriKind.Relative), content);
         var text = await resp.Content.ReadAsStringAsync();
-        return (resp.StatusCode, text.Length == 0 ? null : JsonNode.Parse(text));
+        return (resp.StatusCode, text.Length == 0 ? null : JsonNode.Parse(text), resp.Headers.WwwAuthenticate.ToString());
     }
 
     private static async Task<HttpStatusCode> GetUsageAsync(HttpClient http, string? bearer = null, string? apiKey = null)

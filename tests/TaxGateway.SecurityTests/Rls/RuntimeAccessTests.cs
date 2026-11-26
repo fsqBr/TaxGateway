@@ -110,6 +110,37 @@ public sealed class RuntimeAccessTests(PostgresFixture db)
         Assert.Contains("banco à frente do código", ex.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// D-P27: migration presa atrás de um lock desiste em lock_timeout (sem enfileirar o tráfego da tabela atrás dela),
+    /// tenta de novo e, persistindo, falha sem registrar nada.
+    /// </summary>
+    [Fact]
+    public async Task Migration_gives_up_on_lock_timeout_instead_of_queueing_traffic()
+    {
+        await using var owner = NpgsqlDataSource.Create(db.ConnectionFor("tg_owner"));
+        var embedded = SqlMigrator.LoadEmbedded();
+        var next = embedded.Count + 1;
+        var blocked = embedded.Append(SqlMigrator.Create(next, "teste_lock", "ALTER TABLE plans ADD COLUMN zz_lock_test INT;")).ToList();
+
+        await using var holder = new NpgsqlConnection(db.SuperuserConnection);
+        await holder.OpenAsync();
+        await using var tx = await holder.BeginTransactionAsync();
+        await using (var lockCmd = new NpgsqlCommand("LOCK TABLE plans IN ACCESS SHARE MODE", holder, tx))
+        {
+            await lockCmd.ExecuteNonQueryAsync();
+        }
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var ex = await Assert.ThrowsAsync<PostgresException>(() =>
+            new SqlMigrator(owner, TimeSpan.FromMilliseconds(200), lockRetries: 2).MigrateAsync(blocked));
+        Assert.Equal(PostgresErrorCodes.LockNotAvailable, ex.SqlState);
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(15), $"demorou {sw.Elapsed}");
+        await tx.RollbackAsync();
+
+        await using var check = owner.CreateCommand($"SELECT count(*) FROM migrations.history WHERE version = {next}");
+        Assert.Equal(0L, (long)(await check.ExecuteScalarAsync())!);
+    }
+
     [Fact]
     public void Embedded_migrations_are_sequential_and_crlf_insensitive()
     {

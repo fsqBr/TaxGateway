@@ -114,7 +114,7 @@ public sealed partial class ParamSnapshotService(NpgsqlDataSource db, IConnectio
                       FROM rate_catalog WHERE superseded_at IS NULL
                      ORDER BY tributo, COALESCE(ente_codigo, ''), valid_from
                     """),
-                new("SELECT code, rpm, burst, concurrency, batch_max_docs, batch_max_bytes, queue_priority, bill_schema_errors FROM plans ORDER BY code"),
+                new("SELECT code, rpm, burst, concurrency, batch_max_docs, batch_max_bytes, queue_priority, bill_schema_errors, max_users, included_docs, included_simulations, hard_quota, dfe_enabled FROM plans ORDER BY code"),
                 new("SELECT crt, tp_regime_ibscbs, engines, simples_mode FROM engine_routing ORDER BY crt, tp_regime_ibscbs"),
                 new("SELECT valid_from, default_status FROM credit_rules ORDER BY valid_from"),
             },
@@ -138,9 +138,10 @@ public sealed partial class ParamSnapshotService(NpgsqlDataSource db, IConnectio
         sb.Append("plans\n");
         while (await r.ReadAsync(ct).ConfigureAwait(false))
         {
-            var p = new PlanLimits(r.GetString(0), r.GetInt32(1), r.GetInt32(2), r.GetInt32(3), r.GetInt32(4), r.GetInt64(5), r.GetString(6), r.GetBoolean(7));
+            var p = new PlanLimits(r.GetString(0), r.GetInt32(1), r.GetInt32(2), r.GetInt32(3), r.GetInt32(4), r.GetInt64(5), r.GetString(6), r.GetBoolean(7),
+                r.IsDBNull(8) ? null : r.GetInt32(8), r.GetInt64(9), r.GetInt64(10), r.GetBoolean(11), r.GetBoolean(12));
             plans[p.PlanCode] = p;
-            sb.Append(CultureInfo.InvariantCulture, $"{p.PlanCode}|{p.Rpm}|{p.Burst}|{p.Concurrency}|{p.BatchMaxDocs}|{p.BatchMaxBytes}|{p.QueuePriority}|{p.BillSchemaErrors}\n");
+            sb.Append(CultureInfo.InvariantCulture, $"{p.PlanCode}|{p.Rpm}|{p.Burst}|{p.Concurrency}|{p.BatchMaxDocs}|{p.BatchMaxBytes}|{p.QueuePriority}|{p.BillSchemaErrors}|{p.MaxUsers}|{p.IncludedDocs}|{p.IncludedSimulations}|{p.HardQuota}|{p.DfeEnabled}\n");
         }
 
         await r.NextResultAsync(ct).ConfigureAwait(false);

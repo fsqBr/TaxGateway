@@ -28,67 +28,6 @@ public interface IBillingProvider
     Task<(string Ref, long AmountCents)?> FindAsync(string idempotencyKey, CancellationToken ct);
 }
 
-public sealed class AsaasOptions
-{
-    public const string Section = "Billing:Asaas";
-
-    /// <summary>Produção: https://api.asaas.com/v3 · sandbox: https://api-sandbox.asaas.com/v3.</summary>
-    public Uri BaseUrl { get; set; } = new("https://api-sandbox.asaas.com/v3/");
-    public string ApiKey { get; set; } = "";
-    public string BillingType { get; set; } = "UNDEFINED";   // o cliente escolhe PIX, boleto ou cartão
-}
-
-/// <summary>
-/// Asaas (D-702): a cobrança leva <c>externalReference</c> = chave idempotente (tenant:mês:v{n}). Antes de criar,
-/// busca por essa referência; se já existe, devolve a existente. Um reenvio (falha de rede, worker reiniciado) não duplica.
-/// </summary>
-public sealed class AsaasBillingProvider(HttpClient http, IOptions<AsaasOptions> options) : IBillingProvider
-{
-    public string Name => "ASAAS";
-
-    public async Task<(string Ref, long AmountCents)?> FindAsync(string idempotencyKey, CancellationToken ct)
-    {
-        using var req = Request(HttpMethod.Get, $"payments?externalReference={Uri.EscapeDataString(idempotencyKey)}");
-        using var resp = await http.SendAsync(req, ct).ConfigureAwait(false);
-        resp.EnsureSuccessStatusCode();
-        var body = await resp.Content.ReadFromJsonAsync<JsonObject>(ct).ConfigureAwait(false);
-        var first = body?["data"]?.AsArray().FirstOrDefault(p => p?["deleted"]?.GetValue<bool>() != true);
-        return first is null ? null
-            : (first["id"]!.GetValue<string>(), (long)Math.Round(first["value"]!.GetValue<decimal>() * 100m, MidpointRounding.ToEven));
-    }
-
-    public async Task<string> ChargeAsync(BillingCharge charge, CancellationToken ct)
-    {
-        ArgumentNullException.ThrowIfNull(charge);
-        if (await FindAsync(charge.IdempotencyKey, ct).ConfigureAwait(false) is { } existing)
-        {
-            return existing.Ref;
-        }
-
-        using var req = Request(HttpMethod.Post, "payments");
-        req.Content = JsonContent.Create(new JsonObject
-        {
-            ["customer"] = charge.CustomerRef,
-            ["billingType"] = options.Value.BillingType,
-            ["value"] = charge.AmountCents / 100m,
-            ["dueDate"] = charge.DueDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
-            ["description"] = charge.Description,
-            ["externalReference"] = charge.IdempotencyKey,
-        });
-        using var resp = await http.SendAsync(req, ct).ConfigureAwait(false);
-        resp.EnsureSuccessStatusCode();
-        return (await resp.Content.ReadFromJsonAsync<JsonObject>(ct).ConfigureAwait(false))!["id"]!.GetValue<string>();
-    }
-
-    private HttpRequestMessage Request(HttpMethod m, string path)
-    {
-        var req = new HttpRequestMessage(m, new Uri(options.Value.BaseUrl, path));
-        req.Headers.Add("access_token", options.Value.ApiKey);
-        req.Headers.Add("User-Agent", "taxgateway-billing");
-        return req;
-    }
-}
-
 public sealed record PeriodTotals(Guid Tenant, DateOnly Month, long Docs, long Simulations, int ActiveCnpjs, long AmountCents, string Status, string? ProviderRef);
 
 public sealed record ReconcileLine(Guid Tenant, long LedgerDocs, long PeriodDocs, long LedgerSims, long PeriodSims, long PeriodAmountCents, long? ProviderAmountCents)
@@ -138,8 +77,43 @@ public sealed partial class BillingService(BillingDataSource billing, IBillingPr
         return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
-    /// <summary>Envia ao provedor os períodos fechados ainda não faturados. Reenviar é seguro (chave idempotente).</summary>
+    /// <summary>
+    /// Envia ao provedor os períodos fechados ainda não faturados (D-P07). Exclusão mútua em dois níveis: um advisory
+    /// lock global (só uma réplica fatura por vez) e a transição CLOSED → CHARGING por período ANTES de chamar o
+    /// provedor (quem não vence a transição não cobra). Falha do provedor devolve o período a CLOSED; queda no meio
+    /// deixa CHARGING, reenviado com a mesma chave idempotente pelo <see cref="RecoverChargingAsync"/>.
+    /// </summary>
     public async Task<int> InvoiceAsync(DateOnly month, CancellationToken ct)
+    {
+        await using var lockConn = await Db.OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using (var l = new NpgsqlCommand("SELECT pg_try_advisory_lock(hashtext('taxgateway:billing:invoice'))", lockConn))
+        {
+            if (!(bool)(await l.ExecuteScalarAsync(ct).ConfigureAwait(false))!)
+            {
+                return 0;   // outra réplica (ou o fechamento manual) está faturando
+            }
+        }
+
+        try
+        {
+            return await InvoiceLockedAsync(month, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            await using var u = new NpgsqlCommand("SELECT pg_advisory_unlock(hashtext('taxgateway:billing:invoice'))", lockConn);
+            await u.ExecuteNonQueryAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Períodos presos em CHARGING (queda durante a cobrança) voltam a CLOSED; a chave idempotente evita cobrança dupla.</summary>
+    public async Task<int> RecoverChargingAsync(TimeSpan olderThan, CancellationToken ct)
+    {
+        await using var cmd = Db.CreateCommand("UPDATE billing_periods SET status = 'CLOSED' WHERE status = 'CHARGING' AND charging_since < now() - $1");
+        cmd.Parameters.Add(new() { Value = olderThan });
+        return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+    }
+
+    private async Task<int> InvoiceLockedAsync(DateOnly month, CancellationToken ct)
     {
         var pending = new List<(Guid Tenant, long Amount, string Key, string? Customer)>();
         await using (var cmd = Db.CreateCommand("""
@@ -159,23 +133,40 @@ public sealed partial class BillingService(BillingDataSource billing, IBillingPr
         var invoiced = 0;
         foreach (var p in pending)
         {
-            string reference;
-            if (p.Amount == 0)
-            {
-                reference = "SEM_COBRANCA";
-            }
-            else if (p.Customer is null)
+            if (p.Amount != 0 && p.Customer is null)
             {
                 LogNoCustomer(log, p.Tenant);
                 continue;   // fica CLOSED até o cliente ser cadastrado no provedor
             }
-            else
+
+            await using (var claim = Db.CreateCommand("UPDATE billing_periods SET status = 'CHARGING', charging_since = now() WHERE tenant_id = $1 AND billing_month = $2 AND status = 'CLOSED'"))
             {
-                reference = await provider.ChargeAsync(new BillingCharge(p.Customer, p.Amount,
-                    $"TaxGateway {month:MM/yyyy}", p.Key, month.AddMonths(1).AddDays(9)), ct).ConfigureAwait(false);
+                claim.Parameters.Add(new() { Value = p.Tenant });
+                claim.Parameters.Add(new() { Value = month });
+                if (await claim.ExecuteNonQueryAsync(ct).ConfigureAwait(false) == 0)
+                {
+                    continue;   // outro processo já está cobrando este período
+                }
             }
 
-            await using var upd = Db.CreateCommand("UPDATE billing_periods SET status = 'INVOICED', provider_ref = $3 WHERE tenant_id = $1 AND billing_month = $2 AND status = 'CLOSED'");
+            string reference;
+            try
+            {
+                reference = p.Amount == 0
+                    ? "SEM_COBRANCA"
+                    : await provider.ChargeAsync(new BillingCharge(p.Customer!, p.Amount,
+                        $"TaxGateway {month:MM/yyyy}", p.Key, month.AddMonths(1).AddDays(9)), ct).ConfigureAwait(false);
+            }
+            catch
+            {
+                await using var back = Db.CreateCommand("UPDATE billing_periods SET status = 'CLOSED', charging_since = NULL WHERE tenant_id = $1 AND billing_month = $2 AND status = 'CHARGING'");
+                back.Parameters.Add(new() { Value = p.Tenant });
+                back.Parameters.Add(new() { Value = month });
+                await back.ExecuteNonQueryAsync(CancellationToken.None).ConfigureAwait(false);
+                throw;
+            }
+
+            await using var upd = Db.CreateCommand("UPDATE billing_periods SET status = 'INVOICED', provider_ref = $3 WHERE tenant_id = $1 AND billing_month = $2 AND status = 'CHARGING'");
             upd.Parameters.Add(new() { Value = p.Tenant });
             upd.Parameters.Add(new() { Value = month });
             upd.Parameters.Add(new() { Value = reference });
@@ -320,6 +311,7 @@ public sealed partial class BillingCloseWorker(BillingService billing, BillingDa
             return;   // §10.3: fecha a partir das 03:00 do dia 1 (margem para eventos atrasados do mês anterior)
         }
 
+        await billing.RecoverChargingAsync(TimeSpan.FromMinutes(30), ct).ConfigureAwait(false);
         var current = new DateOnly(local.Year, local.Month, 1);
         var months = new List<DateOnly>();
         await using (var cmd = db.DataSource.CreateCommand("""

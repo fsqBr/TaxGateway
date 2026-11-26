@@ -70,6 +70,7 @@ public sealed partial class ApiExceptionHandler(ILogger<ApiExceptionHandler> log
         var result = exception switch
         {
             ApiProblemException p => ApiProblem.From(p),
+            TaxGateway.Identity.Accounts.AccountException a => ApiProblem.Result(a.Status, a.Code, a.Title, a.Detail),
             EngineCapabilityNotSupportedException c => ApiProblem.Result(422, "ERR_ENGINE_CAPABILITY",
                 "Capacidade não suportada pelo motor", c.Message),
             EngineRejectedException r => ApiProblem.Result(422, "ERR_ENGINE_REJECTED",
@@ -91,9 +92,10 @@ public sealed partial class ApiExceptionHandler(ILogger<ApiExceptionHandler> log
             LogUnhandled(log, exception);
             result = ApiProblem.Result(500, "ERR_INTERNAL", "Erro interno", "Registrado para análise.");
         }
-        else if (exception is EngineUnavailableException)
+        else if (exception is EngineUnavailableException e)
         {
-            httpContext.Response.Headers.RetryAfter = "1";
+            // D-P20: circuito aberto fica 15 s aberto — pedir nova tentativa em 1 s só martelava o motor.
+            httpContext.Response.Headers.RetryAfter = e.InnerException is Polly.CircuitBreaker.BrokenCircuitException ? "15" : "2";
         }
 
         await result.ExecuteAsync(httpContext).ConfigureAwait(false);

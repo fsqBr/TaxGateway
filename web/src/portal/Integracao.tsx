@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react';
-import { Alert, Badge, Card, Confirm, Field, Loading, PageHeader, SecretOnce, StatusBadge, Table, useAction, useLoad } from '../components/ui';
+import { ConfirmButton } from '../components/ConfirmDialog';
+import { Alert, Badge, Card, Field, Loading, PageHeader, SecretOnce, StatusBadge, Table, useAction, useLoad } from '../components/ui';
 import { portal } from '../lib/api';
 import { dateTime } from '../lib/format';
 import type { Me } from './PortalApp';
@@ -89,7 +90,9 @@ export function ApiKeys({ me }: { me?: Me }) {
                 <td>{dateTime(k.ultimo_uso)}</td>
                 <td>{dateTime(k.expira_em)}</td>
                 <td>{k.revogada_em ? <Badge tone="bad">revogada</Badge> : <Badge tone="ok">ativa</Badge>}</td>
-                <td>{!k.revogada_em && !k.atual && <Confirm label="Revogar" onConfirm={() => void revoke(k.id)} />}</td>
+                <td>{!k.revogada_em && !k.atual && <ConfirmButton label="Revogar" title={`Revogar a chave "${k.nome}"?`} confirmLabel="Revogar chave"
+                  impact={`Os sistemas que usam a chave ${k.prefixo}… passam a receber 401 imediatamente, em todas as instâncias. Não dá para desfazer: será preciso criar outra chave.`}
+                  onConfirm={() => void revoke(k.id)} />}</td>
               </tr>
             ))}
           </Table>
@@ -167,7 +170,9 @@ export function Webhooks() {
                       <button className="secondary" onClick={() => void act(async () => setSecret((await portal<{ secret: string }>(`/v1/webhooks/${h.id}/rotate-secret`, { method: 'POST' })).secret), () => undefined)}>
                         Girar segredo
                       </button>
-                      <Confirm label="Desativar" onConfirm={() => void act(() => portal(`/v1/webhooks/${h.id}`, { method: 'DELETE' }), () => void hooks.reload())} />
+                      <ConfirmButton label="Desativar" title="Desativar este webhook?" confirmLabel="Desativar webhook"
+                        impact={`${h.url} deixa de receber eventos agora. Entregas pendentes não serão enviadas.`}
+                        onConfirm={() => void act(() => portal(`/v1/webhooks/${h.id}`, { method: 'DELETE' }), () => void hooks.reload())} />
                     </>
                   )}
                 </td>

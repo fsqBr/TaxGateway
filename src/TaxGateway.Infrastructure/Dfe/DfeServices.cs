@@ -509,6 +509,20 @@ public sealed class CertificateExpiryService(NpgsqlDataSource workerDb, ITenantD
                 ev.Parameters.Add(new() { Value = tenant.Value });
                 ev.Parameters.Add(new() { Value = payload.ToJsonString() });
                 batch.BatchCommands.Add(ev);
+                // Aviso no portal e por e-mail (D-J03): quem não assina webhook também fica sabendo.
+                var aviso = new NpgsqlBatchCommand("""
+                    INSERT INTO tenant_notifications (tenant_id, kind, severity, title, body, link, audience, dedupe_key)
+                    VALUES ($1, 'CERTIFICADO_VENCENDO', CASE WHEN $3 <= 5 THEN 'critico' ELSE 'aviso' END,
+                            'Certificado A1 do CNPJ ' || $2 || ' vence em ' || $3 || ' dia(s)',
+                            'Sem certificado válido a captura de notas de entrada (DF-e) para. Envie o novo A1 em DF-e.',
+                            '/portal/dfe', '{owner,admin,fiscal}', 'cert:' || $2 || ':' || $4)
+                    ON CONFLICT (tenant_id, dedupe_key) DO NOTHING
+                    """);
+                aviso.Parameters.Add(new() { Value = tenant.Value });
+                aviso.Parameters.Add(new() { Value = cnpj });
+                aviso.Parameters.Add(new() { Value = Math.Max(days, 0) });
+                aviso.Parameters.Add(new() { Value = threshold });
+                batch.BatchCommands.Add(aviso);
                 await batch.ExecuteNonQueryAsync(c).ConfigureAwait(false);
                 return 1;
             }, ct).ConfigureAwait(false);

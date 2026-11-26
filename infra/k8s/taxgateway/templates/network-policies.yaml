@@ -1,0 +1,66 @@
+{{- if .Values.networkPolicy.enabled }}
+# Entrada negada por padrão no namespace (D-P29; revisão de segurança B2/B8 e arquitetura 6/7). Cada workload abre só
+# o que precisa: o Ingress controller alcança o nginx público/backoffice (e a API, se ela tiver Ingress próprio); o
+# nginx público alcança a API pública; SÓ o nginx do backoffice alcança a api-admin; o Prometheus, as portas de
+# métricas. Motores: engines-isolation (security-migrator.yaml). As sondas do kubelet não passam por NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  labels: {{- include "tg.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-ingress
+  labels: {{- include "tg.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions: [{ key: app.kubernetes.io/name, operator: In, values: [web, web-backoffice] }]
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace }} } } }]
+      ports: [{ protocol: TCP, port: 8080 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-ingress
+  labels: {{- include "tg.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: api }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: web } }
+        {{- if .Values.api.ingress.enabled }}
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace }} } }
+        {{- end }}
+      ports: [{ protocol: TCP, port: {{ .Values.api.port }} }]
+    - from: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ .Values.prometheus.namespaceLabel }} } } }]
+      ports:
+        - { protocol: TCP, port: {{ .Values.api.metricsPort }} }
+        - { protocol: TCP, port: {{ .Values.engines.regular.mgmtPort }} }
+        - { protocol: TCP, port: {{ .Values.engines.simples.mgmtPort }} }
+{{- if .Values.apiAdmin.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-admin-ingress
+  labels: {{- include "tg.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: api-admin }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ podSelector: { matchLabels: { app.kubernetes.io/name: web-backoffice } } }]
+      ports: [{ protocol: TCP, port: {{ .Values.api.port }} }]
+    - from: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ .Values.prometheus.namespaceLabel }} } } }]
+      ports: [{ protocol: TCP, port: {{ .Values.api.metricsPort }} }]
+{{- end }}
+{{- end }}

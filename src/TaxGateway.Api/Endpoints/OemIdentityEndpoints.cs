@@ -81,7 +81,7 @@ public static class OemEndpoints
             var today = DateOnly.FromDateTime(clock.GetUtcNow().UtcDateTime);
             m = new DateOnly(today.Year, today.Month, 1);
         }
-        else if (!DateOnly.TryParseExact(month + "-01", "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out m))
+        else if (month.Length != 7 || !DateOnly.TryParseExact(month + "-01", "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out m))
         {
             return ApiProblem.Result(400, "ERR_VALIDATION", "month deve ser AAAA-MM");
         }
@@ -134,7 +134,8 @@ public static class IdentityAdminEndpoints
     {
         var body = await JsonNode.ParseAsync(http.Request.Body, cancellationToken: http.RequestAborted);
         var name = body?["nome"]?.GetValue<string>() ?? "cliente";
-        var scopes = body?["scopes"] is JsonArray a ? a.Select(x => x!.GetValue<string>()).Distinct(StringComparer.Ordinal).ToArray() : AllowedScopes;
+        // Sem "scopes": só simular e auditar (D-U09). Escopos sensíveis precisam ser pedidos explicitamente.
+        var scopes = body?["scopes"] is JsonArray a ? a.Select(x => x!.GetValue<string>()).Distinct(StringComparer.Ordinal).ToArray() : [Scopes.SimulacaoWrite, Scopes.AuditoriaWrite];
         var invalid = scopes.Except(AllowedScopes, StringComparer.Ordinal).ToList();
         if (invalid.Count > 0 || scopes.Length == 0)
         {
@@ -181,7 +182,7 @@ public static class IdentityAdminEndpoints
         return Results.Ok(new JsonObject { ["tenant_id"] = id, ["status"] = status });
     }
 
-    private static async Task<IResult> RevokeTokenAsync(HttpContext http, RevocationService rev)
+    private static async Task<IResult> RevokeTokenAsync(HttpContext http, RevocationService rev, AdminRepository repo)
     {
         var body = await JsonNode.ParseAsync(http.Request.Body, cancellationToken: http.RequestAborted);
         if (body?["jti"]?.GetValue<string>() is not { Length: > 0 } jti || body["expira_em"]?.GetValue<DateTimeOffset>() is not { } exp)
@@ -189,7 +190,8 @@ public static class IdentityAdminEndpoints
             return ApiProblem.Result(400, "ERR_VALIDATION", "jti e expira_em são obrigatórios");
         }
 
-        await rev.RevokeJtiAsync(jti, exp);
+        await repo.RevokeTokenAsync(jti, exp, AdminKeyFilter.Get(http).Name, http.RequestAborted);   // fonte da verdade
+        await rev.RevokeJtiAsync(jti, exp);   // propagação imediata
         return Results.NoContent();
     }
 }

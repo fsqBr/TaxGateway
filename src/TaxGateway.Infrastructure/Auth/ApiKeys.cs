@@ -85,11 +85,13 @@ public sealed partial class ApiKeyAuthenticator : IDisposable
     private readonly ApiKeyLookup _lookup;
     private readonly IConnectionMultiplexer _valkey;
     private readonly ILogger<ApiKeyAuthenticator> _log;
+    private readonly CacheSeal _seal;
     private readonly MemoryCache _l1 = new(new MemoryCacheOptions { SizeLimit = 100_000 });
 
-    public ApiKeyAuthenticator(ApiKeyHasher hasher, ApiKeyLookup lookup, IConnectionMultiplexer valkey, ILogger<ApiKeyAuthenticator> log)
+    public ApiKeyAuthenticator(ApiKeyHasher hasher, ApiKeyLookup lookup, IConnectionMultiplexer valkey, CacheSeal seal, ILogger<ApiKeyAuthenticator> log)
     {
         _hasher = hasher;
+        _seal = seal;
         _lookup = lookup;
         _valkey = valkey;
         _log = log;
@@ -156,8 +158,22 @@ public sealed partial class ApiKeyAuthenticator : IDisposable
     {
         try
         {
-            var value = await _valkey.GetDatabase().StringGetAsync($"auth:apikey:{hex}").ConfigureAwait(false);
-            return value.IsNullOrEmpty ? null : CachedIdentityJson.Read(value!);
+            var cacheKey = $"auth:apikey:{hex}";
+            var value = await _valkey.GetDatabase().StringGetAsync(cacheKey).ConfigureAwait(false);
+            if (value.IsNullOrEmpty)
+            {
+                return null;
+            }
+
+            // Selo inválido = entrada adulterada (ou de antes do selo): ignora e vai ao banco (D-P10).
+            if (_seal.OpenString(cacheKey, (byte[])value!) is not { } json)
+            {
+                LogTampered(_log, hex[..8]);
+                TaxGatewayMetrics.CacheTampered.Add(1, new KeyValuePair<string, object?>("cache", "auth"));
+                return null;
+            }
+
+            return CachedIdentityJson.Read(json);
         }
         catch (RedisException ex)
         {
@@ -170,7 +186,8 @@ public sealed partial class ApiKeyAuthenticator : IDisposable
     {
         try
         {
-            await _valkey.GetDatabase().StringSetAsync($"auth:apikey:{hex}", CachedIdentityJson.Write(identity), L2Ttl).ConfigureAwait(false);
+            var cacheKey = $"auth:apikey:{hex}";
+            await _valkey.GetDatabase().StringSetAsync(cacheKey, _seal.Seal(cacheKey, CachedIdentityJson.Write(identity)), L2Ttl).ConfigureAwait(false);
         }
         catch (RedisException ex)
         {
@@ -184,6 +201,9 @@ public sealed partial class ApiKeyAuthenticator : IDisposable
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Valkey indisponível no cache de autenticação; seguindo pelo banco.")]
     private static partial void LogValkeyUnavailable(ILogger logger, Exception ex);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Cache de autenticação com selo inválido para a chave {Prefix}…: descartado (possível adulteração do Valkey).")]
+    private static partial void LogTampered(ILogger logger, string prefix);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Falha ao assinar o canal de revogação de API keys.")]
     private static partial void LogSubscribeFailed(ILogger logger, Exception ex);

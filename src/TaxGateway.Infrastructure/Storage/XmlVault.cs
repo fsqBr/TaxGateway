@@ -160,7 +160,15 @@ public sealed class XmlVault(IAmazonS3 s3, IKeyVault vault, IOptions<StorageOpti
 
     public Task DeleteAsync(string key, CancellationToken ct) => s3.DeleteObjectAsync(options.Value.Bucket, key, ct);
 
-    /// <summary>URL pré-assinada de PUT para upload direto do cliente (lote, modo 2), com tamanho fixo.</summary>
+    /// <summary>Objeto inexistente no S3 (NoSuchKey/404): vira 404 para o cliente, não 500 (D-P12).</summary>
+    public static bool IsNotFound(Exception ex) =>
+        ex is AmazonS3Exception s3ex && (s3ex.StatusCode == System.Net.HttpStatusCode.NotFound || s3ex.ErrorCode is "NoSuchKey" or "NotFound");
+
+    /// <summary>Prefixo dos uploads brutos do modo 2 (D-P24): <c>uploads/{tenant}/{id}.zip</c>, apagados em 24 h.</summary>
+    public const string UploadPrefix = "uploads/";
+
+    /// <summary>URL pré-assinada de PUT para upload direto do cliente (lote, modo 2). O tamanho é limitado na ingestão
+    /// (leitura com teto do plano) e o objeto vence em 24 h (lifecycle + <see cref="UploadJanitor"/>).</summary>
     public string PresignUpload(string key, TimeSpan validity) => s3.GetPreSignedURL(new GetPreSignedUrlRequest
     {
         BucketName = options.Value.Bucket,
@@ -210,6 +218,33 @@ public sealed class XmlVault(IAmazonS3 s3, IKeyVault vault, IOptions<StorageOpti
         }
         catch (AmazonS3Exception ex) when (ex.ErrorCode is "BucketAlreadyOwnedByYou" or "BucketAlreadyExists")
         {
+        }
+
+        // D-P24: uploads do modo 2 vencem em 1 dia no próprio bucket. Nem todo S3 compatível implementa lifecycle
+        // (o SeaweedFS de dev não); o UploadJanitor dos workers cobre esse caso.
+        try
+        {
+            await s3.PutLifecycleConfigurationAsync(new PutLifecycleConfigurationRequest
+            {
+                BucketName = options.Value.Bucket,
+                Configuration = new LifecycleConfiguration
+                {
+                    Rules =
+                    [
+                        new LifecycleRule
+                        {
+                            Id = "uploads-1d",
+                            Status = LifecycleRuleStatus.Enabled,
+                            Filter = new LifecycleFilter { LifecycleFilterPredicate = new LifecyclePrefixPredicate { Prefix = UploadPrefix } },
+                            Expiration = new LifecycleRuleExpiration { Days = 1 },
+                        },
+                    ],
+                },
+            }, ct).ConfigureAwait(false);
+        }
+        catch (AmazonS3Exception)
+        {
+            // sem suporte a lifecycle: o janitor apaga
         }
     }
 

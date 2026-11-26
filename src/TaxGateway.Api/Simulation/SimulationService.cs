@@ -40,14 +40,19 @@ public sealed partial class SimulationService(
     IParamSnapshotProvider snapshots,
     TenantCnpjService cnpjs,
     SimulationWriter writer,
-    IMemoryCache l1,
-    IConnectionMultiplexer valkey,
+    TaxGateway.Infrastructure.Auth.CacheSeal seal,
+    [FromKeyedServices(TaxGateway.Infrastructure.RuntimeServiceCollectionExtensions.ValkeyCacheKey)] IConnectionMultiplexer valkey,   // D-P26
     IOptions<EngineOptions> engineOptions,
     IOptions<SimulationOptions> options,
     TimeProvider clock,
     ILogger<SimulationService> log)
 {
     private static readonly TimeSpan L1Ttl = TimeSpan.FromSeconds(60);
+
+    /// <summary>D-P19: L1 próprio limitado em BYTES (64 MB): uma resposta de 500 itens tem dezenas de KB.</summary>
+    private static readonly MemoryCache L1 = new(new MemoryCacheOptions { SizeLimit = 64L * 1024 * 1024 });
+
+    private static MemoryCacheEntryOptions L1Entry(byte[] json) => new() { AbsoluteExpirationRelativeToNow = L1Ttl, Size = json.Length };
     private static readonly TimeSpan L2Ttl = TimeSpan.FromHours(24);
     private static readonly TimeZoneInfo Brasilia = ResolveBrasilia();
 
@@ -154,6 +159,11 @@ public sealed partial class SimulationService(
             || !DateTimeOffset.TryParse(r.DataFatoGerador, CultureInfo.InvariantCulture, DateTimeStyles.None, out fato))
         {
             Err("data_fato_gerador", "INVALIDO", "Data/hora ISO 8601 com offset obrigatória (ex.: 2027-03-10T10:00:00-03:00).");
+        }
+        else if (fato.Year is < 2026 or > 2100)
+        {
+            // D-J05: IBS/CBS começam em 2026; datas absurdas (ano 1 ou 9999) viravam erro do motor ou overflow.
+            Err("data_fato_gerador", "FORA_DO_INTERVALO", "A reforma vale a partir de 2026; use uma data entre 2026 e 2100.");
         }
 
         if (r.MunicipioIbge is not ((>= 1100000 and <= 5399999) or 9999999))
@@ -554,21 +564,33 @@ public sealed partial class SimulationService(
 
     private async Task<SimulacaoResponse?> FromCacheAsync(string key)
     {
-        if (l1.TryGetValue(key, out byte[]? json))
+        if (L1.TryGetValue(key, out byte[]? json))
         {
+            TaxGateway.Infrastructure.TaxGatewayMetrics.SimulationCache.Add(1, new KeyValuePair<string, object?>("camada", "l1"));
             return JsonSerializer.Deserialize(json, ContractsJsonContext.Default.SimulacaoResponse);
         }
 
         try
         {
-            var v = await valkey.GetDatabase().StringGetAsync($"sim:{engineOptions.Value.Bundle}:{key}").ConfigureAwait(false);
+            var cacheKey = $"sim:{engineOptions.Value.Bundle}:{key}";
+            var v = await valkey.GetDatabase().StringGetAsync(cacheKey).ConfigureAwait(false);
             if (v.IsNullOrEmpty)
             {
+                TaxGateway.Infrastructure.TaxGatewayMetrics.SimulationCache.Add(1, new KeyValuePair<string, object?>("camada", "miss"));
                 return null;
             }
 
-            json = (byte[])v!;
-            l1.Set(key, json, new MemoryCacheEntryOptions { AbsoluteExpirationRelativeToNow = L1Ttl, Size = 1 });
+            // Resultado fiscal compartilhado entre clientes: só vale com o selo (D-P10).
+            json = seal.Open(cacheKey, (byte[])v!);
+            if (json is null)
+            {
+                TaxGateway.Infrastructure.TaxGatewayMetrics.CacheTampered.Add(1, new KeyValuePair<string, object?>("cache", "simulacao"));
+                return null;
+            }
+
+            TaxGateway.Infrastructure.TaxGatewayMetrics.SimulationCache.Add(1, new KeyValuePair<string, object?>("camada", "l2"));
+
+            L1.Set(key, json, L1Entry(json));
             return JsonSerializer.Deserialize(json, ContractsJsonContext.Default.SimulacaoResponse);
         }
         catch (RedisException ex)
@@ -581,10 +603,11 @@ public sealed partial class SimulationService(
     private async Task ToCacheAsync(string key, SimulacaoResponse response)
     {
         var json = JsonSerializer.SerializeToUtf8Bytes(response, ContractsJsonContext.Default.SimulacaoResponse);
-        l1.Set(key, json, new MemoryCacheEntryOptions { AbsoluteExpirationRelativeToNow = L1Ttl, Size = 1 });
+        L1.Set(key, json, L1Entry(json));
         try
         {
-            await valkey.GetDatabase().StringSetAsync($"sim:{engineOptions.Value.Bundle}:{key}", json, L2Ttl, flags: CommandFlags.FireAndForget).ConfigureAwait(false);
+            var cacheKey = $"sim:{engineOptions.Value.Bundle}:{key}";
+            await valkey.GetDatabase().StringSetAsync(cacheKey, seal.Seal(cacheKey, json), L2Ttl, flags: CommandFlags.FireAndForget).ConfigureAwait(false);
         }
         catch (RedisException ex)
         {
@@ -612,22 +635,22 @@ public sealed partial class SimulationService(
         return TimeZoneInfo.CreateCustomTimeZone("BRT", TimeSpan.FromHours(-3), "Brasília", "Brasília");
     }
 
-    [GeneratedRegex(@"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,7})?)?(Z|[+-]\d{2}:\d{2})$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2}(\.[0-9]{1,7})?)?(Z|[+-][0-9]{2}:[0-9]{2})$", RegexOptions.CultureInvariant)]
     private static partial Regex OffsetDateTime();
 
     [GeneratedRegex("^[A-Z]{2}$", RegexOptions.CultureInvariant)]
     private static partial Regex UfFormat();
 
-    [GeneratedRegex(@"^\d{3}$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^[0-9]{3}$", RegexOptions.CultureInvariant)]
     private static partial Regex Cst();
 
-    [GeneratedRegex(@"^\d{6}$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^[0-9]{6}$", RegexOptions.CultureInvariant)]
     private static partial Regex CClassTrib();
 
-    [GeneratedRegex(@"^\d{8}$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^[0-9]{8}$", RegexOptions.CultureInvariant)]
     private static partial Regex Ncm();
 
-    [GeneratedRegex(@"^\d{9}$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^[0-9]{9}$", RegexOptions.CultureInvariant)]
     private static partial Regex Nbs();
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Cache L2 (Valkey) indisponível na simulação.")]

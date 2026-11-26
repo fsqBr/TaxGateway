@@ -198,7 +198,10 @@ public sealed class CampoErroDto
 [JsonSourceGenerationOptions(
     PropertyNamingPolicy = JsonKnownNamingPolicy.SnakeCaseLower,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-    NumberHandling = JsonNumberHandling.Strict)]
+    NumberHandling = JsonNumberHandling.Strict,
+    // D-J05: campo desconhecido é erro, não silêncio — "aliquota_cbs" digitado errado era ignorado e o cálculo saía com
+    // o catálogo, sem o cliente perceber.
+    UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow)]
 [JsonSerializable(typeof(SimulacaoRequest))]
 [JsonSerializable(typeof(SimulacaoResponse))]
 [JsonSerializable(typeof(List<CampoErroDto>))]

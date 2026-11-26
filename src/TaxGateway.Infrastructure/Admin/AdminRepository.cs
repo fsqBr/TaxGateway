@@ -226,6 +226,19 @@ public sealed class AdminRepository(AdminDataSource admin)
         return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false) == 1;
     }
 
+    /// <summary>jti revogado no banco (fonte da verdade, D-P10); o Valkey só propaga mais rápido.</summary>
+    public async Task RevokeTokenAsync(string jti, DateTimeOffset expiresAt, string operatorName, CancellationToken ct)
+    {
+        await using var cmd = Db.CreateCommand("""
+            INSERT INTO revoked_tokens (jti, expires_at, revoked_by) VALUES ($1, $2, $3)
+            ON CONFLICT (jti) DO UPDATE SET expires_at = greatest(revoked_tokens.expires_at, EXCLUDED.expires_at)
+            """);
+        cmd.Parameters.Add(new() { Value = jti });
+        cmd.Parameters.Add(new() { Value = expiresAt });
+        cmd.Parameters.Add(new() { Value = operatorName });
+        await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+    }
+
     public async Task<bool> RevokeOAuthClientAsync(string clientId, CancellationToken ct)
     {
         await using var cmd = Db.CreateCommand("UPDATE oauth_applications SET revoked_at = now() WHERE client_id = $1 AND revoked_at IS NULL");

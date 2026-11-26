@@ -2,14 +2,17 @@
 # Imagens da aplicação (D-404): um build, três alvos (api, workers, migrator). Runtime "chiseled" (sem shell, sem
 # gerenciador de pacotes), usuário não-root, ReadyToRun. Contexto = raiz do repositório:
 #   docker build -f src/Dockerfile --target api -t taxgateway/api:dev .
-ARG SDK_IMAGE=mcr.microsoft.com/dotnet/sdk:10.0
+# D-P30: imagens base por DIGEST (a tag é só leitura humana); o Dependabot abre PR quando a Microsoft publica correções.
+ARG SDK_IMAGE=mcr.microsoft.com/dotnet/sdk:10.0@sha256:8c6edfb26c85153f236d26efebd9ad349aec403583f343f201ee67838b23658d
 # "-extra": inclui tzdata (America/Sao_Paulo vem do sistema) e ICU.
-ARG ASPNET_IMAGE=mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled-extra
-ARG RUNTIME_IMAGE=mcr.microsoft.com/dotnet/runtime:10.0-noble-chiseled-extra
+ARG ASPNET_IMAGE=mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled-extra@sha256:c8dd08a50d8ffd19bd8da72edee05a7ac15b486a5b1869cf46fdb370bf1fbc76
+ARG RUNTIME_IMAGE=mcr.microsoft.com/dotnet/runtime:10.0-noble-chiseled-extra@sha256:b003a2c0159d1791db7c310a90183fa3348d45dec848f665d8bd572ecc701a83
 
 FROM ${SDK_IMAGE} AS build
 WORKDIR /repo
-COPY global.json Directory.Build.props Directory.Packages.props .editorconfig TaxGateway.slnx ./
+ARG BUILD_COMMIT=""
+ENV BUILD_COMMIT=${BUILD_COMMIT}
+COPY global.json Directory.Build.props Directory.Packages.props .editorconfig TaxGateway.slnx VERSION ./
 COPY src/ src/
 COPY infra/xsd-schemas/ infra/xsd-schemas/
 COPY infra/icp-brasil/ infra/icp-brasil/

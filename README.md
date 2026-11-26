@@ -17,22 +17,27 @@ operação multiempresa (OEM), cobrança por uso, segurança e LGPD.
 |:--|:--|
 | **Simulação** | `POST /v1/calculo/simular`: CBS, IBS (UF e município) e IS por item, regime regular e Simples Nacional, com o snapshot de parâmetros usado |
 | **Auditoria** | `POST /v1/auditoria/xml`: recalcula NF-e/NFC-e (saída e entrada), valida schema e assinatura ICP-Brasil e aponta divergências com regra, campo e fundamento legal |
+| **Documentos** | Histórico de tudo o que foi auditado, com filtros, comparação por item (declarado × referência × fundamento) e exportação CSV |
+| **Classificação** | `GET /v1/classificacao`: CST e cClassTrib candidatos por NCM ou NBS nos dados abertos do motor oficial |
 | **Lotes e webhooks** | ZIP com milhares de XMLs processado pelos workers (fair-share entre clientes), relatório CSV e eventos assinados (HMAC-SHA256) |
 | **DF-e** | Certificado A1 em custódia cifrada, distribuição por NSU com as regras anti-bloqueio da SEFAZ, Ciência da Operação e auditoria automática da entrada |
-| **Identidade** | API key e OAuth 2.0 client credentials (OpenIddict), rotação de chave sem 401, revogação e suspensão em < 5 s |
-| **OEM e cobrança** | Multi-CNPJ, ledger de uso, fechamento mensal idempotente com o provedor (Asaas) e reconciliação |
+| **Contas e identidade** | Pessoas com e-mail, senha e MFA obrigatório, papéis e convites de equipe; sistemas com API key ou OAuth 2.0 client credentials (OpenIddict); revogação e suspensão em < 5 s |
+| **Planos e cobrança** | Planos de mercado editáveis no backoffice, franquia e excedente; assinatura, medição e faturas pela Stripe; multi-CNPJ (OEM) e fechamento mensal idempotente |
+| **Avisos** | Franquia, webhook pausado, certificado vencendo e mudança de alíquota no portal e por e-mail |
 | **LGPD** | RLS forçado em todas as tabelas, XML não guardado por padrão, CPF pseudonimizado com chave fora do banco, atendimento a titulares |
-| **Interfaces** | Site, portal do cliente, backoffice (React) e referência interativa da API em `/docs` |
+| **Interfaces** | Site com cadastro e planos, portal do cliente (também no celular), backoffice com operadores e trilha de auditoria (React), central de ajuda em `/ajuda` e referência interativa da API em `/docs` |
+| **Versão** | Versão única (`VERSION`) em `GET /version`, no header `X-TaxGateway-Version` e no portal, com aviso de novidades a partir do [`CHANGELOG.md`](CHANGELOG.md) |
 
 ## Arquitetura
 
 ```
  Cliente / ERP ──HTTPS──► nginx (site + portal)  ──► API .NET 10 ──► motores RFB (sidecar, localhost)
- Operador ──VPN──────────► nginx (backoffice)    ──►      │
+ Operador ──VPN──────────► nginx (backoffice)    ──► API admin (Deployment separado, só o backoffice alcança)
                                                           ├─► PostgreSQL 18 (RLS por tenant, pg_partman)
                                                           ├─► Valkey (cache, rate limit, revogação)
                                                           ├─► S3 (XML cifrado por tenant, opcional)
-                                                          └─► outbox ─► RabbitMQ ─► Workers (lotes, webhooks, DF-e, cobrança)
+                                                          └─► outbox ─► RabbitMQ ─► Workers (lotes, webhooks, DF-e, LCR,
+                                                                                       Stripe, avisos por e-mail)
 ```
 
 * **Stack:** .NET 10 (ASP.NET Core minimal APIs), PostgreSQL 18, Valkey 8, RabbitMQ 4, SeaweedFS/S3, OpenBao (KMS),
@@ -68,8 +73,9 @@ ASPNETCORE_ENVIRONMENT=Development dotnet run --project src/TaxGateway.Api      
 cd web && npm ci && npm run dev                                                  # http://127.0.0.1:5173
 ```
 
-O passo a passo completo (tenant de teste, chaves de dev, lotes, DF-e, carga) está em
-[`docs/desenvolvimento.md`](docs/desenvolvimento.md).
+Crie uma conta em `/cadastro`: o e-mail de confirmação chega no Mailpit do compose (http://127.0.0.1:8025) e o MFA
+pede um app autenticador. O passo a passo completo (primeiro operador do backoffice, Stripe, chaves de dev, lotes,
+DF-e, carga) está em [`docs/desenvolvimento.md`](docs/desenvolvimento.md).
 
 > As chaves, senhas e a CA em `tests/golden/pki` são **apenas de desenvolvimento e teste** — nunca use em produção.
 
@@ -86,7 +92,8 @@ Os testes Golden e de contrato usam Testcontainers e os motores da RFB rodando l
 ## CI/CD
 
 * **CI** (`.github/workflows/ci.yml`) em todo push e PR: build e testes .NET, front, motores da RFB, Helm e golden.
-* **Deploy** (`deploy.yml`): imagens no GHCR → staging → produção com aprovação. Fica desligado até existir cluster:
+* **Deploy** (`deploy.yml`): roda depois do CI verde na `main`; imagens no GHCR → staging → produção com aprovação, sempre
+  pelo mesmo digest (actions fixadas por SHA, imagens base por digest, Dependabot para atualizações). Fica desligado até existir cluster:
   ligue com a variável de repositório `DEPLOY_ENABLED=true` e os segredos `KUBECONFIG_STAGING`/`KUBECONFIG_PRODUCTION`.
 * **Atualização fiscal** (`fiscal-update.yml`): diária; abre PR com o relatório de regressão quando a RFB publica (ou republica) um motor.
 
@@ -96,18 +103,23 @@ Os testes Golden e de contrato usam Testcontainers e os motores da RFB rodando l
 |:--|:--|
 | [`SDD.md`](SDD.md) | Design do produto, arquitetura e roadmap (Fases 0–9) |
 | [`docs/decisoes.md`](docs/decisoes.md) | Registro de decisões (ADR) e pendências de cada fase |
+| [`docs/revisao-multidisciplinar.md`](docs/revisao-multidisciplinar.md) | Revisão por arquitetura, segurança, produto, design e QA, com prioridades |
 | [`docs/desenvolvimento.md`](docs/desenvolvimento.md) | Guia de desenvolvimento e operação local |
 | [`docs/runbooks/`](docs/runbooks/README.md) | Procedimentos de operação e incidentes |
 | [`docs/slo.md`](docs/slo.md) | SLOs, métricas e alertas |
 | [`docs/marca.md`](docs/marca.md) | Identidade visual |
+| [`CHANGELOG.md`](CHANGELOG.md) | Novidades de cada versão (fonte do modal e de `/ajuda/novidades`) |
+| `/ajuda` (no site) | Central de ajuda: passo a passo, exemplos de código, erros e capturas reais |
 | `/docs` (na API) | Referência interativa da API (OpenAPI) |
 
 ## Situação
 
-Fases 0 a 9, Hardening técnico e interfaces web implementados e testados. Dependem de recursos externos ou de
-decisão humana (detalhes em [`docs/decisoes.md`](docs/decisoes.md)): ensaio do canário em cluster, homologação real
-de DF-e (30 dias sem `cStat 656`), sandbox do Asaas, NFS-e nacional, pentest externo, revisão jurídica de RIPD/DPA e
-login de usuários por OIDC.
+Fases 0 a 9, Hardening técnico, interfaces web, central de ajuda e as correções e lacunas da
+[revisão multidisciplinar](docs/revisao-multidisciplinar.md) (P0, contas com MFA, planos e Stripe, plataforma P1 e
+jornadas de produto) implementados e testados. Dependem de recursos externos ou de decisão humana (detalhes em
+[`docs/decisoes.md`](docs/decisoes.md)): conta Stripe real, ensaio do canário em cluster, OIDC do GitHub para o
+cluster e assinatura de imagens, homologação real de DF-e (30 dias sem `cStat 656`), NFS-e nacional, pentest externo e
+revisão jurídica dos Termos, da Política de Privacidade, do RIPD e do DPA.
 
 **Aviso:** indícios de auditoria não constituem parecer tributário.
 

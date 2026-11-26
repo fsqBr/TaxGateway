@@ -22,6 +22,7 @@ public static class ListingEndpoints
     public static RouteGroupBuilder MapAdminListings(this RouteGroupBuilder admin)
     {
         admin.MapGet("/tenants", TenantsAsync).WithMetadata(new RequiredScope(AdminEndpoints.Commercial));
+        admin.MapGet("/tenants/{id:guid}", TenantDetailAsync).WithMetadata(new RequiredScope(AdminEndpoints.Commercial));
         admin.MapGet("/plans", (IParamSnapshotProvider p) => Results.Ok(new JsonObject
         {
             ["planos"] = new JsonArray([.. p.Current.Plans.Values.OrderBy(x => x.PlanCode, StringComparer.Ordinal).Select(x => (JsonNode)new JsonObject
@@ -54,7 +55,7 @@ public static class ListingEndpoints
             ["plano"] = caller.Identity.PlanCode,
             ["situacao"] = caller.Identity.TenantStatus,
             ["auto_provisionar_cnpj"] = caller.Identity.AutoProvisionCnpj,
-            ["credencial"] = caller.Identity.KeyId != Guid.Empty ? "api_key" : "oauth",
+            ["credencial"] = SessionAuthenticator.User(http) is not null ? "sessao" : caller.Identity.KeyId != Guid.Empty ? "api_key" : "oauth",
             ["scopes"] = new JsonArray([.. caller.Identity.Scopes.Select(s => (JsonNode)s)]),
             ["limites"] = new JsonObject { ["rpm"] = caller.Limits.Rpm, ["concorrencia"] = caller.Limits.Concurrency },
         });
@@ -122,8 +123,19 @@ public static class ListingEndpoints
         return Results.Ok(new JsonObject { ["lotes"] = list });
     }
 
-    private static async Task<IResult> TenantsAsync(AdminDataSource admin, string? busca, CancellationToken ct)
+    /// <summary>
+    /// Tenants com busca e paginação (D-J07): <c>limite</c> (1–200, padrão 50) e <c>pagina</c> (a partir de 1). Antes
+    /// vinham os 200 mais recentes sem como chegar ao 201º.
+    /// </summary>
+    private static async Task<IResult> TenantsAsync(AdminDataSource admin, string? busca, int? limite, int? pagina, CancellationToken ct)
     {
+        var limit = Math.Clamp(limite ?? 50, 1, 200);
+        var page = Math.Clamp(pagina ?? 1, 1, 10_000);
+        await using var count = admin.DataSource.CreateCommand("""
+            SELECT count(*) FROM tenants t WHERE $1::text IS NULL OR t.name ILIKE '%' || $1 || '%' OR t.root_cnpj LIKE $1 || '%'
+            """);
+        count.Parameters.Add(new() { Value = (object?)busca ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+        var total = (long)(await count.ExecuteScalarAsync(ct))!;
         await using var cmd = admin.DataSource.CreateCommand("""
             SELECT coalesce(json_agg(x ORDER BY x.criado_em DESC), '[]')::text FROM (
               SELECT t.id AS tenant_id, t.name AS nome, t.root_cnpj AS cnpj_raiz, t.plan_code AS plano, t.status AS situacao,
@@ -133,9 +145,49 @@ public static class ListingEndpoints
                         FROM oauth_applications a WHERE a.tenant_id = t.id) AS clientes_oauth
                 FROM tenants t
                WHERE $1::text IS NULL OR t.name ILIKE '%' || $1 || '%' OR t.root_cnpj LIKE $1 || '%'
-               ORDER BY t.created_at DESC LIMIT 200) x
+               ORDER BY t.created_at DESC, t.id LIMIT $2 OFFSET $3) x
             """);
         cmd.Parameters.Add(new() { Value = (object?)busca ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
-        return Results.Text($$"""{"tenants":{{(string)(await cmd.ExecuteScalarAsync(ct))!}}}""", "application/json");
+        cmd.Parameters.Add(new() { Value = limit });
+        cmd.Parameters.Add(new() { Value = (page - 1) * limit });
+        var json = (string)(await cmd.ExecuteScalarAsync(ct))!;
+        return Results.Text($$"""{"tenants":{{json}},"total":{{total}},"pagina":{{page}},"limite":{{limit}}}""", "application/json");
+    }
+
+    /// <summary>
+    /// Detalhe do cliente para o atendimento (D-J07): assinatura, pessoas com acesso, CNPJs, chaves (sem segredo), consumo
+    /// dos últimos 3 meses e faturas. Tenant e pessoas por leitura direta; o resto por app.admin_tenant_overview (V0018, D-203).
+    /// </summary>
+    private static async Task<IResult> TenantDetailAsync(Guid id, AdminDataSource admin, CancellationToken ct)
+    {
+        await using var cmd = admin.DataSource.CreateCommand("""
+            SELECT json_build_object(
+              'tenant', (SELECT json_build_object('tenant_id', t.id, 'nome', t.name, 'cnpj_raiz', t.root_cnpj, 'plano', t.plan_code,
+                         'situacao', t.status, 'auto_provisionar_cnpj', t.auto_provision_cnpj, 'retencao_xml_dias', t.xml_retention_days,
+                         'criado_em', t.created_at, 'cobranca', json_build_object('provedor', t.billing_provider, 'cliente', t.billing_customer_ref,
+                         'assinatura', t.stripe_subscription_id, 'situacao_assinatura', t.subscription_status, 'fim_do_periodo', t.current_period_end))
+                         FROM tenants t WHERE t.id = $1),
+              'pessoas', (SELECT coalesce(json_agg(json_build_object('nome', u.name, 'email', u.email, 'papel', m.role, 'mfa', u.totp_enabled_at IS NOT NULL,
+                          'situacao', u.status, 'ultimo_acesso', u.last_login_at) ORDER BY m.role, u.email), '[]')
+                          FROM user_memberships m JOIN users u ON u.id = m.user_id WHERE m.tenant_id = $1),
+              -- CNPJs, chaves, consumo e faturas só pela função (D-203: o tg_admin não lê essas tabelas; V0018).
+              'resto', app.admin_tenant_overview($1)
+            )::text
+            """);
+        cmd.Parameters.Add(new() { Value = id });
+        var json = JsonNode.Parse((string)(await cmd.ExecuteScalarAsync(ct))!)!.AsObject();
+        if (json["resto"] is JsonObject resto)
+        {
+            json.Remove("resto");
+            foreach (var (k, v) in resto.ToList())
+            {
+                resto.Remove(k);
+                json[k] = v;
+            }
+        }
+
+        return json["tenant"] is null
+            ? ApiProblem.Result(404, "ERR_NOT_FOUND", "Tenant não encontrado")
+            : Results.Text(json.ToJsonString(), "application/json");
     }
 }

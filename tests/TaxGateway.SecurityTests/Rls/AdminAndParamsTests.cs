@@ -35,6 +35,28 @@ public sealed class AdminAndParamsTests(PostgresFixture db)
         Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, ex.SqlState);
     }
 
+    private static readonly string[] OverviewKeys = ["\"cnpjs\"", "\"api_keys\"", "\"consumo\"", "\"faturas\""];
+
+    /// <summary>
+    /// D-J07/V0018: o backoffice vê CNPJs, chaves, consumo e faturas de UM cliente pela função, com campos fixos e sem
+    /// segredo — sem ganhar leitura das tabelas (o teste acima continua valendo).
+    /// </summary>
+    [Fact]
+    public async Task Admin_sees_tenant_overview_only_through_the_function_without_secrets()
+    {
+        await using var c = await OpenAsync("tg_admin");
+        await using var cmd = new NpgsqlCommand("SELECT app.admin_tenant_overview(@t)::text", c);
+        cmd.Parameters.AddWithValue("t", PostgresFixture.TenantA);
+        var json = (string)(await cmd.ExecuteScalarAsync())!;
+        foreach (var key in OverviewKeys)
+        {
+            Assert.Contains(key, json, StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotContain("hash", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("pfx", json, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public async Task Seed_loads_2026_2027_rates_with_provisional_cbs_and_traceability()
     {

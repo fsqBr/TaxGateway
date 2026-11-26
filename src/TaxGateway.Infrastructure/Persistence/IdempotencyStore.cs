@@ -18,6 +18,12 @@ public sealed class IdempotencyStore(ITenantDb db)
 {
     public static readonly TimeSpan Retention = TimeSpan.FromHours(24);
 
+    /// <summary>
+    /// Lease da reserva (D-P03): se o processo cair no meio, depois disso a MESMA requisição (mesmo hash) retoma a
+    /// chave em vez de receber 409 por 24 h. Folga sobre o pior caso de uma auditoria/lote síncrono.
+    /// </summary>
+    public static readonly TimeSpan ProcessingLease = TimeSpan.FromMinutes(2);
+
     public Task<IdempotencyResult> BeginAsync(TenantId tenant, string key, byte[] requestHash, CancellationToken ct) =>
         db.InTenantAsync(tenant, async (s, c) =>
         {
@@ -28,15 +34,31 @@ public sealed class IdempotencyStore(ITenantDb db)
             }
 
             await using (var reserve = s.CreateCommand("""
-                INSERT INTO idempotency_requests (tenant_id, key, request_hash, expires_at)
-                VALUES ($1, $2, $3, now() + $4) ON CONFLICT (tenant_id, key) DO NOTHING
+                INSERT INTO idempotency_requests (tenant_id, key, request_hash, expires_at, locked_until)
+                VALUES ($1, $2, $3, now() + $4, now() + $5) ON CONFLICT (tenant_id, key) DO NOTHING
                 """))
             {
                 reserve.Parameters.Add(new() { Value = tenant.Value });
                 reserve.Parameters.Add(new() { Value = key });
                 reserve.Parameters.Add(new() { Value = requestHash });
                 reserve.Parameters.Add(new() { Value = Retention });
+                reserve.Parameters.Add(new() { Value = ProcessingLease });
                 if (await reserve.ExecuteNonQueryAsync(c).ConfigureAwait(false) == 1)
+                {
+                    return new IdempotencyResult(IdempotencyState.New);
+                }
+            }
+
+            // Reserva órfã (o processo caiu antes de concluir) com o mesmo conteúdo: retoma.
+            await using (var takeover = s.CreateCommand("""
+                UPDATE idempotency_requests SET locked_until = now() + $3
+                 WHERE key = $1 AND request_hash = $2 AND status_code IS NULL AND locked_until < now()
+                """))
+            {
+                takeover.Parameters.Add(new() { Value = key });
+                takeover.Parameters.Add(new() { Value = requestHash });
+                takeover.Parameters.Add(new() { Value = ProcessingLease });
+                if (await takeover.ExecuteNonQueryAsync(c).ConfigureAwait(false) == 1)
                 {
                     return new IdempotencyResult(IdempotencyState.New);
                 }

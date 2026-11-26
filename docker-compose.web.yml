@@ -9,7 +9,7 @@ services:
       Http__TrustedProxyNetworks__0: 172.16.0.0/12
 
   web:
-    build: { context: ./web, target: public }
+    build: { context: ., dockerfile: web/Dockerfile, target: public }
     image: taxgateway/web:dev
     read_only: true
     tmpfs: ["/tmp", "/etc/nginx/conf.d:uid=101,gid=101"]
@@ -20,7 +20,7 @@ services:
     depends_on: [api]
 
   web-backoffice:
-    build: { context: ./web, target: backoffice }
+    build: { context: ., dockerfile: web/Dockerfile, target: backoffice }
     image: taxgateway/web-backoffice:dev
     read_only: true
     tmpfs: ["/tmp", "/etc/nginx/conf.d:uid=101,gid=101"]

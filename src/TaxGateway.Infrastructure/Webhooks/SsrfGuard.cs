@@ -39,7 +39,17 @@ public static class SsrfGuard
     /// <summary>Resolve o host e falha se QUALQUER endereço for interno (não basta o primeiro).</summary>
     public static async Task<IPAddress[]> ResolveAllowedAsync(string host, CancellationToken ct)
     {
-        var addrs = IPAddress.TryParse(host.Trim('[', ']'), out var ip) ? [ip] : await Dns.GetHostAddressesAsync(host, ct).ConfigureAwait(false);
+        IPAddress[] addrs;
+        try
+        {
+            addrs = IPAddress.TryParse(host.Trim('[', ']'), out var ip) ? [ip] : await Dns.GetHostAddressesAsync(host, ct).ConfigureAwait(false);
+        }
+        catch (SocketException)
+        {
+            // Host que não resolve: URL recusada (422), não erro interno (D-W13: achado ao gerar as capturas).
+            throw new WebhookUrlRejectedException($"Host {host} não foi encontrado no DNS.");
+        }
+
         if (addrs.Length == 0)
         {
             throw new WebhookUrlRejectedException($"Host {host} sem endereço.");
@@ -72,6 +82,11 @@ public static class SsrfGuard
             var b6 = ip.GetAddressBytes();
             return ip.IsIPv6LinkLocal || ip.IsIPv6SiteLocal || ip.IsIPv6Multicast
                 || (b6[0] & 0xFE) == 0xFC                                  // fc00::/7 (ULA)
+                                                                           // D-P15: prefixos que embutem um IPv4 (o roteador traduz para dentro da rede) ou não são roteáveis.
+                || (b6[0] == 0x00 && b6[1] == 0x64 && b6[2] == 0xff && b6[3] == 0x9b)   // 64:ff9b::/96 e 64:ff9b:1::/48 (NAT64)
+                || (b6[0] == 0x20 && b6[1] == 0x02)                                     // 2002::/16 (6to4)
+                || (b6[0] == 0x20 && b6[1] == 0x01 && b6[2] == 0x00 && b6[3] == 0x00)   // 2001::/32 (Teredo)
+                || (b6[0] == 0x01 && b6[1] == 0x00 && b6.Skip(2).Take(6).All(x => x == 0))   // 100::/64 (descarte)
                 || (b6[0] == 0x20 && b6[1] == 0x01 && b6[2] == 0x0d && b6[3] == 0xb8)   // 2001:db8::/32 (documentação)
                 || (b6[0] == 0x00 && b6.Take(12).All(x => x == 0));          // ::/96 (IPv4-compatível)
         }
@@ -86,6 +101,9 @@ public static class SsrfGuard
             || (b[0] == 192 && b[1] == 0 && b[2] == 0)     // 192.0.0/24
             || (b[0] == 192 && b[1] == 168)                // 192.168/16
             || (b[0] == 198 && (b[1] == 18 || b[1] == 19)) // 198.18/15 (benchmark)
+            || (b[0] == 192 && b[1] == 0 && b[2] == 2)     // 192.0.2/24 (TEST-NET-1, documentação)
+            || (b[0] == 198 && b[1] == 51 && b[2] == 100)  // 198.51.100/24 (TEST-NET-2)
+            || (b[0] == 203 && b[1] == 0 && b[2] == 113)   // 203.0.113/24 (TEST-NET-3)
             || b[0] >= 224;                                // multicast e reservados
     }
 

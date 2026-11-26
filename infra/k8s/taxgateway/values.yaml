@@ -3,12 +3,23 @@ image:
   registry: ghcr.io/ORG/taxgateway
   tag: "0.4.0"
   pullPolicy: IfNotPresent
+  # Digests por imagem (api, workers, migrator, web, web-backoffice), preenchidos pelo deploy (D-P30): staging e
+  # produção recebem exatamente o artefato testado. Vazio = usa a tag.
+  digests: {}
 
 # Bundle fiscal: tags vindas de infra/rfb/versions.json. Imagens antigas ficam retidas >= 6 anos (§2.3 passo 7).
 engines:
   bundle: "2026.11.2"
   regular: { image: rtc-regular, tag: "1.7.2", port: 8080, mgmtPort: 9101 }
-  simples: { image: rtc-simples, tag: "1.0.2", port: 8082, mgmtPort: 9103 }
+  simples:
+    image: rtc-simples
+    tag: "1.0.2"
+    port: 8082
+    mgmtPort: 9103
+    # Motor do Simples é menor que o regular (sem o banco grande); sidecar da API desde D-P01.
+    resources:
+      requests: { cpu: 250m, memory: 768Mi }
+      limits: { cpu: "1", memory: 1Gi }
   resources:
     requests: { cpu: "1", memory: 1536Mi }
     limits: { cpu: "2", memory: 2Gi }
@@ -21,6 +32,15 @@ api:
   # Redes que podem enviar X-Forwarded-For/Proto (ingress e nginx do web), D-W06.
   trustedProxyNetworks: ["10.0.0.0/8"]
   metricsPort: 9464           # /metrics só nesta porta (D-H01); o Ingress publica apenas a porta http
+  # Desligamento (D-P25): preStop segura o SIGTERM até o endpoint sair dos balanceadores; o processo drena por até 30 s.
+  preStopSeconds: 10
+  terminationGracePeriodSeconds: 45
+  # Saídas externas da API além da VPC (D-P29): Stripe (checkout/portal) e SMTP de submissão. Bloco por IP porque
+  # NetworkPolicy não filtra por nome; com Cilium/Calico prefira política por FQDN (api.stripe.com, host SMTP).
+  externalEgress:
+    - cidr: 0.0.0.0/0
+      except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10]
+      ports: [443, 587]
   resources:
     requests: { cpu: 500m, memory: 512Mi }
     limits: { cpu: "2", memory: 1Gi }
@@ -31,11 +51,19 @@ api:
     pauseMinutes: 30            # 5% por 30 min (§2.3 passo 6)
     maxErrorRate: "0.01"
     maxP95Seconds: "0.040"
+    minRps: "0.5"              # volume mínimo no canário para a análise concluir (senão: inconclusivo → pausa)
+  # Ingress próprio da API (opcional): com ele o canário usa traffic routing do nginx e o peso é exato (D-P02).
+  ingress:
+    enabled: false
+    host: api.exemplo.com.br
+    tlsSecret: api-tls
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-body-size: 110m
 
 # Site/portal (público) e backoffice (interno) — D-W03/D-W05. O backoffice só deve ser publicado em host interno
 # (VPN ou allowlist de IPs no Ingress); a imagem pública nem encaminha /admin.
 web:
-  apiUpstream: api:80
+  apiUpstream: api-all:80      # todos os pods (estáveis + canário), D-P02
   ingressClassName: nginx
   resources:
     requests: { cpu: 50m, memory: 64Mi }
@@ -52,12 +80,26 @@ web:
   backoffice:
     enabled: true
     replicas: 1
+    apiUpstream: api-admin:80    # só a api-admin tem as rotas /admin/v1 e o login de operador (D-P29)
     ingress:
       enabled: false
       host: backoffice.interno.exemplo.com.br
       tlsSecret: backoffice-tls
       annotations:
         nginx.ingress.kubernetes.io/whitelist-source-range: 10.0.0.0/8   # ajuste para a VPN/escritório
+
+# Plano administrativo (D-P29): Deployment próprio, alcançável só pelo nginx do backoffice.
+apiAdmin:
+  enabled: true
+  replicas: 2
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: "1", memory: 512Mi }
+
+# Entrada negada por padrão no namespace (D-P29). ingressNamespace = namespace do Ingress controller.
+networkPolicy:
+  enabled: true
+  ingressNamespace: ingress-nginx
 
 batchEngines:
   replicas: 2
@@ -67,7 +109,9 @@ workers:
   # DF-e (Fase 9, D-902): sem configuração os workers usam a SEFAZ de HOMOLOGAÇÃO. Produção exige, no Secret:
   #   Dfe__Ambiente=1, Dfe__DistUrl=https://www1.nfe.fazenda.gov.br/NFeDistribuicaoDFe/NFeDistribuicaoDFe.asmx,
   #   Dfe__EventoUrl=https://www.nfe.fazenda.gov.br/NFeRecepcaoEvento4/NFeRecepcaoEvento4.asmx
-  # Os workers precisam de saída HTTPS para a SEFAZ e para os webhooks dos clientes (sem NetworkPolicy de egress).
+  # Os workers precisam de saída HTTPS para a SEFAZ, a Stripe, as LCRs da ICP-Brasil (D-P23) e os webhooks dos
+  # clientes (destino arbitrário; a proteção é o SsrfGuard na aplicação), então não têm NetworkPolicy de egress.
+  healthPort: 8081            # sonda /health/live (D-P25)
   resources:
     requests: { cpu: 250m, memory: 256Mi }
     limits: { cpu: "1", memory: 512Mi }
@@ -85,10 +129,24 @@ monitoring:
     simularP99Seconds: 0.100
     auditoriaP95Seconds: 0.150
 
-# Segredos (connection strings, pepper, KMS) vêm de um Secret externo (ExternalSecrets/secret manager).
+# Segredos (connection strings, pepper, KMS) vêm de Secrets externos (ExternalSecrets/secret manager), UM POR
+# WORKLOAD (D-P29) — o comprometimento de um pod não entrega as credenciais dos outros:
+#   api       -> ConnectionStrings__App (tg_app), Valkey, Storage, OpenBao, pepper, Identity__*, Stripe__SecretKey,
+#                Stripe__WebhookSecret, Email__*. SEM ConnectionStrings__Admin/Billing.
+#   apiAdmin  -> o mesmo da api + ConnectionStrings__Admin (tg_admin) e ConnectionStrings__Billing (tg_billing).
+#   workers   -> ConnectionStrings__Worker (tg_worker), Relay (tg_relay), Billing, Valkey, Storage, OpenBao, Stripe, Dfe__*.
+#   migrator  -> TG_OWNER_CONNECTION (tg_owner); só o Job de migrations o monta.
+# Pool de conexões (D-P22): teto padrão por fonte (App 30, Worker 20, Admin/Billing/Relay 5); sobrescreva com
+# "Maximum Pool Size=N" na connection string. Orçamento: (api.hpa.maxReplicas × 30) + (apiAdmin × 40) + (workers × 30)
+# precisa caber no PgBouncer/max_connections — com HPA 30, use PgBouncer em modo transaction.
+# Valkey (D-P26): ConnectionStrings__ValkeyCache opcional para o cache de simulação (allkeys-lru), separado do Valkey
+# principal (estado de segurança e rate limit; volatile-lru ou noeviction).
 # Fase 8 (D-804): o mesmo Secret traz as chaves de assinatura do OAuth, iguais em todos os pods:
 #   Identity__SigningKeys__0__Kid / __Pem  -> chave que ASSINA (a mais nova)
 #   Identity__SigningKeys__1__Kid / __Pem  -> chave anterior, só valida até o último token dela expirar (15 min)
 # Sem chave configurada a API não sobe (chave efêmera só em dev).
-existingSecret: taxgateway-runtime
-migratorSecret: taxgateway-migrator
+secrets:
+  api: taxgateway-api
+  apiAdmin: taxgateway-api-admin
+  workers: taxgateway-workers
+  migrator: taxgateway-migrator

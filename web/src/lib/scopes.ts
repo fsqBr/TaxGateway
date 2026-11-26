@@ -2,6 +2,7 @@
 export const ALL_SCOPES: { id: string; label: string }[] = [
   { id: 'simulacao:write', label: 'Simular' },
   { id: 'auditoria:write', label: 'Auditar XML e lotes' },
+  { id: 'auditoria:read', label: 'Consultar e exportar documentos auditados' },
   { id: 'usage:read', label: 'Ler consumo' },
   { id: 'keys:manage', label: 'Gerenciar API keys' },
   { id: 'webhooks:manage', label: 'Gerenciar webhooks' },

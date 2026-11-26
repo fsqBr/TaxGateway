@@ -51,6 +51,16 @@ public sealed class GoldenFixture : IAsyncLifetime
     public HttpClient Api { get; private set; } = null!;
     public string ApiKey { get; private set; } = "";
     public string AppConnection { get; private set; } = "";
+
+    public string ValkeyConnection => _valkey!.GetConnectionString();
+
+    public const string StripeWebhookSecret = "whsec_golden_stripe_teste";
+
+    /// <summary>E-mails enviados pela API (cadastro, senha, convites), capturados em memória.</summary>
+    public TaxGateway.Identity.Accounts.CapturingEmailSender Emails { get; } = new();
+
+    /// <summary>Cliente com cookies próprios (sessão de pessoa), isolado dos outros testes.</summary>
+    public HttpClient NewBrowser() => _factory!.CreateClient(new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactoryClientOptions { HandleCookies = true });
     public string SuperuserConnection => _pg!.GetConnectionString();
 
     /// <summary>Tenant sem retenção de XML (zero_retention).</summary>
@@ -142,6 +152,13 @@ public sealed class GoldenFixture : IAsyncLifetime
             ["Webhooks:TestTrustedThumbprint"] = WebhookTls.Thumbprint,
             ["Messaging:RabbitUri"] = _rabbit.GetConnectionString(),
             ["Identity:AllowHttp"] = "true",
+            // Contas (D-U01): TestServer é http; e-mails capturados em memória; sem limite por IP (cada teste usa o mesmo "IP").
+            ["Accounts:CookieSecure"] = "false",
+            ["Stripe:WebhookSecret"] = StripeWebhookSecret,
+            ["Accounts:RequestsPerMinutePerIp"] = "100000",
+            ["Identity:TokenRequestsPerMinutePerIp"] = "100000",
+            ["Accounts:PublicBaseUrl"] = "http://golden.test",
+            ["Accounts:BackofficeBaseUrl"] = "http://backoffice.golden.test",
             // Chave de assinatura fixa e comum a todas as instâncias (como em produção); a efêmera é por processo.
             ["Identity:SigningKeys:0:Kid"] = "golden",
             ["Identity:SigningKeys:0:Pem"] = SigningPem,
@@ -156,7 +173,11 @@ public sealed class GoldenFixture : IAsyncLifetime
                 b.UseSetting(k, v);
             }
 
-            b.ConfigureTestServices(s => s.AddSingleton<TimeProvider>(Clock));
+            b.ConfigureTestServices(s =>
+            {
+                s.AddSingleton<TimeProvider>(Clock);
+                s.AddSingleton<TaxGateway.Identity.Accounts.IEmailSender>(Emails);
+            });
         });
         Api = _factory.CreateClient();
 
@@ -179,7 +200,7 @@ public sealed class GoldenFixture : IAsyncLifetime
             ["ConnectionStrings:Worker"] = For("tg_worker"),
             ["ConnectionStrings:Relay"] = For("tg_relay"),
         };
-        var workerBuilder = TaxGateway.Workers.WorkerHost.CreateBuilder([], workerSettings);
+        var workerBuilder = TaxGateway.Workers.WorkerHost.CreateBuilder(["--environment", "Testing"], workerSettings);   // fora de Production: trava D-P13
         // DF-e com o relógio do fixture (bloqueio de 1 h, teto de 20/h, vencimento do A1). O resto dos workers segue no
         // relógio real: a assinatura dos webhooks é conferida contra a hora real nos testes de pipeline.
         workerBuilder.Services.AddSingleton(sp => ActivatorUtilities.CreateInstance<TaxGateway.Infrastructure.Dfe.DfeSyncService>(sp, (TimeProvider)Clock));
@@ -272,6 +293,8 @@ public sealed class GoldenFixture : IAsyncLifetime
         resp.EnsureSuccessStatusCode();
         return (await resp.Content.ReadFromJsonAsync<JsonObject>())!["api_key"]!.GetValue<string>();
     }
+
+    public string ConnectionFor(string role) => For(role);
 
     private string For(string role) =>
         new NpgsqlConnectionStringBuilder(_pg!.GetConnectionString()) { Username = role, Password = "dev-only" }.ConnectionString;

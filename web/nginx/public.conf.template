@@ -15,6 +15,8 @@ server {
   location /v1/ { include /etc/nginx/conf.d/proxy.inc; }
   location /oauth/ { include /etc/nginx/conf.d/proxy.inc; }
   location /.well-known/ { include /etc/nginx/conf.d/proxy.inc; }
+  location = /version { include /etc/nginx/conf.d/proxy.inc; }   # versão da API (D-W11)
+  location = /webhooks/stripe { include /etc/nginx/conf.d/proxy.inc; }   # eventos da Stripe (assinatura conferida na API, D-C04)
   location /openapi/ { include /etc/nginx/conf.d/proxy.inc; }
   location /docs { include /etc/nginx/conf.d/proxy.inc; }   # Scalar (CSP própria da API, carrega o script do CDN)
   location /admin/ { return 404; }

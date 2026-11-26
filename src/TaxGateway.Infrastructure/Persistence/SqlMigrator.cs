@@ -14,8 +14,14 @@ public sealed record SqlMigration(int Version, string Name, string Sql, byte[] C
 /// Migrator de SQL puro (decisão D-101): arquivos versionados, um por transação, checksum verificado,
 /// advisory lock contra execução concorrente. Executado como <c>tg_owner</c> (só no CI/CD).
 /// </summary>
-public sealed partial class SqlMigrator(NpgsqlDataSource ownerDataSource)
+public sealed partial class SqlMigrator(NpgsqlDataSource ownerDataSource, TimeSpan? lockTimeout = null, int lockRetries = 8)
 {
+    /// <summary>
+    /// D-P27 (revisão de arquitetura 19): cada migration roda com <c>lock_timeout</c> (padrão 5 s). Um ALTER TABLE
+    /// esperando lock atrás de uma transação longa enfileirava TODO o tráfego da tabela atrás dele (indisponibilidade
+    /// total); agora desiste rápido, desfaz e tenta de novo com espera crescente.
+    /// </summary>
+    private readonly TimeSpan _lockTimeout = lockTimeout ?? TimeSpan.FromSeconds(5);
     // "TGMIGR" em ASCII: chave fixa do advisory lock do migrator.
     private const long AdvisoryLockKey = 0x5447_4D49_4752;
 
@@ -96,17 +102,32 @@ public sealed partial class SqlMigrator(NpgsqlDataSource ownerDataSource)
             var done = new List<int>();
             foreach (var m in migrations.Where(m => !applied.ContainsKey(m.Version)))
             {
-                await using var tx = await conn.BeginTransactionAsync(ct).ConfigureAwait(false);
-                await ExecAsync(conn, tx, m.Sql, ct).ConfigureAwait(false);
-                await using (var cmd = new NpgsqlCommand("INSERT INTO migrations.history (version, name, checksum) VALUES ($1, $2, $3)", conn, tx))
+                for (var attempt = 1; ; attempt++)
                 {
-                    cmd.Parameters.Add(new() { Value = m.Version });
-                    cmd.Parameters.Add(new() { Value = m.Name });
-                    cmd.Parameters.Add(new() { Value = m.Checksum });
-                    await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                    await using var tx = await conn.BeginTransactionAsync(ct).ConfigureAwait(false);
+                    try
+                    {
+                        var ms = (int)_lockTimeout.TotalMilliseconds;
+                        await ExecAsync(conn, tx, $"SET LOCAL lock_timeout = {ms}", ct).ConfigureAwait(false);
+                        await ExecAsync(conn, tx, m.Sql, ct).ConfigureAwait(false);
+                        await using (var cmd = new NpgsqlCommand("INSERT INTO migrations.history (version, name, checksum) VALUES ($1, $2, $3)", conn, tx))
+                        {
+                            cmd.Parameters.Add(new() { Value = m.Version });
+                            cmd.Parameters.Add(new() { Value = m.Name });
+                            cmd.Parameters.Add(new() { Value = m.Checksum });
+                            await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                        }
+
+                        await tx.CommitAsync(ct).ConfigureAwait(false);
+                        break;
+                    }
+                    catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable && attempt < lockRetries)
+                    {
+                        await tx.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+                        await Task.Delay(TimeSpan.FromSeconds(Math.Min(30, 1 << attempt)), ct).ConfigureAwait(false);
+                    }
                 }
 
-                await tx.CommitAsync(ct).ConfigureAwait(false);
                 done.Add(m.Version);
             }
 

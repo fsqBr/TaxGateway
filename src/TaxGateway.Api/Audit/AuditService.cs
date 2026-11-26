@@ -95,14 +95,25 @@ public sealed partial class AuditService(
         caller.EnsureOnBehalfOf(sujeito);
         if (!await cnpjs.EnsureAllowedAsync(tenant, sujeito, caller.Identity.AutoProvisionCnpj, ct).ConfigureAwait(false))
         {
-            throw new ApiProblemException(403, "ERR_CNPJ_NOT_PROVISIONED", $"CNPJ {(req.Direction == "INBOUND" ? "destinatário" : "emitente")} não cadastrado para este tenant");
+            // D-J06: o detalhe traz o CNPJ — o portal oferece "Cadastrar este CNPJ" sem o usuário ter de abrir o XML.
+            throw new ApiProblemException(403, "ERR_CNPJ_NOT_PROVISIONED", $"CNPJ {(req.Direction == "INBOUND" ? "destinatário" : "emitente")} não cadastrado para este tenant",
+                $"CNPJ {sujeito}: cadastre-o em CNPJs (POST /v1/oem/cnpjs) e envie de novo.");
         }
 
         var existing = await repository.FindLatestAsync(tenant, req.Direction, d.ChaveAcesso, ct).ConfigureAwait(false);
-        if (existing is not null && !req.Reprocess)
+        var xmlSha256 = SHA256.HashData(req.Xml);
+        // Replay por chave de acesso (D-310) só quando o CONTEÚDO é o mesmo (D-P04): um XML com a mesma chave e outro
+        // conteúdo (corrigido antes da transmissão, ou adulterado) é auditado de novo em vez de herdar o resultado.
+        var contentChanged = existing is not null && !CryptographicOperations.FixedTimeEquals(existing.XmlSha256, xmlSha256);
+        if (existing is not null && !req.Reprocess && !contentChanged)
         {
             return AsReplay(existing.ResponseJson);
         }
+
+        // Reprocessamento gratuito só de documento JÁ auditado com o mesmo conteúdo (D-P04): antes, reprocess=true num
+        // XML inédito auditava sem cobrar.
+        var freeReprocess = req.Reprocess && existing is not null && !contentChanged;
+        var updatesExisting = existing is not null;
 
         var snapshot = snapshots.Current;
         var findings = new List<Finding>();
@@ -111,6 +122,12 @@ public sealed partial class AuditService(
         AuditOutcome outcome;
 
         var schemaErrors = XmlSecurityCache.Nfe.Validate(parsed.Nfe);
+        if (req.SignatureOptional && !HasSignature(parsed.Nfe))
+        {
+            // assinatura=opcional (D-P11): o XSD da NF-e exige ds:Signature, então a ausência aparecia como SCHEMA_ERROR
+            // (cobrado) antes de chegar à checagem de assinatura. Sem assinatura no modo opcional, só esse erro é ignorado.
+            schemaErrors = schemaErrors.Where(e => !e.Contains("xmldsig#", StringComparison.Ordinal)).ToList();
+        }
         if (schemaErrors.Count > 0)
         {
             outcome = Fixed(AuditStatus.SchemaError, d, Rule(RuleCatalog.R001, "NFe", string.Join(" | ", schemaErrors.Take(5))));
@@ -143,10 +160,20 @@ public sealed partial class AuditService(
             }
         }
 
+        if (contentChanged)
+        {
+            avisos.Add(new AvisoDto { Codigo = "CONTEUDO_ALTERADO", Mensagem = "Esta chave de acesso já foi auditada com outro conteúdo de XML; o documento foi auditado de novo." });
+        }
+
+        if (req.Reprocess && existing is null)
+        {
+            avisos.Add(new AvisoDto { Codigo = "REPROCESSAMENTO_SEM_AUDITORIA_ANTERIOR", Mensagem = "reprocess=true ignorado: não há auditoria anterior desta chave; auditado (e cobrado) como novo." });
+        }
+
         findings.AddRange(outcome.Findings);
         var status = outcome.Status;
         // Cobrança (SDD §10.1): SCHEMA_ERROR/ASSINATURA_INVALIDA cobram (processamento ocorreu); INDETERMINADO e reprocessamento não.
-        var billable = !req.Reprocess && status != AuditStatus.Indeterminado
+        var billable = !freeReprocess && status != AuditStatus.Indeterminado
             && (caller.Limits.BillSchemaErrors || status is not (AuditStatus.SchemaError or AuditStatus.AssinaturaInvalida));   // §10.1 por plano (D-703)
 
         var settings = await tenantSettings.GetAsync(tenant, ct).ConfigureAwait(false);
@@ -169,7 +196,7 @@ public sealed partial class AuditService(
             ParamSnapshotId = snapshot.Id,
             RegrasVersao = RuleCatalog.RulesVersion,
             IsBillable = billable,
-            Reprocessamento = req.Reprocess,
+            Reprocessamento = updatesExisting,
             XmlArmazenado = storageKey is not null,
             ResumoFinanceiro = new ResumoFinanceiroDto
             {
@@ -191,7 +218,7 @@ public sealed partial class AuditService(
             "REGULAR", response.RfbEngineVersion!.Bundle, RuleCatalog.RulesVersion, snapshot.Id, response.Status,
             DeclaredJson(d), $$"""{"resposta": {{System.Text.Encoding.UTF8.GetString(json)}}}""", outcome.Diferenca,
             JsonSerializer.Serialize(response.Ocorrencias, AuditoriaJsonContext.Default.ListOcorrenciaDto),
-            storageKey, SHA256.HashData(req.Xml), billable, req.Reprocess, outcome.CreditoPotencial ?? 0, outcome.CreditoStatus);
+            storageKey, xmlSha256, billable, updatesExisting, outcome.CreditoPotencial ?? 0, outcome.CreditoStatus);
 
         if (await repository.SaveAsync(tenant, record, ct).ConfigureAwait(false) == SaveResult.Replay)
         {
@@ -384,4 +411,7 @@ public sealed partial class AuditService(
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Auditoria concorrente da chave {Chave}: devolvendo a gravada primeiro.")]
     private static partial void LogRaceReplay(ILogger logger, string chave);
+
+    private static bool HasSignature(System.Xml.XmlElement nfe) =>
+        nfe.GetElementsByTagName("Signature", "http://www.w3.org/2000/09/xmldsig#").Count > 0;
 }
