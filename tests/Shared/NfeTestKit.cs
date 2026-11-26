@@ -18,7 +18,23 @@ public sealed class TestPki
     public required X509Certificate2 Leaf { get; init; }
     public required string RootPemPath { get; init; }
 
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, object> DirLocks = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Carrega (ou cria) a PKI de teste da pasta. Exclusivo por pasta e com escrita atômica (D-Q11): várias classes de
+    /// teste rodam em paralelo na mesma pasta temporária, e sem isso uma podia gravar o .crt de uma raiz e outra o .key
+    /// de outra raiz ("certificate signature failure" intermitente no CI).
+    /// </summary>
     public static TestPki LoadOrCreate(string dir, string cnpj = "11222333000181")
+    {
+        var full = Path.GetFullPath(dir);
+        lock (DirLocks.GetOrAdd(full, _ => new object()))
+        {
+            return LoadOrCreateUnsafe(full, cnpj);
+        }
+    }
+
+    private static TestPki LoadOrCreateUnsafe(string dir, string cnpj)
     {
         Directory.CreateDirectory(dir);
         var rootPem = Path.Combine(dir, "test-root.crt");
@@ -32,15 +48,15 @@ public sealed class TestPki
             req.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));
             req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, false));
             using var root = req.CreateSelfSigned(new DateTimeOffset(2025, 1, 1, 0, 0, 0, TimeSpan.Zero), new DateTimeOffset(2035, 1, 1, 0, 0, 0, TimeSpan.Zero));
-            File.WriteAllText(rootPem, root.ExportCertificatePem());
-            File.WriteAllText(rootKey, rsa.ExportPkcs8PrivateKeyPem());
+            WriteAtomic(rootKey, System.Text.Encoding.ASCII.GetBytes(rsa.ExportPkcs8PrivateKeyPem()));
+            WriteAtomic(rootPem, System.Text.Encoding.ASCII.GetBytes(root.ExportCertificatePem()));
         }
 
         var rootCert = X509Certificate2.CreateFromPemFile(rootPem, rootKey);
         if (!File.Exists(leafPfx))
         {
             using var leaf = IssueLeaf(rootCert, cnpj, new DateTimeOffset(2025, 6, 1, 0, 0, 0, TimeSpan.Zero), new DateTimeOffset(2034, 1, 1, 0, 0, 0, TimeSpan.Zero));
-            File.WriteAllBytes(leafPfx, leaf.Export(X509ContentType.Pfx, "teste"));
+            WriteAtomic(leafPfx, leaf.Export(X509ContentType.Pfx, "teste"));
         }
 
         return new TestPki
@@ -49,6 +65,14 @@ public sealed class TestPki
             Leaf = X509CertificateLoader.LoadPkcs12FromFile(leafPfx, "teste", X509KeyStorageFlags.Exportable),
             RootPemPath = rootPem,
         };
+    }
+
+    /// <summary>Grava em arquivo temporário e renomeia: quem lê nunca vê arquivo pela metade.</summary>
+    private static void WriteAtomic(string path, byte[] content)
+    {
+        var tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        File.WriteAllBytes(tmp, content);
+        File.Move(tmp, path, overwrite: true);
     }
 
     public static X509Certificate2 IssueLeaf(X509Certificate2 issuer, string cnpj, DateTimeOffset from, DateTimeOffset to, string? crlUrl = null)
