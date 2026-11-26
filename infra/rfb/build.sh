@@ -10,9 +10,12 @@ field() { "$py" -c "import json,sys; v=json.load(sys.stdin); print(v$1)" < "$her
 bundle="$(field "['bundle']")"
 
 # 1) banco SQLite gerado uma vez (stage db) -> sha256 que vira label das duas imagens
-db_sha="$(DOCKER_BUILDKIT=1 docker build "$here" -q --file "$here/Dockerfile" --target db \
-  --build-arg "REGULAR_TAG=$(field "['regular']['tag']")" --build-arg "REGULAR_SHA=$(field "['regular']['commit']")" \
-  | MSYS_NO_PATHCONV=1 xargs -I{} docker run --rm --entrypoint cat {} /db.sha256)"   # MSYS_NO_PATHCONV: Git Bash no Windows
+# --iidfile (e não -q): o log do Maven/Flyway fica visível no CI quando o estágio falha (D-Q09).
+iid="$(mktemp)"
+DOCKER_BUILDKIT=1 docker build "$here" --load --iidfile "$iid" --file "$here/Dockerfile" --target db \
+  --build-arg "REGULAR_TAG=$(field "['regular']['tag']")" --build-arg "REGULAR_SHA=$(field "['regular']['commit']")"
+db_sha="$(MSYS_NO_PATHCONV=1 docker run --rm --entrypoint cat "$(cat "$iid")" /db.sha256)"   # MSYS_NO_PATHCONV: Git Bash no Windows
+rm -f "$iid"
 echo "db_sha256=$db_sha"
 
 for engine in regular simples; do
