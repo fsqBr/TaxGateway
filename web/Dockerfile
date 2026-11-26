@@ -2,7 +2,7 @@
 #   docker build -f web/Dockerfile --target public     --build-arg BUILD_COMMIT=$(git rev-parse HEAD) -t taxgateway/web .
 #   docker build -f web/Dockerfile --target backoffice --build-arg BUILD_COMMIT=$(git rev-parse HEAD) -t taxgateway/web-backoffice .
 # Imagens base por digest (D-P30); o Dependabot abre PR com as atualizações.
-FROM node:22.12.0-alpine@sha256:51eff88af6dff26f59316b6e356188ffa2c422bd3c3b76f2556a2e7e89d080bd AS build
+FROM node:26.13.1-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5 AS build
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --no-audit --no-fund
