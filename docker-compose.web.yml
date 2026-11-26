@@ -1,0 +1,31 @@
+# Site, portal e backoffice (D-W03/D-W05) sobre a API do compose de capacidade. Uso:
+#   docker compose -f docker-compose.yml -f docker-compose.capacity.yml -f docker-compose.web.yml up -d --build web web-backoffice
+#   site + portal: http://127.0.0.1:8090   ·   backoffice: http://127.0.0.1:8091/backoffice   ·   docs: http://127.0.0.1:8090/docs/
+#   (8080 é o motor rtc-regular publicado pelo docker-compose.yml)
+services:
+  api:
+    environment:
+      # O nginx do web fica na rede do compose: só ela pode informar X-Forwarded-* (D-W06).
+      Http__TrustedProxyNetworks__0: 172.16.0.0/12
+
+  web:
+    build: { context: ./web, target: public }
+    image: taxgateway/web:dev
+    read_only: true
+    tmpfs: ["/tmp", "/etc/nginx/conf.d:uid=101,gid=101"]
+    environment:
+      API_UPSTREAM: api:8000
+    ports: ["127.0.0.1:8090:8080"]
+    networks: [data]
+    depends_on: [api]
+
+  web-backoffice:
+    build: { context: ./web, target: backoffice }
+    image: taxgateway/web-backoffice:dev
+    read_only: true
+    tmpfs: ["/tmp", "/etc/nginx/conf.d:uid=101,gid=101"]
+    environment:
+      API_UPSTREAM: api:8000
+    ports: ["127.0.0.1:8091:8080"]
+    networks: [data]
+    depends_on: [api]

@@ -1,0 +1,94 @@
+# Valores de produção são sobrescritos por ambiente (staging/production) no pipeline (SDD §2.3).
+image:
+  registry: ghcr.io/ORG/taxgateway
+  tag: "0.4.0"
+  pullPolicy: IfNotPresent
+
+# Bundle fiscal: tags vindas de infra/rfb/versions.json. Imagens antigas ficam retidas >= 6 anos (§2.3 passo 7).
+engines:
+  bundle: "2026.11.2"
+  regular: { image: rtc-regular, tag: "1.7.2", port: 8080, mgmtPort: 9101 }
+  simples: { image: rtc-simples, tag: "1.0.2", port: 8082, mgmtPort: 9103 }
+  resources:
+    requests: { cpu: "1", memory: 1536Mi }
+    limits: { cpu: "2", memory: 2Gi }
+  javaToolOptions: "-XX:MaxRAMPercentage=75 -XX:+UseZGC --enable-native-access=ALL-UNNAMED"
+  hikariPoolSize: "32"
+
+api:
+  replicas: 3
+  port: 8000
+  # Redes que podem enviar X-Forwarded-For/Proto (ingress e nginx do web), D-W06.
+  trustedProxyNetworks: ["10.0.0.0/8"]
+  metricsPort: 9464           # /metrics só nesta porta (D-H01); o Ingress publica apenas a porta http
+  resources:
+    requests: { cpu: 500m, memory: 512Mi }
+    limits: { cpu: "2", memory: 1Gi }
+  # HPA por CPU a 50%: os motores no mesmo pod precisam de folga para o p95 (§16.3.1).
+  hpa: { minReplicas: 3, maxReplicas: 30, cpuTarget: 50 }
+  canary:
+    steps: [5, 25, 50]          # % do tráfego síncrono
+    pauseMinutes: 30            # 5% por 30 min (§2.3 passo 6)
+    maxErrorRate: "0.01"
+    maxP95Seconds: "0.040"
+
+# Site/portal (público) e backoffice (interno) — D-W03/D-W05. O backoffice só deve ser publicado em host interno
+# (VPN ou allowlist de IPs no Ingress); a imagem pública nem encaminha /admin.
+web:
+  apiUpstream: api:80
+  ingressClassName: nginx
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 128Mi }
+  public:
+    enabled: true
+    replicas: 2
+    ingress:
+      enabled: false
+      host: app.exemplo.com.br
+      tlsSecret: web-tls
+      annotations:
+        nginx.ingress.kubernetes.io/proxy-body-size: 110m   # lote em ZIP até 100 MB
+  backoffice:
+    enabled: true
+    replicas: 1
+    ingress:
+      enabled: false
+      host: backoffice.interno.exemplo.com.br
+      tlsSecret: backoffice-tls
+      annotations:
+        nginx.ingress.kubernetes.io/whitelist-source-range: 10.0.0.0/8   # ajuste para a VPN/escritório
+
+batchEngines:
+  replicas: 2
+
+workers:
+  replicas: 2
+  # DF-e (Fase 9, D-902): sem configuração os workers usam a SEFAZ de HOMOLOGAÇÃO. Produção exige, no Secret:
+  #   Dfe__Ambiente=1, Dfe__DistUrl=https://www1.nfe.fazenda.gov.br/NFeDistribuicaoDFe/NFeDistribuicaoDFe.asmx,
+  #   Dfe__EventoUrl=https://www.nfe.fazenda.gov.br/NFeRecepcaoEvento4/NFeRecepcaoEvento4.asmx
+  # Os workers precisam de saída HTTPS para a SEFAZ e para os webhooks dos clientes (sem NetworkPolicy de egress).
+  resources:
+    requests: { cpu: 250m, memory: 256Mi }
+    limits: { cpu: "1", memory: 512Mi }
+
+prometheus:
+  address: http://prometheus-operated.monitoring:9090
+  namespaceLabel: monitoring
+
+# SLOs do §16.3 como regras do Prometheus Operator (D-H02). Desligue se o cluster não tiver os CRDs.
+monitoring:
+  enabled: true
+  slo:
+    errorBudget: 0.0005           # 1 - 99,95% de disponibilidade
+    simularP95Seconds: 0.040
+    simularP99Seconds: 0.100
+    auditoriaP95Seconds: 0.150
+
+# Segredos (connection strings, pepper, KMS) vêm de um Secret externo (ExternalSecrets/secret manager).
+# Fase 8 (D-804): o mesmo Secret traz as chaves de assinatura do OAuth, iguais em todos os pods:
+#   Identity__SigningKeys__0__Kid / __Pem  -> chave que ASSINA (a mais nova)
+#   Identity__SigningKeys__1__Kid / __Pem  -> chave anterior, só valida até o último token dela expirar (15 min)
+# Sem chave configurada a API não sobe (chave efêmera só em dev).
+existingSecret: taxgateway-runtime
+migratorSecret: taxgateway-migrator

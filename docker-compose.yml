@@ -1,0 +1,112 @@
+# Ambiente local de desenvolvimento (SDD §11). Produção usa Kubernetes (infra/k8s).
+# Pré-requisito: ./infra/rfb/build.ps1 (gera as imagens taxgateway/rtc-*).
+name: taxgateway
+
+x-rtc-common: &rtc-common
+  restart: unless-stopped
+  read_only: true                     # SDD §2.1: imutabilidade
+  # /tmp precisa de "exec": o sqlite-jdbc extrai e carrega a biblioteca nativa (.so) ali.
+  tmpfs: ["/tmp:exec,mode=1777,size=256m"]
+  networks: [engines]
+  environment: &rtc-env
+    # SDD §2.1 regra 5: sem chamada externa para o portal piloto da RFB.
+    VERSAO_OFFLINE_URL: http://127.0.0.1:9/disabled
+    VERSAO_URL: http://127.0.0.1:9/disabled
+    # SDD §15.4: Tomcat tem até 250 threads; o padrão do Hikari é 10 conexões.
+    SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: "32"
+    JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=75 --enable-native-access=ALL-UNNAMED"
+  deploy:
+    resources:
+      limits: { cpus: "2", memory: 2g }
+
+services:
+  rtc-regular:
+    <<: *rtc-common
+    image: taxgateway/rtc-regular:1.7.2
+    ports: ["127.0.0.1:8080:8080", "127.0.0.1:9101:9101"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9101 && printf \"GET /health HTTP/1.0\\r\\n\\r\\n\" >&3 && grep -q UP <&3'"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  rtc-simples:
+    <<: *rtc-common
+    image: taxgateway/rtc-simples:1.0.2
+    ports: ["127.0.0.1:8082:8082", "127.0.0.1:9103:9103"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9103 && printf \"GET /health HTTP/1.0\\r\\n\\r\\n\" >&3 && grep -q UP <&3'"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  postgres:
+    # postgres:18 + pg_partman + bootstrap de roles (infra/postgres, D-102/D-104).
+    # Depois de subir: TG_OWNER_CONNECTION=... dotnet run --project src/TaxGateway.Migrator
+    build: ./infra/postgres
+    image: taxgateway/postgres:18
+    restart: unless-stopped
+    # Background worker do pg_partman: cria partições futuras e aplica a retenção a cada hora (D-105).
+    command: >-
+      postgres
+      -c shared_preload_libraries=pg_partman_bgw
+      -c pg_partman_bgw.dbname=taxgateway
+      -c pg_partman_bgw.role=tg_owner
+      -c pg_partman_bgw.interval=3600
+    environment:
+      POSTGRES_USER: tg_bootstrap
+      POSTGRES_PASSWORD: dev-only
+      POSTGRES_DB: taxgateway
+      TG_DEV_PASSWORD: dev-only
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql]
+    networks: [data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tg_bootstrap -d taxgateway"]
+      interval: 5s
+      retries: 20
+
+  valkey:
+    image: valkey/valkey:8.1.12
+    restart: unless-stopped
+    ports: ["127.0.0.1:6379:6379"]
+    networks: [data]
+
+  rabbitmq:
+    image: rabbitmq:4.3.8-management
+    restart: unless-stopped
+    ports: ["127.0.0.1:5672:5672", "127.0.0.1:15672:15672"]
+    networks: [data]
+
+  seq:
+    image: datalust/seq:latest
+    restart: unless-stopped
+    environment:
+      ACCEPT_EULA: "Y"
+      SEQ_FIRSTRUN_NOAUTHENTICATION: "true"
+    ports: ["127.0.0.1:5341:80"]
+    networks: [data]
+
+  # Object storage S3-compatível local (D-007): SeaweedFS, Apache 2.0, binário único com gateway S3.
+  # Em produção: o S3 gerenciado do provedor (SSE-KMS) — a aplicação só fala a API S3.
+  s3:
+    image: chrislusf/seaweedfs:4.54
+    restart: unless-stopped
+    command: >-
+      server -dir=/data -ip.bind=0.0.0.0 -master.volumeSizeLimitMB=256
+      -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
+    ports: ["127.0.0.1:8333:8333"]
+    volumes:
+      - s3data:/data
+      - ./infra/s3/s3.json:/etc/seaweedfs/s3.json:ro
+    networks: [data]
+
+networks:
+  # Rede "internal: true" impediria publicar as portas para o host (testes e k6 locais).
+  # O bloqueio de egress é garantido em produção pela NetworkPolicy (SDD §2.1); aqui, pelas URLs acima.
+  engines: {}
+  data: {}
+
+volumes:
+  pgdata: {}
+  s3data: {}

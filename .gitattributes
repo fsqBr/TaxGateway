@@ -1,0 +1,14 @@
+# D-116: scripts executados dentro de containers Linux precisam de LF, mesmo com core.autocrlf no Windows.
+# D-Q01: LF no repositório e na cópia de trabalho, em qualquer SO (o dotnet format confere).
+* text=auto eol=lf
+# Binários e artefatos assinados/com hash: nunca converter.
+*.pfx binary
+*.zip binary
+*.png binary
+*.woff2 binary
+tests/golden/** -text
+infra/xsd-schemas/** -text
+infra/icp-brasil/** -text
+*.sh   text eol=lf
+*.sql  text eol=lf
+Dockerfile text eol=lf

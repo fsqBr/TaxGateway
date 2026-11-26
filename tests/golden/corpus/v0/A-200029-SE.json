@@ -1,0 +1,63 @@
+{
+  "id": "A-200029-SE",
+  "descricao": "cClassTrib 200029 (Alíquota reduzida em 60%) em 2027",
+  "bundle": "2026.11.2",
+  "api_request": {
+    "cnpj_emitente": "11222333000181",
+    "regime_tributario": "REGIME_REGULAR",
+    "data_fato_gerador": "2027-06-15T14:00:00-03:00",
+    "municipio_ibge": 2800308,
+    "uf": "SE",
+    "itens": [
+      {
+        "numero": 1,
+        "cst_ibs_cbs": "200",
+        "c_class_trib": "200029",
+        "valor_base_calculo": 1000,
+        "nbs": "122011200"
+      }
+    ]
+  },
+  "engine_request": {
+    "id": "golden",
+    "versao": "1.0.0",
+    "dhFatoGerador": "2027-06-15T14:00:00-03:00",
+    "municipio": 2800308,
+    "uf": "SE",
+    "itens": [
+      {
+        "numero": 1,
+        "nbs": "122011200",
+        "cst": "200",
+        "cClassTrib": "200029",
+        "baseCalculo": 1000,
+        "aliquotasNominais": {
+          "cbs": 11.2000,
+          "ibsEstadual": 0.0500,
+          "ibsMunicipal": 0.0500
+        }
+      }
+    ]
+  },
+  "engine_response": {
+    "status": 200,
+    "body": {
+      "objetos": [
+        {
+          "nObj": 1,
+          "estadoItem": "INCONSISTENCIA_ENTRADA",
+          "erros": [
+            {
+              "type": "http://127.0.0.1/api/calculadora/observabilidade/erros?codigo=REG-012",
+              "title": "NBS não vinculada",
+              "code": "REG-012",
+              "pointer": "#/itens/0/nbs",
+              "detail": "NBS de código 122011200 não vinculada à Classificação Tributária de código 200029 (CBS e IBS)"
+            }
+          ]
+        }
+      ]
+    },
+    "warning": "6"
+  }
+}

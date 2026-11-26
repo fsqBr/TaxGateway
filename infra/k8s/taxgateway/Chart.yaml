@@ -1,0 +1,6 @@
+apiVersion: v2
+name: taxgateway
+description: TaxGateway (API + motores RFB como sidecars, workers, motores de lote, migrator). SDD §2, §2.3, §16; D-405.
+type: application
+version: 0.4.0
+appVersion: "0.4.0"

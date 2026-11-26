@@ -1,0 +1,22 @@
+# Site público + portal do cliente (D-W03). Mesma origem da API: o nginx encaminha as rotas da API pública.
+# A Admin API NÃO é encaminhada aqui (/admin → 404): o backoffice tem imagem e host próprios.
+map $http_x_forwarded_proto $forwarded_proto { default $http_x_forwarded_proto; "" $scheme; }
+
+server {
+  listen 8080;
+  server_tokens off;
+  root /usr/share/nginx/html;
+  client_max_body_size 110m;   # lote em ZIP até 100 MB (D-606)
+
+  location = /index.html { include /etc/nginx/snippets/security-headers.conf; add_header Cache-Control "no-cache" always; }
+  location /assets/ { include /etc/nginx/snippets/security-headers.conf; add_header Cache-Control "public, max-age=31536000, immutable" always; try_files $uri =404; }
+  location / { include /etc/nginx/snippets/security-headers.conf; add_header Cache-Control "no-cache" always; try_files $uri /index.html; }
+
+  location /v1/ { include /etc/nginx/conf.d/proxy.inc; }
+  location /oauth/ { include /etc/nginx/conf.d/proxy.inc; }
+  location /.well-known/ { include /etc/nginx/conf.d/proxy.inc; }
+  location /openapi/ { include /etc/nginx/conf.d/proxy.inc; }
+  location /docs { include /etc/nginx/conf.d/proxy.inc; }   # Scalar (CSP própria da API, carrega o script do CDN)
+  location /admin/ { return 404; }
+  location = /healthz { access_log off; return 200 "ok\n"; }
+}

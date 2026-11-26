@@ -1,0 +1,71 @@
+# Gate de capacidade da Fase 6 (SDD §12, §16.4; D-608). Uso:
+#   docker compose -f docker-compose.yml -f docker-compose.capacity.yml up -d
+#   bash tests/load/capacity-gate.sh
+# A API usa o motor síncrono (rtc-regular); os workers usam um motor dedicado ao lote (rtc-regular-batch), como os
+# Deployments separados do Helm (§8.4): o lote não disputa o motor do checkout.
+x-app-env: &app-env
+  ConnectionStrings__Valkey: valkey:6379
+  Engines__Bundle: "2026.11.2"
+  Engines__Simples__BaseUrl: http://rtc-simples:8082/api/
+  Auth__ApiKeyPepper: "0k2C9K9HFb5Vq32thS/EFrvm6BXIlmD7rMLfWfpVzFI="
+  Kms__LocalMasterKey: "T2rB45BDwYQ1YJuAMnRR4s1hTIh5NdC6YyZdpERfsf0="
+  Storage__ServiceUrl: http://s3:8333
+  Storage__AccessKey: tg-dev-access
+  Storage__SecretKey: tg-dev-secret-only-local
+  Storage__Bucket: taxgateway-xml
+  Messaging__RabbitUri: amqp://guest:guest@rabbitmq:5672/
+  Identity__AllowHttp: "true"                               # D-804: só neste ambiente local de carga
+  Identity__AllowEphemeralKeys: "true"
+  Xml__ExtraTrustAnchorPemFiles__0: /pki/test-root.crt     # PKI de TESTE (corpus golden); nunca em produção
+
+services:
+  rtc-regular-batch:
+    image: taxgateway/rtc-regular:1.7.2
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:exec,mode=1777,size=256m"]
+    networks: [engines]
+    environment:
+      VERSAO_OFFLINE_URL: http://127.0.0.1:9/disabled
+      SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: "32"
+      JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=75 --enable-native-access=ALL-UNNAMED"
+    deploy:
+      resources:
+        limits: { cpus: "2", memory: 2g }
+
+  api:
+    image: taxgateway/api:dev
+    read_only: true
+    tmpfs: ["/tmp:size=1g"]          # upload do lote vai para arquivo temporário (D-606)
+    networks: [data, engines]
+    ports: ["127.0.0.1:5300:8000"]
+    volumes: ["./tests/golden/pki:/pki:ro"]
+    environment:
+      <<: *app-env
+      ConnectionStrings__App: Host=postgres;Database=taxgateway;Username=tg_app;Password=dev-only
+      ConnectionStrings__Admin: Host=postgres;Database=taxgateway;Username=tg_admin;Password=dev-only
+      Engines__Regular__BaseUrl: http://rtc-regular:8080/api/
+      Admin__Operators__0__Name: gate
+      Admin__Operators__0__KeyHash: 83d24950fd38f124697ddad62aaca4b01538e587473d4a65af48e9faf9f311f8
+      Admin__Operators__0__Scopes__0: admin:commercial
+    deploy:
+      resources:
+        limits: { cpus: "2", memory: 1g }
+
+  workers:
+    image: taxgateway/workers:dev
+    read_only: true
+    tmpfs: ["/tmp:size=256m"]
+    networks: [data, engines]
+    volumes: ["./tests/golden/pki:/pki:ro"]
+    environment:
+      <<: *app-env
+      ConnectionStrings__Worker: Host=postgres;Database=taxgateway;Username=tg_worker;Password=dev-only
+      ConnectionStrings__Relay: Host=postgres;Database=taxgateway;Username=tg_relay;Password=dev-only
+      Engines__Regular__BaseUrl: http://rtc-regular-batch:8080/api/
+      Engines__Regular__SyncTimeoutMs: "5000"
+      Batches__WorkerSlots: "4"
+      Batches__DocParallelism: "4"
+    deploy:
+      resources:
+        limits: { cpus: "2", memory: 1g }

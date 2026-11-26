@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Referência à API (AuditService, D-607) traz os appsettings dela; os dois só configuram log. -->
+    <ErrorOnDuplicatePublishOutputFiles>false</ErrorOnDuplicatePublishOutputFiles>
+    <UserSecretsId>dotnet-TaxGateway.Workers-af5ee5b1-82ad-4257-a2ea-f1ef5df5f678</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TaxGateway.Core\TaxGateway.Core.csproj" />
+    <ProjectReference Include="..\TaxGateway.Infrastructure\TaxGateway.Infrastructure.csproj" />
+    <ProjectReference Include="..\TaxGateway.Contracts\TaxGateway.Contracts.csproj" />
+    <ProjectReference Include="..\TaxGateway.Api\TaxGateway.Api.csproj" />
+  </ItemGroup>
+</Project>

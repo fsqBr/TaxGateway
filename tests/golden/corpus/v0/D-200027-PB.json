@@ -1,0 +1,128 @@
+{
+  "id": "D-200027-PB",
+  "descricao": "cClassTrib 200027 (Alíquota reduzida em 70%) em 2026",
+  "bundle": "2026.11.2",
+  "api_request": {
+    "cnpj_emitente": "11222333000181",
+    "regime_tributario": "REGIME_REGULAR",
+    "data_fato_gerador": "2026-08-20T14:00:00-03:00",
+    "municipio_ibge": 2507507,
+    "uf": "PB",
+    "itens": [
+      {
+        "numero": 1,
+        "cst_ibs_cbs": "200",
+        "c_class_trib": "200027",
+        "valor_base_calculo": 1000,
+        "ncm": "84713012",
+        "quantidade": 1,
+        "unidade": "UN"
+      }
+    ]
+  },
+  "engine_request": {
+    "id": "golden",
+    "versao": "1.0.0",
+    "dhFatoGerador": "2026-08-20T14:00:00-03:00",
+    "municipio": 2507507,
+    "uf": "PB",
+    "itens": [
+      {
+        "numero": 1,
+        "ncm": "84713012",
+        "cst": "200",
+        "cClassTrib": "200027",
+        "baseCalculo": 1000,
+        "quantidade": 1,
+        "unidade": "UN"
+      }
+    ]
+  },
+  "engine_response": {
+    "status": 200,
+    "body": {
+      "objetos": [
+        {
+          "nObj": 1,
+          "estadoItem": "CALCULADO",
+          "tribCalc": {
+            "IBSCBS": {
+              "CST": "200",
+              "cClassTrib": "200027",
+              "gIBSCBS": {
+                "vBC": "1000.00",
+                "gIBSUF": {
+                  "pIBSUF": "0.10",
+                  "gRed": {
+                    "pRedAliq": "70.00",
+                    "pAliqEfet": "0.03"
+                  },
+                  "vIBSUF": "0.30"
+                },
+                "gIBSMun": {
+                  "pIBSMun": "0.00",
+                  "gRed": {
+                    "pRedAliq": "70.00",
+                    "pAliqEfet": "0.00"
+                  },
+                  "vIBSMun": "0.00"
+                },
+                "vIBS": "0.30",
+                "gCBS": {
+                  "pCBS": "0.90",
+                  "gRed": {
+                    "pRedAliq": "70.00",
+                    "pAliqEfet": "0.27"
+                  },
+                  "vCBS": "2.70"
+                }
+              },
+              "memoriaCalculo": {
+                "cbs": "Operação de consumo com enquadramento legal em Art. 261, parágrafo único, tributada conforme Alíquota reduzida em 70%. A base de cálculo utilizada é de R$ 1.000,00, com alíquota de 0,90%, sendo que esse regime define uma redução de 70,00% na alíquota.",
+                "ibsUF": "Operação de consumo com enquadramento legal em Art. 261, parágrafo único, tributada conforme Alíquota reduzida em 70%. A base de cálculo utilizada é de R$ 1.000,00, com alíquota de 0,10%, sendo que esse regime define uma redução de 70,00% na alíquota.",
+                "ibsMun": "Operação de consumo com enquadramento legal em Art. 261, parágrafo único, tributada conforme Alíquota reduzida em 70%. A base de cálculo utilizada é de R$ 1.000,00, com alíquota de 0,00%, sendo que esse regime define uma redução de 70,00% na alíquota."
+              }
+            }
+          }
+        }
+      ],
+      "total": {
+        "tribCalc": {
+          "IBSCBSTot": {
+            "vBCIBSCBS": "1000.00",
+            "gIBS": {
+              "gIBSUF": {
+                "vDif": "0.00",
+                "vDevTrib": "0.00",
+                "vIBSUF": "0.30"
+              },
+              "gIBSMun": {
+                "vDif": "0.00",
+                "vDevTrib": "0.00",
+                "vIBSMun": "0.00"
+              },
+              "vIBS": "0.30",
+              "vCredPres": "0.00",
+              "vCredPresCondSus": "0.00"
+            },
+            "gCBS": {
+              "vDif": "0.00",
+              "vDevTrib": "0.00",
+              "vCBS": "2.70",
+              "vCredPres": "0.00",
+              "vCredPresCondSus": "0.00"
+            },
+            "gMono": {
+              "vIBSMono": "0.00",
+              "vCBSMono": "0.00",
+              "vIBSMonoReten": "0.00",
+              "vCBSMonoReten": "0.00",
+              "vIBSMonoRet": "0.00",
+              "vCBSMonoRet": "0.00"
+            }
+          }
+        }
+      }
+    }
+  }
+}

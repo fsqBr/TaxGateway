@@ -1,0 +1,3 @@
+# Testes oficiais do motor (simples) que falham de forma conhecida no bundle atual (D-006).
+# Formato: pacote.Classe#metodo  # motivo / issue da RFB
+# Bundle 2026.11.2: nenhuma falha (execução local em 25/11/2026). Manter vazia enquanto não houver falha.

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-label="TaxGateway">
+  <rect width="48" height="48" rx="12" fill="currentColor"/>
+  <path d="M14.5 36V21.5a9.5 9.5 0 0 1 19 0V36" fill="none" stroke="#FFFFFF" stroke-width="3.6" stroke-linecap="round"/>
+  <path d="M19 27.2l3.6 3.6 6.6-7.2" fill="none" stroke="#FFFFFF" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,190 @@
+{
+  "id": "S-opcao-regular-RJ",
+  "descricao": "Optante que apura IBS/CBS pelo regime regular (tpRegimeIBSCBS = 1)",
+  "bundle": "2026.11.2",
+  "api_request": {
+    "cnpj_emitente": "11222333000181",
+    "regime_tributario": "SIMPLES_NACIONAL",
+    "data_fato_gerador": "2027-06-15T14:00:00-03:00",
+    "municipio_ibge": 3304557,
+    "uf": "RJ",
+    "itens": [
+      {
+        "numero": 1,
+        "cst_ibs_cbs": "000",
+        "c_class_trib": "000001",
+        "valor_base_calculo": 3000,
+        "ncm": "84713012",
+        "quantidade": 1,
+        "unidade": "UN"
+      },
+      {
+        "numero": 2,
+        "cst_ibs_cbs": "200",
+        "c_class_trib": "200003",
+        "valor_base_calculo": 100,
+        "ncm": "10063021",
+        "quantidade": 20,
+        "unidade": "KG"
+      }
+    ],
+    "crt": "1",
+    "tp_regime_ibs_cbs": "1"
+  },
+  "engine_request": {
+    "id": "golden",
+    "versao": "1.0.0",
+    "dhFatoGerador": "2027-06-15T14:00:00-03:00",
+    "municipio": 3304557,
+    "uf": "RJ",
+    "itens": [
+      {
+        "numero": 1,
+        "ncm": "84713012",
+        "cst": "000",
+        "cClassTrib": "000001",
+        "baseCalculo": 3000,
+        "quantidade": 1,
+        "unidade": "UN",
+        "aliquotasNominais": {
+          "cbs": 11.2000,
+          "ibsEstadual": 0.0500,
+          "ibsMunicipal": 0.0500
+        }
+      },
+      {
+        "numero": 2,
+        "ncm": "10063021",
+        "cst": "200",
+        "cClassTrib": "200003",
+        "baseCalculo": 100,
+        "quantidade": 20,
+        "unidade": "KG",
+        "aliquotasNominais": {
+          "cbs": 11.2000,
+          "ibsEstadual": 0.0500,
+          "ibsMunicipal": 0.0500
+        }
+      }
+    ]
+  },
+  "engine_response": {
+    "status": 200,
+    "body": {
+      "objetos": [
+        {
+          "nObj": 1,
+          "estadoItem": "CALCULO_SIMULADO",
+          "tribCalc": {
+            "IBSCBS": {
+              "CST": "000",
+              "cClassTrib": "000001",
+              "gIBSCBS": {
+                "vBC": "3000.00",
+                "gIBSUF": {
+                  "pIBSUF": "0.05",
+                  "vIBSUF": "1.50"
+                },
+                "gIBSMun": {
+                  "pIBSMun": "0.05",
+                  "vIBSMun": "1.50"
+                },
+                "vIBS": "3.00",
+                "gCBS": {
+                  "pCBS": "11.20",
+                  "vCBS": "336.00"
+                }
+              },
+              "memoriaCalculo": {
+                "cbs": "Operação de consumo com enquadramento legal em LC 214/2025, tributada conforme Tributação integral. A base de cálculo utilizada é de R$ 3.000,00, com alíquota de 11,20%.",
+                "ibsUF": "Operação de consumo com enquadramento legal em LC 214/2025, tributada conforme Tributação integral. A base de cálculo utilizada é de R$ 3.000,00, com alíquota de 0,05%.",
+                "ibsMun": "Operação de consumo com enquadramento legal em LC 214/2025, tributada conforme Tributação integral. A base de cálculo utilizada é de R$ 3.000,00, com alíquota de 0,05%."
+              }
+            }
+          }
+        },
+        {
+          "nObj": 2,
+          "estadoItem": "CALCULO_SIMULADO",
+          "tribCalc": {
+            "IBSCBS": {
+              "CST": "200",
+              "cClassTrib": "200003",
+              "gIBSCBS": {
+                "vBC": "100.00",
+                "gIBSUF": {
+                  "pIBSUF": "0.05",
+                  "gRed": {
+                    "pRedAliq": "100.00",
+                    "pAliqEfet": "0.00"
+                  },
+                  "vIBSUF": "0.00"
+                },
+                "gIBSMun": {
+                  "pIBSMun": "0.05",
+                  "gRed": {
+                    "pRedAliq": "100.00",
+                    "pAliqEfet": "0.00"
+                  },
+                  "vIBSMun": "0.00"
+                },
+                "vIBS": "0.00",
+                "gCBS": {
+                  "pCBS": "11.20",
+                  "gRed": {
+                    "pRedAliq": "100.00",
+                    "pAliqEfet": "0.00"
+                  },
+                  "vCBS": "0.00"
+                }
+              },
+              "memoriaCalculo": {
+                "cbs": "Operação de consumo com enquadramento legal em Art. 125, tributada conforme Alíquota zero. A base de cálculo utilizada é de R$ 100,00, com alíquota de zero.",
+                "ibsUF": "Operação de consumo com enquadramento legal em Art. 125, tributada conforme Alíquota zero. A base de cálculo utilizada é de R$ 100,00, com alíquota de zero.",
+                "ibsMun": "Operação de consumo com enquadramento legal em Art. 125, tributada conforme Alíquota zero. A base de cálculo utilizada é de R$ 100,00, com alíquota de zero."
+              }
+            }
+          }
+        }
+      ],
+      "total": {
+        "tribCalc": {
+          "IBSCBSTot": {
+            "vBCIBSCBS": "3100.00",
+            "gIBS": {
+              "gIBSUF": {
+                "vDif": "0.00",
+                "vDevTrib": "0.00",
+                "vIBSUF": "1.50"
+              },
+              "gIBSMun": {
+                "vDif": "0.00",
+                "vDevTrib": "0.00",
+                "vIBSMun": "1.50"
+              },
+              "vIBS": "3.00",
+              "vCredPres": "0.00",
+              "vCredPresCondSus": "0.00"
+            },
+            "gCBS": {
+              "vDif": "0.00",
+              "vDevTrib": "0.00",
+              "vCBS": "336.00",
+              "vCredPres": "0.00",
+              "vCredPresCondSus": "0.00"
+            },
+            "gMono": {
+              "vIBSMono": "0.00",
+              "vCBSMono": "0.00",
+              "vIBSMonoReten": "0.00",
+              "vCBSMonoReten": "0.00",
+              "vIBSMonoRet": "0.00",
+              "vCBSMonoRet": "0.00"
+            }
+          }
+        }
+      }
+    },
+    "warning": "6"
+  }
+}

@@ -1,0 +1,69 @@
+# Motores dedicados ao lote (§8.4: o lote nunca disputa CPU com o checkout) e workers.
+{{- range $name := list "regular" "simples" }}
+{{- $e := index $.Values.engines $name }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rtc-{{ $name }}-batch
+  labels: {{- include "tg.labels" $ | nindent 4 }}
+    app.kubernetes.io/name: rtc-{{ $name }}-batch
+    taxgateway/engine: "true"
+spec:
+  replicas: {{ $.Values.batchEngines.replicas }}
+  selector:
+    matchLabels: { app.kubernetes.io/name: rtc-{{ $name }}-batch }
+  template:
+    metadata:
+      labels: {{- include "tg.labels" $ | nindent 8 }}
+        app.kubernetes.io/name: rtc-{{ $name }}-batch
+        taxgateway/engine: "true"
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        {{- include "tg.engine" (dict "root" $ "name" $name "e" $e) | nindent 8 }}
+      volumes:
+        - { name: tmp-{{ $name }}, emptyDir: { sizeLimit: 256Mi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rtc-{{ $name }}-batch
+  labels: {{- include "tg.labels" $ | nindent 4 }}
+spec:
+  selector: { app.kubernetes.io/name: rtc-{{ $name }}-batch }
+  ports:
+    - { name: http, port: {{ $e.port }}, targetPort: {{ $e.port }} }
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workers
+  labels: {{- include "tg.labels" . | nindent 4 }}
+    app.kubernetes.io/name: workers
+spec:
+  replicas: {{ .Values.workers.replicas }}
+  selector:
+    matchLabels: { app.kubernetes.io/name: workers }
+  template:
+    metadata:
+      labels: {{- include "tg.labels" . | nindent 8 }}
+        app.kubernetes.io/name: workers
+        taxgateway/engine-client: "true"
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: workers
+          image: "{{ .Values.image.registry }}/workers:{{ .Values.image.tag }}"
+          envFrom: [{ secretRef: { name: {{ .Values.existingSecret }} } }]
+          env:
+            - { name: Engines__Bundle, value: {{ .Values.engines.bundle | quote }} }
+            - { name: Engines__Regular__BaseUrl, value: "http://rtc-regular-batch:{{ .Values.engines.regular.port }}/api/" }
+            - { name: Engines__Simples__BaseUrl, value: "http://rtc-simples-batch:{{ .Values.engines.simples.port }}/api/" }
+          resources: {{- toYaml .Values.workers.resources | nindent 12 }}
+          securityContext: {{- include "tg.secure" . | nindent 12 }}
+            runAsUser: 1654
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes:
+        - { name: tmp, emptyDir: { sizeLimit: 64Mi } }

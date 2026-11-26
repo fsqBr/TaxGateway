@@ -1,0 +1,141 @@
+using System.Text.Json.Nodes;
+
+using TaxGateway.Api.Http;
+using TaxGateway.Core.Params;
+using TaxGateway.Infrastructure.Admin;
+using TaxGateway.Infrastructure.Persistence;
+
+namespace TaxGateway.Api.Endpoints;
+
+/// <summary>Listagens que o portal do cliente e o backoffice precisam (D-W04). Nada aqui devolve segredo.</summary>
+public static class ListingEndpoints
+{
+    public static RouteGroupBuilder MapListings(this RouteGroupBuilder v1)
+    {
+        // Quem sou eu: qualquer credencial válida (sem escopo específico). Usado pelo portal no login.
+        v1.MapGet("/me", MeAsync);
+        v1.MapGet("/api-keys", ApiKeysAsync).WithMetadata(new RequiredScope(Scopes.KeysManage));
+        v1.MapGet("/auditoria/lotes", BatchesAsync).WithMetadata(new RequiredScope(Scopes.AuditoriaWrite));
+        return v1;
+    }
+
+    public static RouteGroupBuilder MapAdminListings(this RouteGroupBuilder admin)
+    {
+        admin.MapGet("/tenants", TenantsAsync).WithMetadata(new RequiredScope(AdminEndpoints.Commercial));
+        admin.MapGet("/plans", (IParamSnapshotProvider p) => Results.Ok(new JsonObject
+        {
+            ["planos"] = new JsonArray([.. p.Current.Plans.Values.OrderBy(x => x.PlanCode, StringComparer.Ordinal).Select(x => (JsonNode)new JsonObject
+            {
+                ["codigo"] = x.PlanCode, ["rpm"] = x.Rpm, ["concorrencia"] = x.Concurrency, ["lote_max_documentos"] = x.BatchMaxDocs,
+            })]),
+        })).WithMetadata(new RequiredScope(AdminEndpoints.Commercial));
+        admin.MapGet("/me", (HttpContext http) =>
+        {
+            var op = AdminKeyFilter.Get(http);
+            return Results.Ok(new JsonObject { ["operador"] = op.Name, ["scopes"] = new JsonArray([.. op.Scopes.Select(s => (JsonNode)s)]) });
+        });
+        return admin;
+    }
+
+    private static async Task<IResult> MeAsync(HttpContext http, ITenantDb db)
+    {
+        var caller = http.GetCaller();
+        var (name, root) = await db.InTenantAsync(caller.Identity.Tenant, async (s, ct) =>
+        {
+            await using var cmd = s.CreateCommand("SELECT name, root_cnpj FROM tenants");
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            return await r.ReadAsync(ct) ? (r.GetString(0), r.GetString(1)) : ("", "");
+        }, http.RequestAborted);
+        return Results.Ok(new JsonObject
+        {
+            ["tenant_id"] = caller.Identity.Tenant.Value,
+            ["nome"] = name,
+            ["cnpj_raiz"] = root,
+            ["plano"] = caller.Identity.PlanCode,
+            ["situacao"] = caller.Identity.TenantStatus,
+            ["auto_provisionar_cnpj"] = caller.Identity.AutoProvisionCnpj,
+            ["credencial"] = caller.Identity.KeyId != Guid.Empty ? "api_key" : "oauth",
+            ["scopes"] = new JsonArray([.. caller.Identity.Scopes.Select(s => (JsonNode)s)]),
+            ["limites"] = new JsonObject { ["rpm"] = caller.Limits.Rpm, ["concorrencia"] = caller.Limits.Concurrency },
+        });
+    }
+
+    private static async Task<IResult> ApiKeysAsync(HttpContext http, ITenantDb db)
+    {
+        var caller = http.GetCaller();
+        var list = await db.InTenantAsync(caller.Identity.Tenant, async (s, ct) =>
+        {
+            await using var cmd = s.CreateCommand("""
+                SELECT id, name, key_prefix, scopes, expires_at, revoked_at, last_used_at, created_at FROM api_keys ORDER BY created_at DESC
+                """);
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            var arr = new JsonArray();
+            while (await r.ReadAsync(ct))
+            {
+                arr.Add(new JsonObject
+                {
+                    ["id"] = r.GetGuid(0),
+                    ["nome"] = r.GetString(1),
+                    ["prefixo"] = r.GetString(2),
+                    ["scopes"] = new JsonArray([.. r.GetFieldValue<string[]>(3).Select(x => (JsonNode)x)]),
+                    ["expira_em"] = r.IsDBNull(4) ? null : r.GetFieldValue<DateTimeOffset>(4),
+                    ["revogada_em"] = r.IsDBNull(5) ? null : r.GetFieldValue<DateTimeOffset>(5),
+                    ["ultimo_uso"] = r.IsDBNull(6) ? null : r.GetFieldValue<DateTimeOffset>(6),
+                    ["criada_em"] = r.GetFieldValue<DateTimeOffset>(7),
+                    ["atual"] = r.GetGuid(0) == caller.Identity.KeyId,
+                });
+            }
+
+            return arr;
+        }, http.RequestAborted);
+        return Results.Ok(new JsonObject { ["api_keys"] = list });
+    }
+
+    private static async Task<IResult> BatchesAsync(HttpContext http, ITenantDb db)
+    {
+        var list = await db.InTenantAsync(http.GetCaller().Identity.Tenant, async (s, ct) =>
+        {
+            await using var cmd = s.CreateCommand("""
+                SELECT id, status, direction, total_docs, processed_docs, failed_docs, conforme_docs, created_at, completed_at
+                  FROM batches ORDER BY created_at DESC LIMIT 50
+                """);
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            var arr = new JsonArray();
+            while (await r.ReadAsync(ct))
+            {
+                arr.Add(new JsonObject
+                {
+                    ["batch_id"] = r.GetGuid(0),
+                    ["status"] = r.GetString(1),
+                    ["direction"] = r.IsDBNull(2) ? null : r.GetString(2),
+                    ["total"] = r.IsDBNull(3) ? null : r.GetInt32(3),
+                    ["processados"] = r.GetInt32(4),
+                    ["falhas"] = r.GetInt32(5),
+                    ["conformes"] = r.IsDBNull(6) ? null : r.GetInt32(6),
+                    ["criado_em"] = r.GetFieldValue<DateTimeOffset>(7),
+                    ["concluido_em"] = r.IsDBNull(8) ? null : r.GetFieldValue<DateTimeOffset>(8),
+                });
+            }
+
+            return arr;
+        }, http.RequestAborted);
+        return Results.Ok(new JsonObject { ["lotes"] = list });
+    }
+
+    private static async Task<IResult> TenantsAsync(AdminDataSource admin, string? busca, CancellationToken ct)
+    {
+        await using var cmd = admin.DataSource.CreateCommand("""
+            SELECT coalesce(json_agg(x ORDER BY x.criado_em DESC), '[]')::text FROM (
+              SELECT t.id AS tenant_id, t.name AS nome, t.root_cnpj AS cnpj_raiz, t.plan_code AS plano, t.status AS situacao,
+                     t.auto_provision_cnpj AS auto_provisionar_cnpj, t.xml_retention_days AS retencao_xml_dias, t.created_at AS criado_em,
+                     (SELECT coalesce(json_agg(json_build_object('client_id', a.client_id, 'nome', a.name, 'revogado_em', a.revoked_at,
+                                                                 'criado_em', a.created_at) ORDER BY a.created_at), '[]')
+                        FROM oauth_applications a WHERE a.tenant_id = t.id) AS clientes_oauth
+                FROM tenants t
+               WHERE $1::text IS NULL OR t.name ILIKE '%' || $1 || '%' OR t.root_cnpj LIKE $1 || '%'
+               ORDER BY t.created_at DESC LIMIT 200) x
+            """);
+        cmd.Parameters.Add(new() { Value = (object?)busca ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+        return Results.Text($$"""{"tenants":{{(string)(await cmd.ExecuteScalarAsync(ct))!}}}""", "application/json");
+    }
+}

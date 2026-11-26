@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#06141F"/><stop offset="1" stop-color="#0A2A22"/></linearGradient>
+    <linearGradient id="tg-g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#14A37A"/><stop offset="1" stop-color="#0A4F3E"/></linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <g transform="translate(96 96) scale(2)">
+    <rect width="48" height="48" rx="12" fill="url(#tg-g)"/>
+    <path d="M14.5 36V21.5a9.5 9.5 0 0 1 19 0V36" fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round"/>
+    <path d="M19 27.2l3.6 3.6 6.6-7.2" fill="none" stroke="#7CF0C1" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <text x="96" y="330" font-family="Inter, system-ui, sans-serif" font-size="64" font-weight="750" fill="#fff" letter-spacing="-1.5">IBS, CBS e IS calculados e auditados</text>
+  <text x="96" y="410" font-family="Inter, system-ui, sans-serif" font-size="64" font-weight="750" fill="#7CF0C1" letter-spacing="-1.5">por API.</text>
+  <text x="96" y="500" font-family="Inter, system-ui, sans-serif" font-size="30" fill="#A9B8C9">Sobre os motores oficiais da Receita Federal · TaxGateway</text>
+</svg>

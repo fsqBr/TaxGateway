@@ -1,0 +1,290 @@
+{
+  "paths": [
+    "POST /calculadora/observabilidade/simples-nacional",
+    "GET /calculadora/observabilidade/simples-nacional/erros",
+    "POST /calculadora/observabilidade/simples-nacional/nao-assistido",
+    "GET /calculadora/simples-nacional/atividades",
+    "GET /calculadora/simples-nacional/atividades/{codigo}",
+    "GET /versao",
+    "GET /versao/status"
+  ],
+  "schemas": {
+    "AliquotasEfetivasInput": {
+      "properties": [
+        "fatorR",
+        "impedimentoSublimite",
+        "anexoI",
+        "anexoII",
+        "anexoIII",
+        "anexoIV",
+        "anexoV"
+      ],
+      "required": []
+    },
+    "AnexoComIssInput": {
+      "properties": [
+        "pCBSSN",
+        "pIBSSN",
+        "semRedistribuicaoISS"
+      ],
+      "required": []
+    },
+    "AnexoParUnicoInput": {
+      "properties": [
+        "pCBSSN",
+        "pIBSSN"
+      ],
+      "required": []
+    },
+    "AtividadeSimplesDomain": {
+      "properties": [
+        "codigo",
+        "ordem",
+        "descricao",
+        "anexoSemFatorR",
+        "anexoComFatorR",
+        "sujeitaFatorR",
+        "rotuloAnexo",
+        "rotuloCurtoAnexo",
+        "disponivel",
+        "anexosFaltantes",
+        "modoFatorR",
+        "tpDocsAdmissiveis",
+        "admissivelNoDocumento",
+        "compativelComClassTrib"
+      ],
+      "required": []
+    },
+    "ErroDescricaoSimples": {
+      "properties": [
+        "codigo",
+        "titulo",
+        "descricao"
+      ],
+      "required": []
+    },
+    "ErroDetalhe": {
+      "properties": [
+        "type",
+        "title",
+        "code",
+        "pointer",
+        "detail"
+      ],
+      "required": []
+    },
+    "ImpostoSeletivoSimplesDomain": {
+      "properties": [
+        "valor"
+      ],
+      "required": []
+    },
+    "ItemSimplesInput": {
+      "properties": [
+        "numero",
+        "cAtivSN",
+        "cClassTrib",
+        "nbs",
+        "ncm",
+        "baseCalculo",
+        "valorImpostoSeletivo",
+        "pIBSSN",
+        "pCBSSN"
+      ],
+      "required": []
+    },
+    "ItemSimplesUnificadoInput": {
+      "properties": [
+        "numero",
+        "cAtivSN",
+        "cClassTrib",
+        "nbs",
+        "ncm",
+        "baseCalculo",
+        "valorImpostoSeletivo",
+        "tribISSQN",
+        "tpRetISSQN",
+        "tpBM"
+      ],
+      "required": []
+    },
+    "MemoriaCalculoSimplesDomain": {
+      "properties": [
+        "cbs",
+        "ibs"
+      ],
+      "required": []
+    },
+    "MotivoEstadoSimplesDomain": {
+      "properties": [
+        "codigo",
+        "descricao"
+      ],
+      "required": []
+    },
+    "ObjetoSimplesDomain": {
+      "properties": [
+        "nObj",
+        "estadoItem",
+        "motivoEstado",
+        "tribCalc",
+        "erros"
+      ],
+      "required": []
+    },
+    "ObservabilidadeSimplesDomain": {
+      "properties": [
+        "oper",
+        "resolucaoAliquotas",
+        "objetos",
+        "total"
+      ],
+      "required": []
+    },
+    "OperacaoSimplesDomain": {
+      "properties": [
+        "data",
+        "tpDoc",
+        "CRT",
+        "tpRegimeIBSCBS",
+        "opSimpNac",
+        "regApIBSCBSSN",
+        "regApTribSN",
+        "tpEnteGov",
+        "regimeApuracao"
+      ],
+      "required": []
+    },
+    "OperacaoSimplesInput": {
+      "properties": [
+        "id",
+        "versao",
+        "data",
+        "tpDoc",
+        "CRT",
+        "tpRegimeIBSCBS",
+        "tpEnteGov",
+        "itens"
+      ],
+      "required": []
+    },
+    "OperacaoSimplesNaoAssistidaInput": {
+      "properties": [
+        "id",
+        "versao",
+        "data",
+        "tpDoc",
+        "CRT",
+        "tpRegimeIBSCBS",
+        "opSimpNac",
+        "regApIBSCBSSN",
+        "regApTribSN",
+        "tpEnteGov",
+        "aliquotasEfetivas",
+        "itens"
+      ],
+      "required": []
+    },
+    "ParAliquotasInput": {
+      "properties": [
+        "pCBSSN",
+        "pIBSSN"
+      ],
+      "required": []
+    },
+    "ProblemDetail": {
+      "properties": [
+        "type",
+        "title",
+        "status",
+        "detail",
+        "instance",
+        "properties"
+      ],
+      "required": []
+    },
+    "ResolucaoAliquotaItemDomain": {
+      "properties": [
+        "numero",
+        "cAtivSN",
+        "anexoAplicado",
+        "tipoAliquota",
+        "regraAliquota",
+        "pIBSSN",
+        "pCBSSN",
+        "motivo",
+        "avisos"
+      ],
+      "required": []
+    },
+    "ResolucaoAliquotasDomain": {
+      "properties": [],
+      "required": []
+    },
+    "ResolucaoAliquotasNaoAssistido": {
+      "properties": [
+        "fatorR",
+        "indSublimite",
+        "itens",
+        "avisos"
+      ],
+      "required": []
+    },
+    "TotalSimplesDomain": {
+      "properties": [
+        "vRBSNtot",
+        "vBC",
+        "vIBSSNtot",
+        "vIBSSNtotPendSusp",
+        "vCBSSNtot",
+        "vCBSSNtotPendSusp",
+        "totalIs",
+        "totalTributos"
+      ],
+      "required": []
+    },
+    "TributosSimplesDomain": {
+      "properties": [
+        "vRBSNitem",
+        "tpRBSN",
+        "tpRBSNDescricao",
+        "vBC",
+        "pIBSSN",
+        "vIBSSN",
+        "vIBSPendSusp",
+        "pCBSSN",
+        "vCBSSN",
+        "vCBSPendSusp",
+        "IS",
+        "totalItem",
+        "memoriaCalculo"
+      ],
+      "required": []
+    },
+    "VersaoDomain": {
+      "properties": [
+        "versaoApp",
+        "versaoDb",
+        "descricaoVersaoDb",
+        "dataVersaoDb",
+        "arquivoDb",
+        "ambiente"
+      ],
+      "required": []
+    },
+    "VersaoOfflineDomain": {
+      "properties": [
+        "aplicacaoAtualizada",
+        "dbAtualizada",
+        "dataDbAtualizada",
+        "versaoAplicacaoLocal",
+        "versaoAplicacaoRemota",
+        "versaoDbLocal",
+        "versaoDbRemota",
+        "dataDbLocal",
+        "dataDbRemota"
+      ],
+      "required": []
+    }
+  }
+}

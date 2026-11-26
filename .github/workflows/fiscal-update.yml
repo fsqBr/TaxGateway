@@ -1,0 +1,107 @@
+# Pipeline de atualização fiscal (SDD §2.3; D-401 a D-403).
+# Diário: detecta tag nova dos motores da RFB → constrói as imagens candidatas → contrato (OpenAPI) → testes
+# oficiais → relatório de regressão do corpus golden (atual × candidato) → abre PR com o relatório.
+# O PR não faz deploy: o merge dispara o deploy.yml (staging → aprovação manual → canário).
+name: fiscal-update
+
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  packages: read
+
+jobs:
+  detect-and-validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detectar tags novas
+        id: detect
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cp infra/rfb/versions.json /tmp/versions.atual.json
+          python3 infra/rfb/check_tags.py --write | tee /tmp/check.json
+          echo "changed=$(python3 -c 'import json;print(str(json.load(open("/tmp/check.json"))["changed"]).lower())')" >> "$GITHUB_OUTPUT"
+          echo "bundle=$(python3 -c 'import json;print(json.load(open("/tmp/check.json"))["bundle"])')" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.detect.outputs.changed == 'true'
+
+      - name: Imagens candidatas (bundle novo)
+        if: steps.detect.outputs.changed == 'true'
+        run: bash infra/rfb/build.sh candidate
+
+      - name: Imagens atuais (bundle em produção)
+        if: steps.detect.outputs.changed == 'true'
+        run: |
+          cp infra/rfb/versions.json /tmp/versions.candidato.json
+          cp /tmp/versions.atual.json infra/rfb/versions.json
+          bash infra/rfb/build.sh atual
+          cp /tmp/versions.candidato.json infra/rfb/versions.json
+
+      - uses: actions/setup-dotnet@v4
+        if: steps.detect.outputs.changed == 'true'
+        with:
+          global-json-file: global.json
+
+      - name: Testes de contrato no candidato
+        if: steps.detect.outputs.changed == 'true'
+        env:
+          RTC_IMAGE_PREFIX: candidate
+        run: dotnet test tests/TaxGateway.ContractTests -c Release
+
+      - name: Testes oficiais do candidato
+        if: steps.detect.outputs.changed == 'true'
+        run: |
+          bash infra/rfb/test-engines.sh regular out/engine-tests/regular
+          bash infra/rfb/test-engines.sh simples out/engine-tests/simples
+
+      - name: Relatório de regressão (corpus golden, atual × candidato)
+        if: steps.detect.outputs.changed == 'true'
+        run: |
+          atual_tag=$(python3 -c 'import json;print(json.load(open("/tmp/versions.atual.json"))["regular"]["tag"])')
+          novo_tag=$(python3 -c 'import json;print(json.load(open("infra/rfb/versions.json"))["regular"]["tag"])')
+          docker run -d --name atual --read-only --tmpfs /tmp:exec -e VERSAO_OFFLINE_URL=http://127.0.0.1:9/disabled -p 18080:8080 "atual/rtc-regular:${atual_tag}"
+          docker run -d --name novo --read-only --tmpfs /tmp:exec -e VERSAO_OFFLINE_URL=http://127.0.0.1:9/disabled -p 28080:8080 "candidate/rtc-regular:${novo_tag}"
+          for _ in $(seq 1 90); do
+            curl -fs http://127.0.0.1:18080/api/api-docs >/dev/null && curl -fs http://127.0.0.1:28080/api/api-docs >/dev/null && break
+            sleep 2
+          done
+          python3 infra/rfb/regression_report.py --base http://127.0.0.1:18080/api/ --candidate http://127.0.0.1:28080/api/ --out out/regressao.md
+          cat out/regressao.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Resumo da detecção no topo do relatório (nova versão ou tag republicada, D-Q04)
+        if: steps.detect.outputs.changed == 'true'
+        run: |
+          python3 - <<'PY'
+          import json
+          c = json.load(open("/tmp/check.json"))
+          lines = ["## O que mudou nos motores", ""]
+          for engine, u in c["updates"].items():
+              if u.get("kind") == "retag":
+                  lines.append(f"* **{engine}: a RFB republicou a tag `{u['to']}`** em outro commit "
+                               f"(`{u['commit_anterior'][:12]}` → `{u['commit'][:12]}`). Mesma versão, código diferente: revisar o diff.")
+              else:
+                  lines.append(f"* **{engine}:** `{u['from']}` → `{u['to']}` (commit `{u['commit'][:12]}`).")
+          for w in c.get("warnings", []):
+              lines.append(f"* Aviso: {w}")
+          body = open("out/regressao.md", encoding="utf-8").read()
+          open("out/regressao.md", "w", encoding="utf-8").write("\n".join(lines) + "\n\n" + body)
+          PY
+
+      - name: Abrir PR com o relatório
+        if: steps.detect.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: fiscal/bundle-${{ steps.detect.outputs.bundle }}
+          title: "Bundle fiscal ${{ steps.detect.outputs.bundle }}"
+          commit-message: "Atualiza motores da RFB para o bundle ${{ steps.detect.outputs.bundle }}"
+          add-paths: infra/rfb/versions.json
+          body-path: out/regressao.md
+          labels: fiscal, requer-aprovacao-fiscal

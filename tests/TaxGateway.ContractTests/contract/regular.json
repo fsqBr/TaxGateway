@@ -1,0 +1,1170 @@
+{
+  "paths": [
+    "POST /calculadora/base-calculo/base-calculo-unificada",
+    "POST /calculadora/base-calculo/base-calculo-unificada-nfse",
+    "POST /calculadora/base-calculo/cbs-ibs-mercadorias",
+    "POST /calculadora/base-calculo/is-mercadorias",
+    "GET /calculadora/dados-abertos/aliquota-municipio",
+    "GET /calculadora/dados-abertos/aliquota-uf",
+    "GET /calculadora/dados-abertos/aliquota-uniao",
+    "GET /calculadora/dados-abertos/ator/grupos",
+    "GET /calculadora/dados-abertos/classificacoes-tributarias/cbs-ibs",
+    "GET /calculadora/dados-abertos/classificacoes-tributarias/cbs-ibs/class-trib/{cClassTrib}",
+    "GET /calculadora/dados-abertos/classificacoes-tributarias/cbs-ibs/por-atores",
+    "GET /calculadora/dados-abertos/classificacoes-tributarias/cbs-ibs/{cst}",
+    "GET /calculadora/dados-abertos/classificacoes-tributarias/cbs-ibs/{siglaDfe}/{cClassTrib}",
+    "GET /calculadora/dados-abertos/classificacoes-tributarias/imposto-seletivo",
+    "GET /calculadora/dados-abertos/classificacoes-tributarias/imposto-seletivo/{cst}",
+    "GET /calculadora/dados-abertos/classificacoes-tributarias/is/class-trib/{cClassTrib}",
+    "GET /calculadora/dados-abertos/classificacoes-tributarias/nbs",
+    "GET /calculadora/dados-abertos/classificacoes-tributarias/nbs-aplicavel",
+    "GET /calculadora/dados-abertos/classificacoes-tributarias/ncm-aplicavel",
+    "GET /calculadora/dados-abertos/classificacoes-tributarias/{idSituacaoTributaria}",
+    "GET /calculadora/dados-abertos/dfe/grupos",
+    "GET /calculadora/dados-abertos/fundamentacoes-legais",
+    "GET /calculadora/dados-abertos/nbs",
+    "GET /calculadora/dados-abertos/nbs-aplicaveis",
+    "GET /calculadora/dados-abertos/nbs/lista",
+    "GET /calculadora/dados-abertos/ncm",
+    "GET /calculadora/dados-abertos/ncm/vigentes",
+    "GET /calculadora/dados-abertos/nomenclatura/{siglaDfe}/{cClassTrib}",
+    "GET /calculadora/dados-abertos/redutores-compra-governamental",
+    "GET /calculadora/dados-abertos/situacoes-tributarias/cbs-ibs",
+    "GET /calculadora/dados-abertos/situacoes-tributarias/imposto-seletivo",
+    "GET /calculadora/dados-abertos/situacoes-tributarias/is",
+    "GET /calculadora/dados-abertos/transferencias-cbs",
+    "GET /calculadora/dados-abertos/transferencias-ibs",
+    "GET /calculadora/dados-abertos/ufs",
+    "GET /calculadora/dados-abertos/ufs/municipios",
+    "GET /calculadora/dados-abertos/versao",
+    "POST /calculadora/nfse/base-calculo",
+    "GET /calculadora/nfse/indicador-operacao",
+    "POST /calculadora/nfse/indicador-operacao/validate",
+    "GET /calculadora/nfse/locais-fornecimento",
+    "GET /calculadora/nfse/locais-incidencia",
+    "GET /calculadora/nfse/local-operacao",
+    "GET /calculadora/nfse/situacoes-classificacoes-tributarias",
+    "GET /calculadora/observabilidade/erros",
+    "POST /calculadora/observabilidade/regime-geral",
+    "POST /calculadora/pedagio",
+    "POST /calculadora/regime-geral",
+    "GET /calculadora/xml/generate",
+    "POST /calculadora/xml/generate",
+    "GET /calculadora/xml/validate",
+    "POST /calculadora/xml/validate",
+    "GET /versao/status"
+  ],
+  "schemas": {
+    "AjusteCompetenciaDomain": {
+      "properties": [
+        "competApur",
+        "vIBS",
+        "vCBS"
+      ],
+      "required": []
+    },
+    "AliquotaDadosAbertosOutput": {
+      "properties": [
+        "aliquotaReferencia",
+        "aliquotaPropria",
+        "formaAplicacao"
+      ],
+      "required": []
+    },
+    "AliquotasNominaisImpostoSeletivo": {
+      "properties": [
+        "adValorem",
+        "adRem"
+      ],
+      "required": []
+    },
+    "AliquotasNominaisInput": {
+      "properties": [
+        "cbs",
+        "ibsEstadual",
+        "ibsMunicipal",
+        "impostoSeletivo"
+      ],
+      "required": []
+    },
+    "AtorDadosAbertosOutput": {
+      "properties": [
+        "id",
+        "descricao",
+        "ordem"
+      ],
+      "required": []
+    },
+    "BaseCalculoCibsInput": {
+      "properties": [
+        "anoFatoGerador",
+        "valorBem",
+        "ajusteAcrescimos",
+        "juros",
+        "multas",
+        "encargos",
+        "frete",
+        "impostoSeletivo",
+        "outrosTributos",
+        "demaisImportancias",
+        "icms",
+        "iss",
+        "pis",
+        "pisImportacao",
+        "cofins",
+        "cofinsImportacao",
+        "cosip",
+        "ipi",
+        "descontoIncondicional"
+      ],
+      "required": [
+        "anoFatoGerador"
+      ]
+    },
+    "BaseCalculoCibsModel": {
+      "properties": [
+        "baseCalculo"
+      ],
+      "required": []
+    },
+    "BaseCalculoISMercadoriasInput": {
+      "properties": [
+        "anoFatoGerador",
+        "valorBem",
+        "ajusteAcrescimos",
+        "juros",
+        "multas",
+        "encargos",
+        "freteCobrado",
+        "outrosTributos",
+        "demaisImportancias",
+        "icms",
+        "iss",
+        "cosip",
+        "ipi",
+        "descontoIncondicional",
+        "bonificacao",
+        "devolucaoVendas"
+      ],
+      "required": [
+        "anoFatoGerador"
+      ]
+    },
+    "BaseCalculoISMercadoriasModel": {
+      "properties": [
+        "baseCalculo"
+      ],
+      "required": []
+    },
+    "BaseCalculoUnificadaInput": {
+      "properties": [
+        "anoFatoGerador",
+        "tipoDocumento",
+        "natureza",
+        "vProd",
+        "vFrete",
+        "vSeg",
+        "vOutro",
+        "vII",
+        "vIS",
+        "vDesc",
+        "vPIS",
+        "vCOFINS",
+        "vICMS",
+        "vICMSUFDest",
+        "vFCP",
+        "vFCPUFDest",
+        "vICMSMono",
+        "vISSQN"
+      ],
+      "required": [
+        "anoFatoGerador",
+        "natureza",
+        "tipoDocumento"
+      ]
+    },
+    "BaseCalculoUnificadaNfseInput": {
+      "properties": [
+        "anoFatoGerador",
+        "opSimpNac",
+        "situacao",
+        "vServ",
+        "vDescIncond",
+        "vISSQN",
+        "vPIS",
+        "vCOFINS",
+        "regApIBSCBSSN",
+        "documentos",
+        "locacao"
+      ],
+      "required": [
+        "anoFatoGerador",
+        "opSimpNac",
+        "situacao"
+      ]
+    },
+    "BaseCalculoUnificadaNfseOutput": {
+      "properties": [
+        "baseRG",
+        "baseSN",
+        "avisos",
+        "erros"
+      ],
+      "required": []
+    },
+    "BaseCalculoUnificadaOutput": {
+      "properties": [
+        "baseRG",
+        "baseIS",
+        "baseSN",
+        "avisos"
+      ],
+      "required": []
+    },
+    "CBSDomain": {
+      "properties": [
+        "pCBS",
+        "gDif",
+        "gDevTrib",
+        "gRed",
+        "vCBS"
+      ],
+      "required": []
+    },
+    "CBSTotalDomain": {
+      "properties": [
+        "vDif",
+        "vDevTrib",
+        "vCBS",
+        "vCredPres",
+        "vCredPresCondSus"
+      ],
+      "required": []
+    },
+    "ClassificacaoTributariaDadosAbertosOutput": {
+      "properties": [
+        "codigo",
+        "descricao",
+        "tipoAliquota",
+        "nomenclatura",
+        "descricaoTratamentoTributario",
+        "incompativelComSuspensao",
+        "exigeGrupoDesoneracao",
+        "possuiPercentualReducao",
+        "indicaApropriacaoCreditoAdquirenteCbs",
+        "indicaApropriacaoCreditoAdquirenteIbs",
+        "indicaCreditoPresumidoFornecedor",
+        "indicaCreditoPresumidoAdquirente",
+        "creditoOperacaoAntecedente",
+        "percentualReducaoCbs",
+        "percentualReducaoIbsUf",
+        "percentualReducaoIbsMun",
+        "tipoReceitaBrutaSimplesNacional",
+        "tiposDfeClassificacao",
+        "dataAtualizacao"
+      ],
+      "required": []
+    },
+    "ClassificacaoTributariaOutput": {
+      "properties": [
+        "codigo",
+        "descricao"
+      ],
+      "required": []
+    },
+    "ComponentesBaseCalculoInput": {
+      "properties": [
+        "vProd",
+        "vFrete",
+        "vSeg",
+        "vOutro",
+        "vII",
+        "vIS",
+        "vDesc",
+        "vPIS",
+        "vCOFINS",
+        "vICMS",
+        "vICMSUFDest",
+        "vFCP",
+        "vFCPUFDest",
+        "vICMSMono",
+        "vISSQN"
+      ],
+      "required": []
+    },
+    "CompraGovernamentalDomain": {
+      "properties": [
+        "tpEnteGov",
+        "pRedutor",
+        "tpOperGov"
+      ],
+      "required": []
+    },
+    "CompraGovernamentalInput": {
+      "properties": [
+        "tpEnteGov",
+        "tpOperGov"
+      ],
+      "required": [
+        "tpEnteGov"
+      ]
+    },
+    "CreditoPresumidoIBSZFMDomain": {
+      "properties": [
+        "competApur",
+        "tpCredPresIBSZFM",
+        "vCredPresIBSZFM"
+      ],
+      "required": []
+    },
+    "CreditoPresumidoOperacaoDomain": {
+      "properties": [
+        "vBCCredPres",
+        "cCredPres",
+        "gIBSCredPres",
+        "gCBSCredPres"
+      ],
+      "required": []
+    },
+    "DevolucaoTributosDomain": {
+      "properties": [
+        "pDevTrib",
+        "vDevTrib"
+      ],
+      "required": []
+    },
+    "DiferimentoDomain": {
+      "properties": [
+        "pDif",
+        "vDif"
+      ],
+      "required": []
+    },
+    "DocumentoAjusteNfseInput": {
+      "properties": [
+        "tpAjusteBC",
+        "vAjusteAplic",
+        "xTpAjusteBC"
+      ],
+      "required": [
+        "tpAjusteBC",
+        "vAjusteAplic"
+      ]
+    },
+    "ErroBaseCalculoNfse": {
+      "properties": [
+        "codigo",
+        "mensagem"
+      ],
+      "required": []
+    },
+    "ErroDescricao": {
+      "properties": [
+        "codigo",
+        "titulo",
+        "descricao"
+      ],
+      "required": []
+    },
+    "ErroDetalhe": {
+      "properties": [
+        "type",
+        "title",
+        "code",
+        "pointer",
+        "detail"
+      ],
+      "required": []
+    },
+    "EstornoCreditoDomain": {
+      "properties": [
+        "vIBSEstCred",
+        "vCBSEstCred"
+      ],
+      "required": []
+    },
+    "FundamentacaoClassificacaoDadosAbertosOutput": {
+      "properties": [
+        "codigoClassificacaoTributaria",
+        "descricaoClassificacaoTributaria",
+        "codigoSituacaoTributaria",
+        "descricaoSituacaoTributaria",
+        "conjuntoTributo",
+        "texto",
+        "textoCurto",
+        "referenciaNormativa"
+      ],
+      "required": []
+    },
+    "GrupoAtorDadosAbertosOutput": {
+      "properties": [
+        "id",
+        "descricao",
+        "ordem",
+        "atores"
+      ],
+      "required": []
+    },
+    "GrupoDfeDadosAbertosOutput": {
+      "properties": [
+        "id",
+        "titulo",
+        "ordem",
+        "tipos"
+      ],
+      "required": []
+    },
+    "GrupoIBSCBSDomain": {
+      "properties": [
+        "vBC",
+        "gIBSUF",
+        "gIBSMun",
+        "vIBS",
+        "gCBS",
+        "gTribRegular",
+        "gTribCompraGov"
+      ],
+      "required": []
+    },
+    "IBSCBSCreditoPresumidoDomain": {
+      "properties": [
+        "pCredPres",
+        "vCredPres",
+        "vCredPresCondSus"
+      ],
+      "required": []
+    },
+    "IBSCBSDomain": {
+      "properties": [
+        "CST",
+        "cClassTrib",
+        "indDoacao",
+        "gIBSCBS",
+        "gIBSCBSMono",
+        "gTransfCred",
+        "gAjusteCompet",
+        "gEstornoCred",
+        "gCredPresOper",
+        "gCredPresIBSZFM",
+        "memoriaCalculo"
+      ],
+      "required": []
+    },
+    "IBSCBSTotalDomain": {
+      "properties": [
+        "vBCIBSCBS",
+        "gIBS",
+        "gCBS",
+        "gMono",
+        "gEstornoCred"
+      ],
+      "required": []
+    },
+    "IBSMunDomain": {
+      "properties": [
+        "pIBSMun",
+        "gDif",
+        "gDevTrib",
+        "gRed",
+        "vIBSMun"
+      ],
+      "required": []
+    },
+    "IBSMunTotalDomain": {
+      "properties": [
+        "vDif",
+        "vDevTrib",
+        "vIBSMun"
+      ],
+      "required": []
+    },
+    "IBSTotalDomain": {
+      "properties": [
+        "gIBSUF",
+        "gIBSMun",
+        "vIBS",
+        "vCredPres",
+        "vCredPresCondSus"
+      ],
+      "required": []
+    },
+    "IBSUFDomain": {
+      "properties": [
+        "pIBSUF",
+        "gDif",
+        "gDevTrib",
+        "gRed",
+        "vIBSUF"
+      ],
+      "required": []
+    },
+    "IBSUFTotalDomain": {
+      "properties": [
+        "vDif",
+        "vDevTrib",
+        "vIBSUF"
+      ],
+      "required": []
+    },
+    "ImpostoSeletivoDomain": {
+      "properties": [
+        "CSTIS",
+        "cClassTribIS",
+        "vBCIS",
+        "pIS",
+        "pISEspec",
+        "adRemIS",
+        "uTrib",
+        "qTrib",
+        "vIS",
+        "memoriaCalculo"
+      ],
+      "required": []
+    },
+    "ImpostoSeletivoInput": {
+      "properties": [
+        "cst",
+        "cClassTrib",
+        "baseCalculo",
+        "quantidade",
+        "unidade",
+        "impostoInformado"
+      ],
+      "required": [
+        "baseCalculo",
+        "cClassTrib",
+        "cst"
+      ]
+    },
+    "ImpostoSeletivoTotalDomain": {
+      "properties": [
+        "vIS"
+      ],
+      "required": []
+    },
+    "ItemOperacaoInput": {
+      "properties": [
+        "numero",
+        "ncm",
+        "nbs",
+        "cst",
+        "cClassTrib",
+        "baseCalculo",
+        "quantidade",
+        "unidade",
+        "impostoSeletivo",
+        "tributacaoRegular",
+        "gComponentesBC",
+        "aliquotasNominais"
+      ],
+      "required": [
+        "cClassTrib",
+        "cst",
+        "numero"
+      ]
+    },
+    "LocacaoNfseInput": {
+      "properties": [
+        "pCopropriedade",
+        "vTotOper",
+        "vDescIncondTot",
+        "somaAjustesLocImoveis"
+      ],
+      "required": [
+        "pCopropriedade",
+        "somaAjustesLocImoveis",
+        "vDescIncondTot",
+        "vTotOper"
+      ]
+    },
+    "MemoriaCalculoDomain": {
+      "properties": [
+        "cbs",
+        "ibsUF",
+        "ibsMun"
+      ],
+      "required": []
+    },
+    "MonofasiaDiferimentoDomain": {
+      "properties": [
+        "pDifIBS",
+        "vIBSMonoDif",
+        "pDifCBS",
+        "vCBSMonoDif"
+      ],
+      "required": []
+    },
+    "MonofasiaDomain": {
+      "properties": [
+        "gMonoPadrao",
+        "gMonoReten",
+        "gMonoRet",
+        "gMonoDif",
+        "vTotIBSMonoItem",
+        "vTotCBSMonoItem"
+      ],
+      "required": []
+    },
+    "MonofasiaPadraoDomain": {
+      "properties": [
+        "qBCMono",
+        "adRemIBS",
+        "adRemCBS",
+        "vIBSMono",
+        "vCBSMono"
+      ],
+      "required": []
+    },
+    "MonofasiaRetencaoDomain": {
+      "properties": [
+        "qBCMonoReten",
+        "adRemIBSReten",
+        "vIBSMonoReten",
+        "adRemCBSReten",
+        "vCBSMonoReten"
+      ],
+      "required": []
+    },
+    "MonofasiaRetidoAnteriormenteDomain": {
+      "properties": [
+        "qBCMonoRet",
+        "adRemIBSRet",
+        "vIBSMonoRet",
+        "adRemCBSRet",
+        "vCBSMonoRet"
+      ],
+      "required": []
+    },
+    "MonofasiaTotalDomain": {
+      "properties": [
+        "vIBSMono",
+        "vCBSMono",
+        "vIBSMonoReten",
+        "vCBSMonoReten",
+        "vIBSMonoRet",
+        "vCBSMonoRet"
+      ],
+      "required": []
+    },
+    "MunicipioDadosAbertosOutput": {
+      "properties": [
+        "codigo",
+        "nome"
+      ],
+      "required": []
+    },
+    "NbsAplicavelOutput": {
+      "properties": [
+        "cClassTrib",
+        "nbs",
+        "dataOcorrenciaFatoGerador",
+        "valido"
+      ],
+      "required": []
+    },
+    "NbsDadosAbertosOutput": {
+      "properties": [
+        "tributadoPeloImpostoSeletivo",
+        "temAliquotaAdValorem",
+        "aliquotaAdValorem",
+        "capitulo",
+        "posicao",
+        "subposicao1",
+        "subposicao2",
+        "item"
+      ],
+      "required": []
+    },
+    "NbsListaDadosAbertosOutput": {
+      "properties": [
+        "codigo",
+        "descricao"
+      ],
+      "required": []
+    },
+    "NcmAplicavelOutput": {
+      "properties": [
+        "cClassTrib",
+        "ncm",
+        "dataOcorrenciaFatoGerador",
+        "valido"
+      ],
+      "required": []
+    },
+    "NcmDadosAbertosOutput": {
+      "properties": [
+        "tributadoPeloImpostoSeletivo",
+        "temAliquotaAdValorem",
+        "temAliquotaAdRem",
+        "aliquotaAdValorem",
+        "aliquotaAdRem",
+        "capitulo",
+        "posicao",
+        "subposicao",
+        "item",
+        "subitem",
+        "unidade"
+      ],
+      "required": []
+    },
+    "NcmVigenciaOutput": {
+      "properties": [
+        "ncm",
+        "descricao"
+      ],
+      "required": []
+    },
+    "NfseBaseCalculoInput": {
+      "properties": [
+        "anoFatoGerador",
+        "valorServico",
+        "descontoIncondicional",
+        "vCalcReeRepRes",
+        "vCalcDedRedIBSCBS",
+        "iss",
+        "pis",
+        "cofins"
+      ],
+      "required": [
+        "anoFatoGerador",
+        "valorServico"
+      ]
+    },
+    "NfseBaseCalculoOutput": {
+      "properties": [
+        "baseCalculo"
+      ],
+      "required": []
+    },
+    "NfseCodigoDescricaoOutput": {
+      "properties": [
+        "codigo",
+        "descricao"
+      ],
+      "required": []
+    },
+    "NfseIndicadorOperacaoOutput": {
+      "properties": [
+        "cIndOp",
+        "tipoOperacao",
+        "codigoLocalFornecimento",
+        "localFornecimento",
+        "codigoLocalIncidencia",
+        "localIncidencia",
+        "prestacaoServicoOnerosa",
+        "adquirenteExterior"
+      ],
+      "required": []
+    },
+    "NfseLocalOperacaoOutput": {
+      "properties": [
+        "cIndOp",
+        "dataOcorrenciaFatoGerador",
+        "codigoLocalFornecimento",
+        "localFornecimento",
+        "codigoLocalIncidencia",
+        "localIncidencia"
+      ],
+      "required": []
+    },
+    "NfseSituacaoClassificacaoOutput": {
+      "properties": [
+        "codigoSituacaoTributaria",
+        "descricaoSituacaoTributaria",
+        "codigoClassificacaoTributaria",
+        "descricaoClassificacaoTributaria"
+      ],
+      "required": []
+    },
+    "NfseValidacaoIndicadorOperacaoInput": {
+      "properties": [
+        "cTribNac",
+        "cIndOp",
+        "cClassTrib",
+        "nbs",
+        "dataOcorrenciaFatoGerador"
+      ],
+      "required": [
+        "cClassTrib",
+        "cIndOp",
+        "dataOcorrenciaFatoGerador",
+        "nbs"
+      ]
+    },
+    "NfseValidacaoIndicadorOperacaoOutput": {
+      "properties": [
+        "cTribNac",
+        "cIndOp",
+        "cClassTrib",
+        "nbs",
+        "dataOcorrenciaFatoGerador",
+        "valido"
+      ],
+      "required": []
+    },
+    "NomenclaturaDadosAbertosOutput": {
+      "properties": [
+        "siglaDfe",
+        "cClassTrib",
+        "data",
+        "nomenclatura",
+        "obrigatorio",
+        "ncmOpcional",
+        "nbsOpcional"
+      ],
+      "required": []
+    },
+    "ObjetoDomain": {
+      "properties": [
+        "nObj",
+        "tribCalc",
+        "calculoSimulado"
+      ],
+      "required": []
+    },
+    "ObservabilidadeItemDomain": {
+      "properties": [
+        "nObj",
+        "estadoItem",
+        "tribCalc",
+        "erros"
+      ],
+      "required": []
+    },
+    "ObservabilidadeROCDomain": {
+      "properties": [
+        "oper",
+        "objetos",
+        "total"
+      ],
+      "required": []
+    },
+    "OpcaoSimplesNacional": {
+      "properties": [],
+      "required": []
+    },
+    "OperacaoConsumoDomain": {
+      "properties": [
+        "gCompraGov"
+      ],
+      "required": []
+    },
+    "OperacaoInput": {
+      "properties": [
+        "id",
+        "versao",
+        "dhFatoGerador",
+        "dataHoraEmissao",
+        "municipio",
+        "uf",
+        "tpDoc",
+        "gCompraGov",
+        "itens"
+      ],
+      "required": [
+        "id",
+        "itens",
+        "municipio",
+        "versao"
+      ]
+    },
+    "PedagioInput": {
+      "properties": [
+        "dataHoraEmissao",
+        "codigoMunicipioOrigem",
+        "ufMunicipioOrigem",
+        "cst",
+        "cClassTrib",
+        "baseCalculo",
+        "trechos"
+      ],
+      "required": [
+        "baseCalculo",
+        "cClassTrib",
+        "codigoMunicipioOrigem",
+        "cst",
+        "dataHoraEmissao",
+        "trechos",
+        "ufMunicipioOrigem"
+      ]
+    },
+    "PedagioOutput": {
+      "properties": [
+        "dataHoraEmissao",
+        "municipioOrigem",
+        "ufMunicipioOrigem",
+        "cst",
+        "cClassTrib",
+        "baseCalculo",
+        "extensaoTotal",
+        "trechos",
+        "total"
+      ],
+      "required": []
+    },
+    "ProblemDetail": {
+      "properties": [
+        "type",
+        "title",
+        "status",
+        "detail",
+        "instance",
+        "properties"
+      ],
+      "required": []
+    },
+    "ROCDomain": {
+      "properties": [
+        "oper",
+        "objetos",
+        "total"
+      ],
+      "required": []
+    },
+    "ReducaoAliquotaDomain": {
+      "properties": [
+        "pRedAliq",
+        "pAliqEfet"
+      ],
+      "required": []
+    },
+    "RedutorCompraGovernamentalDadosAbertosOutput": {
+      "properties": [
+        "valor",
+        "inicioVigencia",
+        "fimVigencia"
+      ],
+      "required": []
+    },
+    "RegimeApuracaoIbsCbsSN": {
+      "properties": [],
+      "required": []
+    },
+    "SituacaoClassificacaoAninhadoOutput": {
+      "properties": [
+        "id",
+        "codigo",
+        "descricao",
+        "classificacoesTributarias"
+      ],
+      "required": []
+    },
+    "SituacaoOperacaoNfse": {
+      "properties": [],
+      "required": []
+    },
+    "SituacaoTributariaDadosAbertosOutput": {
+      "properties": [
+        "id",
+        "codigo",
+        "descricao"
+      ],
+      "required": []
+    },
+    "TipoDfeClassificacaoDadosAbertosOutput": {
+      "properties": [
+        "tipo",
+        "sigla",
+        "descricao"
+      ],
+      "required": []
+    },
+    "TipoDfeDadosAbertosOutput": {
+      "properties": [
+        "codigo",
+        "titulo",
+        "descricao",
+        "modelo",
+        "ordem",
+        "suportado",
+        "permiteNcmZero"
+      ],
+      "required": []
+    },
+    "TipoDocumentoDTO": {
+      "properties": [
+        "nome",
+        "mnemonico",
+        "versaoNotaTecnica"
+      ],
+      "required": []
+    },
+    "TotalPedagioOutput": {
+      "properties": [
+        "cbsTotal",
+        "ibsEstadualTotal",
+        "ibsMunicipalTotal"
+      ],
+      "required": []
+    },
+    "TransferenciaCBSDadosAbertosOutput": {
+      "properties": [
+        "valor",
+        "inicioVigencia",
+        "fimVigencia"
+      ],
+      "required": []
+    },
+    "TransferenciaCreditoDomain": {
+      "properties": [
+        "vIBS",
+        "vCBS"
+      ],
+      "required": []
+    },
+    "TransferenciaIBSDadosAbertosOutput": {
+      "properties": [
+        "valor",
+        "inicioVigencia",
+        "fimVigencia"
+      ],
+      "required": []
+    },
+    "TrechoPedagioInput": {
+      "properties": [
+        "numero",
+        "municipio",
+        "uf",
+        "extensao"
+      ],
+      "required": [
+        "extensao",
+        "municipio",
+        "numero",
+        "uf"
+      ]
+    },
+    "TrechoPedagioOutput": {
+      "properties": [
+        "numero",
+        "municipio",
+        "uf",
+        "baseCalculo",
+        "extensaoTrecho",
+        "extensaoTotal",
+        "cbs",
+        "ibsEstadual",
+        "ibsMunicipal"
+      ],
+      "required": []
+    },
+    "TributacaoCompraGovernamentalDomain": {
+      "properties": [
+        "pAliqIBSUF",
+        "vTribIBSUF",
+        "pAliqIBSMun",
+        "vTribIBSMun",
+        "pAliqCBS",
+        "vTribCBS"
+      ],
+      "required": []
+    },
+    "TributacaoRegularDomain": {
+      "properties": [
+        "CSTReg",
+        "cClassTribReg",
+        "pAliqEfetRegIBSUF",
+        "vTribRegIBSUF",
+        "pAliqEfetRegIBSMun",
+        "vTribRegIBSMun",
+        "pAliqEfetRegCBS",
+        "vTribRegCBS"
+      ],
+      "required": []
+    },
+    "TributacaoRegularInput": {
+      "properties": [
+        "cst",
+        "cClassTrib"
+      ],
+      "required": [
+        "cClassTrib",
+        "cst"
+      ]
+    },
+    "TributoPedagioOutput": {
+      "properties": [
+        "aliquota",
+        "aliquotaEfetiva",
+        "tributoCalculado",
+        "memoriaCalculo"
+      ],
+      "required": []
+    },
+    "TributoTotalPedagioOutput": {
+      "properties": [
+        "baseCalculo",
+        "valorApurado",
+        "valorDevido",
+        "valorTributo",
+        "totalMontanteDesonerado"
+      ],
+      "required": []
+    },
+    "TributosDomain": {
+      "properties": [
+        "IS",
+        "IBSCBS"
+      ],
+      "required": []
+    },
+    "TributosTotaisDomain": {
+      "properties": [
+        "ISTot",
+        "IBSCBSTot"
+      ],
+      "required": []
+    },
+    "UfDadosAbertosOutput": {
+      "properties": [
+        "sigla",
+        "nome",
+        "codigo"
+      ],
+      "required": []
+    },
+    "ValidadeDfeClassificacaoTributariaDadosAbertosOutput": {
+      "properties": [
+        "siglaDfeInformado",
+        "validoParaSiglaDfeInformado",
+        "nomenclatura",
+        "exigeGrupoTributacaoRegular",
+        "permiteDiferimento",
+        "possibilidadeCreditoPresumido",
+        "exigeGrupoIbsCbs"
+      ],
+      "required": []
+    },
+    "ValoresTotaisDomain": {
+      "properties": [
+        "tribCalc"
+      ],
+      "required": []
+    },
+    "VersaoOfflineOutput": {
+      "properties": [
+        "aplicacaoAtualizada",
+        "dbAtualizada",
+        "dataDbAtualizada",
+        "versaoAplicacaoLocal",
+        "versaoAplicacaoRemota",
+        "versaoDbLocal",
+        "versaoDbRemota",
+        "dataDbLocal",
+        "dataDbRemota"
+      ],
+      "required": []
+    },
+    "VersaoOutput": {
+      "properties": [
+        "versaoApp",
+        "descricaoVersaoApp",
+        "versaoDb",
+        "descricaoVersaoDb",
+        "dataVersaoDb",
+        "ambiente"
+      ],
+      "required": []
+    }
+  }
+}

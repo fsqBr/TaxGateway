@@ -1,0 +1,100 @@
+{
+  "id": "D-820009-RN",
+  "descricao": "cClassTrib 820009 (Tributação em documento específico) em 2026",
+  "bundle": "2026.11.2",
+  "api_request": {
+    "cnpj_emitente": "11222333000181",
+    "regime_tributario": "REGIME_REGULAR",
+    "data_fato_gerador": "2026-08-20T14:00:00-03:00",
+    "municipio_ibge": 2408102,
+    "uf": "RN",
+    "itens": [
+      {
+        "numero": 1,
+        "cst_ibs_cbs": "820",
+        "c_class_trib": "820009",
+        "valor_base_calculo": 1000,
+        "ncm": "84713012",
+        "quantidade": 1,
+        "unidade": "UN"
+      }
+    ]
+  },
+  "engine_request": {
+    "id": "golden",
+    "versao": "1.0.0",
+    "dhFatoGerador": "2026-08-20T14:00:00-03:00",
+    "municipio": 2408102,
+    "uf": "RN",
+    "itens": [
+      {
+        "numero": 1,
+        "ncm": "84713012",
+        "cst": "820",
+        "cClassTrib": "820009",
+        "baseCalculo": 1000,
+        "quantidade": 1,
+        "unidade": "UN"
+      }
+    ]
+  },
+  "engine_response": {
+    "status": 200,
+    "body": {
+      "objetos": [
+        {
+          "nObj": 1,
+          "estadoItem": "CALCULADO",
+          "tribCalc": {
+            "IBSCBS": {
+              "CST": "820",
+              "cClassTrib": "820009",
+              "memoriaCalculo": {
+                "cbs": "Operação de consumo com enquadramento legal em Art. 60, tributada conforme Tributação em documento específico. A base de cálculo utilizada é de R$ 1.000,00, sendo que esta operação não possui alíquota.",
+                "ibsUF": "Operação de consumo com enquadramento legal em Art. 60, tributada conforme Tributação em documento específico. A base de cálculo utilizada é de R$ 1.000,00, sendo que esta operação não possui alíquota.",
+                "ibsMun": "Operação de consumo com enquadramento legal em Art. 60, tributada conforme Tributação em documento específico. A base de cálculo utilizada é de R$ 1.000,00, sendo que esta operação não possui alíquota."
+              }
+            }
+          }
+        }
+      ],
+      "total": {
+        "tribCalc": {
+          "IBSCBSTot": {
+            "vBCIBSCBS": "0.00",
+            "gIBS": {
+              "gIBSUF": {
+                "vDif": "0.00",
+                "vDevTrib": "0.00",
+                "vIBSUF": "0.00"
+              },
+              "gIBSMun": {
+                "vDif": "0.00",
+                "vDevTrib": "0.00",
+                "vIBSMun": "0.00"
+              },
+              "vIBS": "0.00",
+              "vCredPres": "0.00",
+              "vCredPresCondSus": "0.00"
+            },
+            "gCBS": {
+              "vDif": "0.00",
+              "vDevTrib": "0.00",
+              "vCBS": "0.00",
+              "vCredPres": "0.00",
+              "vCredPresCondSus": "0.00"
+            },
+            "gMono": {
+              "vIBSMono": "0.00",
+              "vCBSMono": "0.00",
+              "vIBSMonoReten": "0.00",
+              "vCBSMonoReten": "0.00",
+              "vIBSMonoRet": "0.00",
+              "vCBSMonoRet": "0.00"
+            }
+          }
+        }
+      }
+    }
+  }
+}

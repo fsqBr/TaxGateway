@@ -1,0 +1,57 @@
+{
+  "id": "E-cclasstrib-inexistente",
+  "descricao": "cClassTrib inexistente",
+  "bundle": "2026.11.2",
+  "api_request": {
+    "cnpj_emitente": "11222333000181",
+    "regime_tributario": "REGIME_REGULAR",
+    "data_fato_gerador": "2026-06-15T14:00:00-03:00",
+    "municipio_ibge": 3550308,
+    "uf": "SP",
+    "itens": [
+      {
+        "numero": 1,
+        "cst_ibs_cbs": "000",
+        "c_class_trib": "000999",
+        "valor_base_calculo": 10,
+        "ncm": "84713012"
+      }
+    ]
+  },
+  "engine_request": {
+    "id": "golden",
+    "versao": "1.0.0",
+    "dhFatoGerador": "2026-06-15T14:00:00-03:00",
+    "municipio": 3550308,
+    "uf": "SP",
+    "itens": [
+      {
+        "numero": 1,
+        "ncm": "84713012",
+        "cst": "000",
+        "cClassTrib": "000999",
+        "baseCalculo": 10
+      }
+    ]
+  },
+  "engine_response": {
+    "status": 200,
+    "body": {
+      "objetos": [
+        {
+          "nObj": 1,
+          "estadoItem": "INCONSISTENCIA_ENTRADA",
+          "erros": [
+            {
+              "type": "http://127.0.0.1/api/calculadora/observabilidade/erros?codigo=REG-005",
+              "title": "Classificação tributária não encontrada",
+              "code": "REG-005",
+              "pointer": "#/itens/0/cClassTrib",
+              "detail": "Classificação tributária não encontrada para código 000999 e data 2026-06-15 (CBS e IBS)"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,101 @@
+# Deploy (SDD §2.3 passos 4 a 7; D-405).
+# main → imagens da aplicação no GHCR → staging automático → produção só com aprovação do GitHub Environment
+# "production" (revisores obrigatórios: engenharia + responsável fiscal, configurados nas settings do repositório)
+# → canário do Argo Rollouts (5% por 30 min com análise de erro e p95; falhou = rollback automático).
+# Retenção: imagens "bundle-*" e de releases nunca são apagadas (prazo decadencial + margem, ≥ 6 anos).
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io/${{ github.repository_owner }}/taxgateway
+
+jobs:
+  images:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - id: meta
+        run: echo "tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+      - name: Login no GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Build e push (api, workers, migrator)
+        run: |
+          for t in api workers migrator; do
+            docker build -f src/Dockerfile --target "$t" -t "$REGISTRY/$t:${{ steps.meta.outputs.tag }}" .
+            docker push "$REGISTRY/$t:${{ steps.meta.outputs.tag }}"
+          done
+      - name: Build e push do web (site/portal e backoffice, D-W05)
+        run: |
+          for t in public backoffice; do
+            name=$([ "$t" = public ] && echo web || echo web-backoffice)
+            docker build ./web --target "$t" -t "$REGISTRY/$name:${{ steps.meta.outputs.tag }}"
+            docker push "$REGISTRY/$name:${{ steps.meta.outputs.tag }}"
+          done
+      - name: Motores do bundle (labels + db_sha256)
+        run: |
+          bash infra/rfb/build.sh "$REGISTRY"
+          docker image ls --format '{{.Repository}}:{{.Tag}}' | grep "^$REGISTRY/rtc-" | xargs -n1 docker push
+
+  staging:
+    needs: images
+    runs-on: ubuntu-24.04
+    environment: staging
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Kubeconfig
+        run: echo "${{ secrets.KUBECONFIG_STAGING }}" > "$RUNNER_TEMP/kubeconfig"
+      - name: Helm upgrade (migrations rodam no hook pre-upgrade)
+        env:
+          KUBECONFIG: ${{ runner.temp }}/kubeconfig
+        run: |
+          helm upgrade --install taxgateway infra/k8s/taxgateway -n taxgateway --create-namespace \
+            --set image.registry="$REGISTRY" --set image.tag="${{ needs.images.outputs.tag }}" \
+            --set engines.bundle="$(python3 -c 'import json;print(json.load(open("infra/rfb/versions.json"))["bundle"])')" \
+            --wait --timeout 20m
+
+  production:
+    needs: [images, staging]
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Kubeconfig
+        run: echo "${{ secrets.KUBECONFIG_PRODUCTION }}" > "$RUNNER_TEMP/kubeconfig"
+      - name: Plugin do Argo Rollouts
+        run: |
+          curl -fsSLo /usr/local/bin/kubectl-argo-rollouts https://github.com/argoproj/argo-rollouts/releases/download/v1.8.3/kubectl-argo-rollouts-linux-amd64
+          chmod +x /usr/local/bin/kubectl-argo-rollouts
+      - name: Canário com rollback automático
+        env:
+          KUBECONFIG: ${{ runner.temp }}/kubeconfig
+        run: |
+          helm upgrade --install taxgateway infra/k8s/taxgateway -n taxgateway \
+            --set image.registry="$REGISTRY" --set image.tag="${{ needs.images.outputs.tag }}" \
+            --set engines.bundle="$(python3 -c 'import json;print(json.load(open("infra/rfb/versions.json"))["bundle"])')" \
+            --timeout 20m
+          if ! kubectl argo rollouts status api -n taxgateway --timeout 3h; then
+            kubectl argo rollouts abort api -n taxgateway
+            kubectl argo rollouts undo api -n taxgateway
+            echo "Canário reprovado pela análise (erro/p95): rollback executado." >&2
+            exit 1
+          fi

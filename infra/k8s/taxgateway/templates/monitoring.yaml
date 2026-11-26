@@ -1,0 +1,87 @@
+{{- if .Values.monitoring.enabled }}
+# Coleta das métricas da API (D-H01) e SLOs do §16.3 como alertas (D-H02). A label "service" que o ServiceMonitor
+# adiciona é a mesma usada pela análise do canário (api-canary) no AnalysisTemplate api-slo.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: api
+  labels: {{- include "tg.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels: { app.kubernetes.io/part-of: taxgateway }   # só os Services com porta "metrics" (api, api-canary) geram alvo
+  endpoints:
+    - { port: metrics, path: /metrics, interval: 15s }
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: taxgateway-slo
+  labels: {{- include "tg.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: taxgateway-slo-recording
+      interval: 30s
+      rules:
+        # Razão de erro (5xx) da API pública por janela; 4xx é erro do cliente e não queima orçamento.
+        {{- range $w := list "5m" "30m" "1h" "6h" }}
+        - record: taxgateway:api_error_ratio:rate{{ $w }}
+          expr: |
+            sum(rate(http_server_request_duration_seconds_count{service="api",http_route=~"/v1/.*",http_response_status_code=~"5.."}[{{ $w }}]))
+            / clamp_min(sum(rate(http_server_request_duration_seconds_count{service="api",http_route=~"/v1/.*"}[{{ $w }}])), 1e-9)
+        {{- end }}
+        - record: taxgateway:simular_latency_seconds:p95_10m
+          expr: histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{service="api",http_route="/v1/calculo/simular"}[10m])))
+        - record: taxgateway:simular_latency_seconds:p99_10m
+          expr: histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket{service="api",http_route="/v1/calculo/simular"}[10m])))
+        - record: taxgateway:auditoria_latency_seconds:p95_10m
+          expr: histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{service="api",http_route="/v1/auditoria/xml"}[10m])))
+    - name: taxgateway-slo-alerts
+      rules:
+        # Disponibilidade 99,95%: alertas de queima de orçamento em duas janelas (rápida = página, lenta = ticket).
+        - alert: TaxGatewayErrorBudgetFastBurn
+          expr: |
+            taxgateway:api_error_ratio:rate1h > (14.4 * {{ .Values.monitoring.slo.errorBudget }})
+            and taxgateway:api_error_ratio:rate5m > (14.4 * {{ .Values.monitoring.slo.errorBudget }})
+          for: 2m
+          labels: { severity: page, slo: disponibilidade }
+          annotations:
+            summary: "API queimando o orçamento de erro 14x mais rápido que o sustentável"
+            runbook: docs/runbooks/README.md
+        - alert: TaxGatewayErrorBudgetSlowBurn
+          expr: |
+            taxgateway:api_error_ratio:rate6h > (6 * {{ .Values.monitoring.slo.errorBudget }})
+            and taxgateway:api_error_ratio:rate30m > (6 * {{ .Values.monitoring.slo.errorBudget }})
+          for: 15m
+          labels: { severity: ticket, slo: disponibilidade }
+          annotations:
+            summary: "API queimando o orçamento de erro 6x mais rápido que o sustentável"
+            runbook: docs/runbooks/README.md
+        - alert: TaxGatewaySimularP95Alto
+          expr: taxgateway:simular_latency_seconds:p95_10m > {{ .Values.monitoring.slo.simularP95Seconds }}
+          for: 10m
+          labels: { severity: ticket, slo: latencia-simular }
+          annotations:
+            summary: "p95 de /v1/calculo/simular acima da meta do §16.3"
+            runbook: docs/runbooks/motor-rfb-degradado.md
+        - alert: TaxGatewaySimularP99Alto
+          expr: taxgateway:simular_latency_seconds:p99_10m > {{ .Values.monitoring.slo.simularP99Seconds }}
+          for: 10m
+          labels: { severity: ticket, slo: latencia-simular }
+          annotations:
+            summary: "p99 de /v1/calculo/simular acima da meta do §16.3"
+            runbook: docs/runbooks/motor-rfb-degradado.md
+        - alert: TaxGatewayAuditoriaP95Alto
+          expr: taxgateway:auditoria_latency_seconds:p95_10m > {{ .Values.monitoring.slo.auditoriaP95Seconds }}
+          for: 10m
+          labels: { severity: ticket, slo: latencia-auditoria }
+          annotations:
+            summary: "p95 de /v1/auditoria/xml acima da meta do §16.3"
+            runbook: docs/runbooks/motor-rfb-degradado.md
+        - alert: TaxGatewayApiSemMetricas
+          expr: absent(up{service="api"} == 1)
+          for: 5m
+          labels: { severity: page }
+          annotations:
+            summary: "Nenhuma instância da API sendo coletada pelo Prometheus"
+            runbook: docs/runbooks/README.md
+{{- end }}

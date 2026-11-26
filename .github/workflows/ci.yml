@@ -1,0 +1,172 @@
+# CI do TaxGateway (SDD §12, Fase 0; decisão D-009).
+# - dotnet: build com analisadores (warnings = erro), testes unitários e de segurança (Testcontainers), SBOM.
+# - engines: imagens dos motores a partir de versions.json, label rtc.db_sha256 e checagem do banco único.
+# - engine-tests: testes oficiais da RFB contra o banco gerado, com lista de exceções versionada.
+# - golden: corpus golden v0 contra o motor real (critério de saída da Fase 2).
+# Publicação no GHCR só em push na main.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+
+jobs:
+  dotnet:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Restore
+        run: dotnet restore
+      - name: Build (analisadores, warnings como erro)
+        run: dotnet build --no-restore -c Release
+      - name: Testes unitários
+        run: dotnet test tests/TaxGateway.UnitTests --no-build -c Release --logger trx --results-directory out/test-results
+      - name: Testes de segurança (RLS, admin, leases, XML, KMS, LCR)
+        run: dotnet test tests/TaxGateway.SecurityTests --no-build -c Release --logger trx --results-directory out/test-results
+      - name: SBOM (CycloneDX)
+        run: |
+          dotnet tool install --global CycloneDX --version 6.3.1
+          dotnet-CycloneDX TaxGateway.slnx --output out/sbom --filename taxgateway.cdx.json --json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dotnet-results
+          path: out/
+
+  engines:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build das imagens dos motores
+        run: bash infra/rfb/build.sh ghcr.io/${{ github.repository_owner }}/taxgateway
+      - name: Os dois motores sobem e respondem /versao
+        run: |
+          set -euo pipefail
+          prefix=ghcr.io/${{ github.repository_owner }}/taxgateway
+          for e in regular:1.7.2:8080:9101 simples:1.0.2:8082:9103; do
+            IFS=: read -r name tag port mgmt <<<"$e"
+            docker run -d --name "rtc-$name" --read-only --tmpfs /tmp:exec \
+              -e VERSAO_OFFLINE_URL=http://127.0.0.1:9/disabled -e VERSAO_URL=http://127.0.0.1:9/disabled \
+              -p "$port:$port" -p "$mgmt:$mgmt" "$prefix/rtc-$name:$tag"
+          done
+          for _ in $(seq 1 90); do
+            curl -fs http://127.0.0.1:8080/api/calculadora/dados-abertos/versao >/dev/null \
+              && curl -fs http://127.0.0.1:8082/api/versao >/dev/null && break
+            sleep 2
+          done
+          curl -fs http://127.0.0.1:8080/api/calculadora/dados-abertos/versao
+          curl -fs http://127.0.0.1:8082/api/versao
+      - name: Publicar no GHCR (main)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker image ls --format '{{.Repository}}:{{.Tag}}' | grep "^ghcr.io/${{ github.repository_owner }}/taxgateway/rtc-" | xargs -n1 docker push
+
+  engine-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [regular, simples]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Testes oficiais do motor (${{ matrix.engine }})
+        run: bash infra/rfb/test-engines.sh ${{ matrix.engine }} out/engine-tests/${{ matrix.engine }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: engine-tests-${{ matrix.engine }}
+          path: out/engine-tests/${{ matrix.engine }}/
+
+  web:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - name: Tipos, testes de componente e builds (público e backoffice)
+        run: |
+          npm run typecheck
+          npm test
+          npx vite build --outDir dist/public
+          npx vite build --mode backoffice --outDir dist/backoffice
+          # O bundle do backoffice não pode conter o site; o público não pode conter as telas do backoffice.
+          if grep -q "Propor mudança" dist/public/assets/*.js; then echo "telas do backoffice no bundle público"; exit 1; fi
+          if grep -q "IBS, CBS e Imposto Seletivo" dist/backoffice/assets/*.js; then echo "site no bundle do backoffice"; exit 1; fi
+      - name: Imagens nginx
+        run: |
+          docker build . --target public -t taxgateway/web:ci
+          docker build . --target backoffice -t taxgateway/web-backoffice:ci
+
+  helm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Lint e validação dos manifests (kubeconform, CRDs do Argo Rollouts)
+        run: |
+          helm lint infra/k8s/taxgateway
+          helm template tg infra/k8s/taxgateway > /tmp/rendered.yaml
+          docker run --rm -v /tmp:/w ghcr.io/yannh/kubeconform:v0.6.7 -strict -summary -kubernetes-version 1.33.0             -schema-location default             -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'             /w/rendered.yaml
+      - name: Regras de SLO (promtool, D-H02)
+        run: |
+          python3 -c "import yaml; d=[x for x in yaml.safe_load_all(open('/tmp/rendered.yaml')) if x and x.get('kind')=='PrometheusRule'][0]; yaml.safe_dump({'groups': d['spec']['groups']}, open('/tmp/rules.yml','w'))"
+          docker run --rm --entrypoint promtool -v /tmp:/w prom/prometheus:v3.5.0 check rules /w/rules.yml
+      - name: Scripts do pipeline fiscal
+        run: |
+          python3 infra/rfb/regression_report.py --self-test
+          python3 infra/rfb/check_tags.py --self-test
+
+  golden:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Motor regular
+        run: |
+          bash infra/rfb/build.sh taxgateway
+          docker run -d --name rtc-regular --read-only --tmpfs /tmp:exec \
+            -e VERSAO_OFFLINE_URL=http://127.0.0.1:9/disabled -p 8080:8080 taxgateway/rtc-regular:1.7.2
+          for _ in $(seq 1 90); do curl -fs http://127.0.0.1:8080/api/calculadora/dados-abertos/versao >/dev/null && break; sleep 2; done
+      - name: Corpus golden (simulação reproduz 100%; auditoria XML sem falso positivo)
+        env:
+          RTC_REGULAR_URL: http://127.0.0.1:8080/api/
+        run: dotnet test tests/TaxGateway.GoldenTests -c Release
+      - name: Contrato dos motores (OpenAPI)
+        run: dotnet test tests/TaxGateway.ContractTests -c Release

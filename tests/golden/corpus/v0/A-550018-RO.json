@@ -1,0 +1,67 @@
+{
+  "id": "A-550018-RO",
+  "descricao": "cClassTrib 550018 (Suspensão) em 2027",
+  "bundle": "2026.11.2",
+  "api_request": {
+    "cnpj_emitente": "11222333000181",
+    "regime_tributario": "REGIME_REGULAR",
+    "data_fato_gerador": "2027-06-15T14:00:00-04:00",
+    "municipio_ibge": 1100205,
+    "uf": "RO",
+    "itens": [
+      {
+        "numero": 1,
+        "cst_ibs_cbs": "550",
+        "c_class_trib": "550018",
+        "valor_base_calculo": 1000,
+        "ncm": "84713012",
+        "quantidade": 1,
+        "unidade": "UN"
+      }
+    ]
+  },
+  "engine_request": {
+    "id": "golden",
+    "versao": "1.0.0",
+    "dhFatoGerador": "2027-06-15T14:00:00-04:00",
+    "municipio": 1100205,
+    "uf": "RO",
+    "itens": [
+      {
+        "numero": 1,
+        "ncm": "84713012",
+        "cst": "550",
+        "cClassTrib": "550018",
+        "baseCalculo": 1000,
+        "quantidade": 1,
+        "unidade": "UN",
+        "aliquotasNominais": {
+          "cbs": 11.2000,
+          "ibsEstadual": 0.0500,
+          "ibsMunicipal": 0.0500
+        }
+      }
+    ]
+  },
+  "engine_response": {
+    "status": 200,
+    "body": {
+      "objetos": [
+        {
+          "nObj": 1,
+          "estadoItem": "INCONSISTENCIA_ENTRADA",
+          "erros": [
+            {
+              "type": "http://127.0.0.1/api/calculadora/observabilidade/erros?codigo=REG-009",
+              "title": "Grupo de tributação regular não informado",
+              "code": "REG-009",
+              "pointer": "#/itens/0/tributacaoRegular",
+              "detail": "Dados da tributação regular devem ser informados para cClassTrib 550018 e CST 550"
+            }
+          ]
+        }
+      ]
+    },
+    "warning": "6"
+  }
+}

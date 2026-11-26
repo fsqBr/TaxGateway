@@ -1,0 +1,222 @@
+{
+  "id": "B-2026-MS",
+  "descricao": "2026: CBS 0,9% e IBS 0,1% da base oficial",
+  "bundle": "2026.11.2",
+  "api_request": {
+    "cnpj_emitente": "11222333000181",
+    "regime_tributario": "REGIME_REGULAR",
+    "data_fato_gerador": "2026-03-10T14:00:00-04:00",
+    "municipio_ibge": 5002704,
+    "uf": "MS",
+    "itens": [
+      {
+        "numero": 1,
+        "cst_ibs_cbs": "000",
+        "c_class_trib": "000001",
+        "valor_base_calculo": 3000,
+        "ncm": "84713012",
+        "quantidade": 1,
+        "unidade": "UN"
+      },
+      {
+        "numero": 2,
+        "cst_ibs_cbs": "200",
+        "c_class_trib": "200003",
+        "valor_base_calculo": 100,
+        "ncm": "10063021",
+        "quantidade": 20,
+        "unidade": "KG"
+      },
+      {
+        "numero": 3,
+        "cst_ibs_cbs": "000",
+        "c_class_trib": "000001",
+        "valor_base_calculo": 1200,
+        "nbs": "122011200"
+      }
+    ]
+  },
+  "engine_request": {
+    "id": "golden",
+    "versao": "1.0.0",
+    "dhFatoGerador": "2026-03-10T14:00:00-04:00",
+    "municipio": 5002704,
+    "uf": "MS",
+    "itens": [
+      {
+        "numero": 1,
+        "ncm": "84713012",
+        "cst": "000",
+        "cClassTrib": "000001",
+        "baseCalculo": 3000,
+        "quantidade": 1,
+        "unidade": "UN"
+      },
+      {
+        "numero": 2,
+        "ncm": "10063021",
+        "cst": "200",
+        "cClassTrib": "200003",
+        "baseCalculo": 100,
+        "quantidade": 20,
+        "unidade": "KG"
+      },
+      {
+        "numero": 3,
+        "nbs": "122011200",
+        "cst": "000",
+        "cClassTrib": "000001",
+        "baseCalculo": 1200
+      }
+    ]
+  },
+  "engine_response": {
+    "status": 200,
+    "body": {
+      "objetos": [
+        {
+          "nObj": 1,
+          "estadoItem": "CALCULADO",
+          "tribCalc": {
+            "IBSCBS": {
+              "CST": "000",
+              "cClassTrib": "000001",
+              "gIBSCBS": {
+                "vBC": "3000.00",
+                "gIBSUF": {
+                  "pIBSUF": "0.10",
+                  "vIBSUF": "3.00"
+                },
+                "gIBSMun": {
+                  "pIBSMun": "0.00",
+                  "vIBSMun": "0.00"
+                },
+                "vIBS": "3.00",
+                "gCBS": {
+                  "pCBS": "0.90",
+                  "vCBS": "27.00"
+                }
+              },
+              "memoriaCalculo": {
+                "cbs": "Operação de consumo com enquadramento legal em LC 214/2025, tributada conforme Tributação integral. A base de cálculo utilizada é de R$ 3.000,00, com alíquota de 0,90%.",
+                "ibsUF": "Operação de consumo com enquadramento legal em LC 214/2025, tributada conforme Tributação integral. A base de cálculo utilizada é de R$ 3.000,00, com alíquota de 0,10%.",
+                "ibsMun": "Operação de consumo com enquadramento legal em LC 214/2025, tributada conforme Tributação integral. A base de cálculo utilizada é de R$ 3.000,00, com alíquota de 0,00%."
+              }
+            }
+          }
+        },
+        {
+          "nObj": 2,
+          "estadoItem": "CALCULADO",
+          "tribCalc": {
+            "IBSCBS": {
+              "CST": "200",
+              "cClassTrib": "200003",
+              "gIBSCBS": {
+                "vBC": "100.00",
+                "gIBSUF": {
+                  "pIBSUF": "0.10",
+                  "gRed": {
+                    "pRedAliq": "100.00",
+                    "pAliqEfet": "0.00"
+                  },
+                  "vIBSUF": "0.00"
+                },
+                "gIBSMun": {
+                  "pIBSMun": "0.00",
+                  "gRed": {
+                    "pRedAliq": "100.00",
+                    "pAliqEfet": "0.00"
+                  },
+                  "vIBSMun": "0.00"
+                },
+                "vIBS": "0.00",
+                "gCBS": {
+                  "pCBS": "0.90",
+                  "gRed": {
+                    "pRedAliq": "100.00",
+                    "pAliqEfet": "0.00"
+                  },
+                  "vCBS": "0.00"
+                }
+              },
+              "memoriaCalculo": {
+                "cbs": "Operação de consumo com enquadramento legal em Art. 125, tributada conforme Alíquota zero. A base de cálculo utilizada é de R$ 100,00, com alíquota de zero.",
+                "ibsUF": "Operação de consumo com enquadramento legal em Art. 125, tributada conforme Alíquota zero. A base de cálculo utilizada é de R$ 100,00, com alíquota de zero.",
+                "ibsMun": "Operação de consumo com enquadramento legal em Art. 125, tributada conforme Alíquota zero. A base de cálculo utilizada é de R$ 100,00, com alíquota de zero."
+              }
+            }
+          }
+        },
+        {
+          "nObj": 3,
+          "estadoItem": "CALCULADO",
+          "tribCalc": {
+            "IBSCBS": {
+              "CST": "000",
+              "cClassTrib": "000001",
+              "gIBSCBS": {
+                "vBC": "1200.00",
+                "gIBSUF": {
+                  "pIBSUF": "0.10",
+                  "vIBSUF": "1.20"
+                },
+                "gIBSMun": {
+                  "pIBSMun": "0.00",
+                  "vIBSMun": "0.00"
+                },
+                "vIBS": "1.20",
+                "gCBS": {
+                  "pCBS": "0.90",
+                  "vCBS": "10.80"
+                }
+              },
+              "memoriaCalculo": {
+                "cbs": "Operação de consumo com enquadramento legal em LC 214/2025, tributada conforme Tributação integral. A base de cálculo utilizada é de R$ 1.200,00, com alíquota de 0,90%.",
+                "ibsUF": "Operação de consumo com enquadramento legal em LC 214/2025, tributada conforme Tributação integral. A base de cálculo utilizada é de R$ 1.200,00, com alíquota de 0,10%.",
+                "ibsMun": "Operação de consumo com enquadramento legal em LC 214/2025, tributada conforme Tributação integral. A base de cálculo utilizada é de R$ 1.200,00, com alíquota de 0,00%."
+              }
+            }
+          }
+        }
+      ],
+      "total": {
+        "tribCalc": {
+          "IBSCBSTot": {
+            "vBCIBSCBS": "4300.00",
+            "gIBS": {
+              "gIBSUF": {
+                "vDif": "0.00",
+                "vDevTrib": "0.00",
+                "vIBSUF": "4.20"
+              },
+              "gIBSMun": {
+                "vDif": "0.00",
+                "vDevTrib": "0.00",
+                "vIBSMun": "0.00"
+              },
+              "vIBS": "4.20",
+              "vCredPres": "0.00",
+              "vCredPresCondSus": "0.00"
+            },
+            "gCBS": {
+              "vDif": "0.00",
+              "vDevTrib": "0.00",
+              "vCBS": "37.80",
+              "vCredPres": "0.00",
+              "vCredPresCondSus": "0.00"
+            },
+            "gMono": {
+              "vIBSMono": "0.00",
+              "vCBSMono": "0.00",
+              "vIBSMonoReten": "0.00",
+              "vCBSMonoReten": "0.00",
+              "vIBSMonoRet": "0.00",
+              "vCBSMonoRet": "0.00"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,147 @@
+{
+  "id": "E-compra-gov-municipio-2026",
+  "descricao": "Compra governamental (município) em 2026",
+  "bundle": "2026.11.2",
+  "api_request": {
+    "cnpj_emitente": "11222333000181",
+    "regime_tributario": "REGIME_REGULAR",
+    "data_fato_gerador": "2026-06-15T14:00:00-03:00",
+    "municipio_ibge": 3106200,
+    "uf": "MG",
+    "itens": [
+      {
+        "numero": 3,
+        "cst_ibs_cbs": "000",
+        "c_class_trib": "000001",
+        "valor_base_calculo": 1200,
+        "nbs": "122011200"
+      }
+    ],
+    "compra_governamental": {
+      "tipo_ente": 3,
+      "tipo_operacao": 1
+    }
+  },
+  "engine_request": {
+    "id": "golden",
+    "versao": "1.0.0",
+    "dhFatoGerador": "2026-06-15T14:00:00-03:00",
+    "municipio": 3106200,
+    "uf": "MG",
+    "gCompraGov": {
+      "tpEnteGov": 3,
+      "tpOperGov": 1
+    },
+    "itens": [
+      {
+        "numero": 3,
+        "nbs": "122011200",
+        "cst": "000",
+        "cClassTrib": "000001",
+        "baseCalculo": 1200
+      }
+    ]
+  },
+  "engine_response": {
+    "status": 200,
+    "body": {
+      "oper": {
+        "gCompraGov": {
+          "tpEnteGov": 3,
+          "pRedutor": "0.00",
+          "tpOperGov": 1
+        }
+      },
+      "objetos": [
+        {
+          "nObj": 3,
+          "estadoItem": "CALCULADO",
+          "tribCalc": {
+            "IBSCBS": {
+              "CST": "000",
+              "cClassTrib": "000001",
+              "gIBSCBS": {
+                "vBC": "1200.00",
+                "gIBSUF": {
+                  "pIBSUF": "0.10",
+                  "gRed": {
+                    "pRedAliq": "0.00",
+                    "pAliqEfet": "0.10"
+                  },
+                  "vIBSUF": "1.20"
+                },
+                "gIBSMun": {
+                  "pIBSMun": "0.00",
+                  "gRed": {
+                    "pRedAliq": "0.00",
+                    "pAliqEfet": "0.00"
+                  },
+                  "vIBSMun": "0.00"
+                },
+                "vIBS": "1.20",
+                "gCBS": {
+                  "pCBS": "0.90",
+                  "gRed": {
+                    "pRedAliq": "0.00",
+                    "pAliqEfet": "0.90"
+                  },
+                  "vCBS": "10.80"
+                },
+                "gTribCompraGov": {
+                  "pAliqIBSUF": "0.10",
+                  "vTribIBSUF": "1.20",
+                  "pAliqIBSMun": "0.00",
+                  "vTribIBSMun": "0.00",
+                  "pAliqCBS": "0.90",
+                  "vTribCBS": "10.80"
+                }
+              },
+              "memoriaCalculo": {
+                "cbs": "Operação de consumo com enquadramento legal em LC 214/2025, tributada conforme Tributação integral. A base de cálculo utilizada é de R$ 1.200,00, com alíquota de 0,90%.",
+                "ibsUF": "Operação de consumo com enquadramento legal em LC 214/2025, tributada conforme Tributação integral. A base de cálculo utilizada é de R$ 1.200,00, com alíquota de 0,10%.",
+                "ibsMun": "Operação de consumo com enquadramento legal em LC 214/2025, tributada conforme Tributação integral. A base de cálculo utilizada é de R$ 1.200,00, com alíquota de 0,00%."
+              }
+            }
+          }
+        }
+      ],
+      "total": {
+        "tribCalc": {
+          "IBSCBSTot": {
+            "vBCIBSCBS": "1200.00",
+            "gIBS": {
+              "gIBSUF": {
+                "vDif": "0.00",
+                "vDevTrib": "0.00",
+                "vIBSUF": "1.20"
+              },
+              "gIBSMun": {
+                "vDif": "0.00",
+                "vDevTrib": "0.00",
+                "vIBSMun": "0.00"
+              },
+              "vIBS": "1.20",
+              "vCredPres": "0.00",
+              "vCredPresCondSus": "0.00"
+            },
+            "gCBS": {
+              "vDif": "0.00",
+              "vDevTrib": "0.00",
+              "vCBS": "10.80",
+              "vCredPres": "0.00",
+              "vCredPresCondSus": "0.00"
+            },
+            "gMono": {
+              "vIBSMono": "0.00",
+              "vCBSMono": "0.00",
+              "vIBSMonoReten": "0.00",
+              "vCBSMonoReten": "0.00",
+              "vIBSMonoRet": "0.00",
+              "vCBSMonoRet": "0.00"
+            }
+          }
+        }
+      }
+    }
+  }
+}

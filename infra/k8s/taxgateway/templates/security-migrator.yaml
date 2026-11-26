@@ -1,0 +1,70 @@
+# Regras inegociáveis (SDD §2.1): os motores não têm autenticação, então a rede é o controle de acesso.
+# Entrada só dos pods clientes (api/workers) e do Prometheus nas portas de gestão; saída proibida (sem egress).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: engines-isolation
+  labels: {{- include "tg.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: { taxgateway/engine: "true" }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { taxgateway/engine-client: "true" } }
+      ports:
+        - { protocol: TCP, port: {{ .Values.engines.regular.port }} }
+        - { protocol: TCP, port: {{ .Values.engines.simples.port }} }
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ .Values.prometheus.namespaceLabel }} } }
+      ports:
+        - { protocol: TCP, port: {{ .Values.engines.regular.mgmtPort }} }
+        - { protocol: TCP, port: {{ .Values.engines.simples.mgmtPort }} }
+  egress: []
+---
+# Os pods da API também carregam um motor (sidecar): o motor fala só em localhost, e a saída do pod é limitada
+# a DNS e aos serviços do namespace/dados gerenciados (sem acesso ao portal da RFB).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-egress
+  labels: {{- include "tg.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: api }
+  policyTypes: [Egress]
+  egress:
+    - to: [{ namespaceSelector: {} }]
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+    - to: [{ podSelector: {} }]
+    - to: [{ ipBlock: { cidr: 10.0.0.0/8 } }]          # Postgres/Valkey/S3/KMS gerenciados na VPC
+      ports: [{ protocol: TCP, port: 5432 }, { protocol: TCP, port: 6379 }, { protocol: TCP, port: 443 }, { protocol: TCP, port: 8200 }]
+---
+# Migrations antes de cada deploy (Job pré-instalação/atualização), como tg_owner (D-101, D-104).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrator-{{ .Release.Revision }}
+  labels: {{- include "tg.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: migrator }
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      containers:
+        - name: migrator
+          image: "{{ .Values.image.registry }}/migrator:{{ .Values.image.tag }}"
+          envFrom: [{ secretRef: { name: {{ .Values.migratorSecret }} } }]
+          securityContext: {{- include "tg.secure" . | nindent 12 }}
+            runAsUser: 1654
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 256Mi }

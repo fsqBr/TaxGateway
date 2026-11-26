@@ -1,0 +1,142 @@
+{
+  "id": "S-pleno-AM",
+  "descricao": "Simples pleno (CRT 1): IBS e CBS no DAS",
+  "bundle": "2026.11.2",
+  "api_request": {
+    "cnpj_emitente": "11222333000181",
+    "regime_tributario": "SIMPLES_NACIONAL",
+    "data_fato_gerador": "2027-06-15T14:00:00-04:00",
+    "municipio_ibge": 1302603,
+    "uf": "AM",
+    "itens": [
+      {
+        "numero": 1,
+        "cst_ibs_cbs": "000",
+        "c_class_trib": "000001",
+        "valor_base_calculo": 3000,
+        "ncm": "84713012",
+        "quantidade": 1,
+        "unidade": "UN",
+        "codigo_atividade_sn": "03",
+        "aliquotas_simples": {
+          "ibs": 0.50,
+          "cbs": 1.30
+        }
+      },
+      {
+        "numero": 2,
+        "cst_ibs_cbs": "200",
+        "c_class_trib": "200003",
+        "valor_base_calculo": 100,
+        "ncm": "10063021",
+        "quantidade": 20,
+        "unidade": "KG",
+        "codigo_atividade_sn": "03",
+        "aliquotas_simples": {
+          "ibs": 0.50,
+          "cbs": 1.30
+        }
+      }
+    ],
+    "crt": "1"
+  },
+  "engine_request_simples": {
+    "id": "tg",
+    "versao": "1.0.0",
+    "data": "2027-06-15",
+    "tpDoc": "55",
+    "CRT": "1",
+    "itens": [
+      {
+        "numero": 1,
+        "cAtivSN": "03",
+        "cClassTrib": "000001",
+        "baseCalculo": "3000.00",
+        "valorImpostoSeletivo": "0.00",
+        "ncm": "84713012",
+        "pIBSSN": "0.50",
+        "pCBSSN": "1.30"
+      },
+      {
+        "numero": 2,
+        "cAtivSN": "03",
+        "cClassTrib": "200003",
+        "baseCalculo": "100.00",
+        "valorImpostoSeletivo": "0.00",
+        "ncm": "10063021",
+        "pIBSSN": "0.50",
+        "pCBSSN": "1.30"
+      }
+    ]
+  },
+  "engine_response_simples": {
+    "status": 200,
+    "body": {
+      "oper": {
+        "data": "2027-06-15",
+        "tpDoc": "55",
+        "CRT": "1"
+      },
+      "objetos": [
+        {
+          "nObj": 1,
+          "estadoItem": "CALCULADO",
+          "tribCalc": {
+            "vRBSNitem": "3000.00",
+            "tpRBSN": 1,
+            "tpRBSNDescricao": "Receita bruta - interna",
+            "vBC": "3000.00",
+            "pIBSSN": "0.50",
+            "vIBSSN": "15.00",
+            "vIBSPendSusp": "0.00",
+            "pCBSSN": "1.30",
+            "vCBSSN": "39.00",
+            "vCBSPendSusp": "0.00",
+            "IS": {
+              "valor": "0.00"
+            },
+            "totalItem": "54.00",
+            "memoriaCalculo": {
+              "cbs": "Receita bruta do Simples Nacional de R$ 3.000,00 (Receita bruta - interna). A base de cálculo utilizada é de R$ 3.000,00, com alíquota efetiva de 1,30%. Valor devido de R$ 39,00 e pendente/suspenso de R$ 0,00.",
+              "ibs": "Receita bruta do Simples Nacional de R$ 3.000,00 (Receita bruta - interna). A base de cálculo utilizada é de R$ 3.000,00, com alíquota efetiva de 0,50%. Valor devido de R$ 15,00 e pendente/suspenso de R$ 0,00."
+            }
+          }
+        },
+        {
+          "nObj": 2,
+          "estadoItem": "CALCULADO",
+          "tribCalc": {
+            "vRBSNitem": "100.00",
+            "tpRBSN": 1,
+            "tpRBSNDescricao": "Receita bruta - interna",
+            "vBC": "100.00",
+            "pIBSSN": "0.50",
+            "vIBSSN": "0.50",
+            "vIBSPendSusp": "0.00",
+            "pCBSSN": "1.30",
+            "vCBSSN": "1.30",
+            "vCBSPendSusp": "0.00",
+            "IS": {
+              "valor": "0.00"
+            },
+            "totalItem": "1.80",
+            "memoriaCalculo": {
+              "cbs": "Receita bruta do Simples Nacional de R$ 100,00 (Receita bruta - interna). A base de cálculo utilizada é de R$ 100,00, com alíquota efetiva de 1,30%. Valor devido de R$ 1,30 e pendente/suspenso de R$ 0,00.",
+              "ibs": "Receita bruta do Simples Nacional de R$ 100,00 (Receita bruta - interna). A base de cálculo utilizada é de R$ 100,00, com alíquota efetiva de 0,50%. Valor devido de R$ 0,50 e pendente/suspenso de R$ 0,00."
+            }
+          }
+        }
+      ],
+      "total": {
+        "vRBSNtot": "3100.00",
+        "vBC": "3100.00",
+        "vIBSSNtot": "15.50",
+        "vIBSSNtotPendSusp": "0.00",
+        "vCBSSNtot": "40.30",
+        "vCBSSNtotPendSusp": "0.00",
+        "totalIs": "0.00",
+        "totalTributos": "55.80"
+      }
+    }
+  }
+}

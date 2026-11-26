@@ -1,0 +1,123 @@
+# API com os motores como sidecars (SDD §16.2 item 1: chamada em localhost) e deploy canário (§2.3 passo 6).
+# Argo Rollouts: 5% do tráfego por 30 min, análise de taxa de erro e p95; falhou = rollback automático.
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: api
+  labels: {{- include "tg.labels" . | nindent 4 }}
+    app.kubernetes.io/name: api
+spec:
+  replicas: {{ .Values.api.replicas }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app.kubernetes.io/name: api }
+  strategy:
+    canary:
+      stableService: api
+      canaryService: api-canary
+      analysis:
+        templates: [{ templateName: api-slo }]
+        startingStep: 1
+      steps:
+        {{- range $i, $w := .Values.api.canary.steps }}
+        - setWeight: {{ $w }}
+        - pause: { duration: {{ $.Values.api.canary.pauseMinutes }}m }
+        {{- end }}
+  template:
+    metadata:
+      labels: {{- include "tg.labels" . | nindent 8 }}
+        app.kubernetes.io/name: api
+        taxgateway/engine-client: "true"
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { fsGroup: 10001 }
+      containers:
+        - name: api
+          image: "{{ .Values.image.registry }}/api:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports: [{ name: http, containerPort: {{ .Values.api.port }} }, { name: metrics, containerPort: {{ .Values.api.metricsPort }} }]
+          envFrom: [{ secretRef: { name: {{ .Values.existingSecret }} } }]
+          env:
+            - { name: Engines__Bundle, value: {{ .Values.engines.bundle | quote }} }
+            - { name: Engines__Regular__BaseUrl, value: "http://127.0.0.1:{{ .Values.engines.regular.port }}/api/" }
+            {{- range $i, $n := .Values.api.trustedProxyNetworks }}
+            - { name: Http__TrustedProxyNetworks__{{ $i }}, value: {{ $n | quote }} }
+            {{- end }}
+          resources: {{- toYaml .Values.api.resources | nindent 12 }}
+          # Liveness não toca dependências; readiness só verde com parâmetros e cadastro do motor carregados (D-112/D-218).
+          livenessProbe: { httpGet: { path: /health/live, port: http }, periodSeconds: 10 }
+          readinessProbe: { httpGet: { path: /health/ready, port: http }, periodSeconds: 5, failureThreshold: 3 }
+          securityContext: {{- include "tg.secure" . | nindent 12 }}
+            runAsUser: 1654
+          volumeMounts: [{ name: tmp-api, mountPath: /tmp }]
+        {{- include "tg.engine" (dict "root" . "name" "regular" "e" .Values.engines.regular) | nindent 8 }}
+      volumes:
+        - { name: tmp-api, emptyDir: { sizeLimit: 2Gi } }   # upload do lote (modo 1) vai para arquivo temporário (D-606)
+        - { name: tmp-regular, emptyDir: { sizeLimit: 256Mi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  labels: {{- include "tg.labels" . | nindent 4 }}
+spec:
+  selector: { app.kubernetes.io/name: api }
+  ports: [{ name: http, port: 80, targetPort: http }, { name: metrics, port: {{ .Values.api.metricsPort }}, targetPort: metrics }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-canary
+  labels: {{- include "tg.labels" . | nindent 4 }}
+spec:
+  selector: { app.kubernetes.io/name: api }
+  ports: [{ name: http, port: 80, targetPort: http }, { name: metrics, port: {{ .Values.api.metricsPort }}, targetPort: metrics }]
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: api-slo
+  labels: {{- include "tg.labels" . | nindent 4 }}
+spec:
+  metrics:
+    - name: error-rate
+      interval: 1m
+      failureLimit: 2
+      successCondition: "result[0] <= {{ .Values.api.canary.maxErrorRate }}"
+      provider:
+        prometheus:
+          address: {{ .Values.prometheus.address }}
+          query: |
+            sum(rate(http_server_request_duration_seconds_count{service="api-canary",http_response_status_code=~"5.."}[5m]))
+            / clamp_min(sum(rate(http_server_request_duration_seconds_count{service="api-canary"}[5m])), 1e-9)
+    - name: p95-latency
+      interval: 1m
+      failureLimit: 2
+      successCondition: "result[0] <= {{ .Values.api.canary.maxP95Seconds }}"
+      provider:
+        prometheus:
+          address: {{ .Values.prometheus.address }}
+          query: |
+            histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{service="api-canary",http_route="/v1/calculo/simular"}[5m])))
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api
+  labels: {{- include "tg.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef: { apiVersion: argoproj.io/v1alpha1, kind: Rollout, name: api }
+  minReplicas: {{ .Values.api.hpa.minReplicas }}
+  maxReplicas: {{ .Values.api.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: {{ .Values.api.hpa.cpuTarget }} } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels: { app.kubernetes.io/name: api }

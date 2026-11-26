@@ -1,0 +1,70 @@
+{{- /* Site + portal (público) e backoffice (interno), D-W03/D-W05. nginx não-root, root somente leitura. */ -}}
+{{- range $name, $w := dict "web" .Values.web.public "web-backoffice" .Values.web.backoffice }}
+{{- if $w.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels: {{- include "tg.labels" $ | nindent 4 }}
+    app.kubernetes.io/name: {{ $name }}
+spec:
+  replicas: {{ $w.replicas }}
+  selector:
+    matchLabels: { app.kubernetes.io/name: {{ $name }} }
+  template:
+    metadata:
+      labels: {{- include "tg.labels" $ | nindent 8 }}
+        app.kubernetes.io/name: {{ $name }}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: nginx
+          image: "{{ $.Values.image.registry }}/{{ $name }}:{{ $.Values.image.tag }}"
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          ports: [{ name: http, containerPort: 8080 }]
+          env:
+            - { name: API_UPSTREAM, value: {{ $.Values.web.apiUpstream | quote }} }
+          resources: {{- toYaml $.Values.web.resources | nindent 12 }}
+          readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 5 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 20 }
+          securityContext: {{- include "tg.secure" $ | nindent 12 }}
+            runAsUser: 101
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: confd, mountPath: /etc/nginx/conf.d }
+      volumes:
+        - { name: tmp, emptyDir: { sizeLimit: 256Mi } }
+        - { name: confd, emptyDir: { sizeLimit: 1Mi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels: {{- include "tg.labels" $ | nindent 4 }}
+spec:
+  selector: { app.kubernetes.io/name: {{ $name }} }
+  ports: [{ name: http, port: 80, targetPort: http }]
+{{- if $w.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $name }}
+  labels: {{- include "tg.labels" $ | nindent 4 }}
+  {{- with $w.ingress.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ $.Values.web.ingressClassName }}
+  tls: [{ hosts: [{{ $w.ingress.host | quote }}], secretName: {{ $w.ingress.tlsSecret }} }]
+  rules:
+    - host: {{ $w.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: {{ $name }}, port: { name: http } } }
+{{- end }}
+{{- end }}
+{{- end }}

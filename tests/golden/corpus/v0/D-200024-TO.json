@@ -1,0 +1,61 @@
+{
+  "id": "D-200024-TO",
+  "descricao": "cClassTrib 200024 (Operação originada fora das Áreas de Livre Comércio - 200024) em 2026",
+  "bundle": "2026.11.2",
+  "api_request": {
+    "cnpj_emitente": "11222333000181",
+    "regime_tributario": "REGIME_REGULAR",
+    "data_fato_gerador": "2026-08-20T14:00:00-03:00",
+    "municipio_ibge": 1721000,
+    "uf": "TO",
+    "itens": [
+      {
+        "numero": 1,
+        "cst_ibs_cbs": "200",
+        "c_class_trib": "200024",
+        "valor_base_calculo": 1000,
+        "ncm": "84713012",
+        "quantidade": 1,
+        "unidade": "UN"
+      }
+    ]
+  },
+  "engine_request": {
+    "id": "golden",
+    "versao": "1.0.0",
+    "dhFatoGerador": "2026-08-20T14:00:00-03:00",
+    "municipio": 1721000,
+    "uf": "TO",
+    "itens": [
+      {
+        "numero": 1,
+        "ncm": "84713012",
+        "cst": "200",
+        "cClassTrib": "200024",
+        "baseCalculo": 1000,
+        "quantidade": 1,
+        "unidade": "UN"
+      }
+    ]
+  },
+  "engine_response": {
+    "status": 200,
+    "body": {
+      "objetos": [
+        {
+          "nObj": 1,
+          "estadoItem": "INCONSISTENCIA_ENTRADA",
+          "erros": [
+            {
+              "type": "http://127.0.0.1/api/calculadora/observabilidade/erros?codigo=REG-009",
+              "title": "Grupo de tributação regular não informado",
+              "code": "REG-009",
+              "pointer": "#/itens/0/tributacaoRegular",
+              "detail": "Dados da tributação regular devem ser informados para cClassTrib 200024 e CST 200"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

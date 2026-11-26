@@ -1,0 +1,9 @@
+{
+  "identities": [
+    {
+      "name": "taxgateway-dev",
+      "credentials": [{ "accessKey": "tg-dev-access", "secretKey": "tg-dev-secret-only-local" }],
+      "actions": ["Read", "Write", "List", "Tagging", "Admin"]
+    }
+  ]
+}

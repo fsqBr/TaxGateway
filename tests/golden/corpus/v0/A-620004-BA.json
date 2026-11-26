@@ -1,0 +1,67 @@
+{
+  "id": "A-620004-BA",
+  "descricao": "cClassTrib 620004 (Tributação monofásica sobre mistura de EAC com gasolina A em percentual superior ao obrigatório) em 2027",
+  "bundle": "2026.11.2",
+  "api_request": {
+    "cnpj_emitente": "11222333000181",
+    "regime_tributario": "REGIME_REGULAR",
+    "data_fato_gerador": "2027-06-15T14:00:00-03:00",
+    "municipio_ibge": 2927408,
+    "uf": "BA",
+    "itens": [
+      {
+        "numero": 1,
+        "cst_ibs_cbs": "620",
+        "c_class_trib": "620004",
+        "valor_base_calculo": 1000,
+        "ncm": "84713012",
+        "quantidade": 1,
+        "unidade": "UN"
+      }
+    ]
+  },
+  "engine_request": {
+    "id": "golden",
+    "versao": "1.0.0",
+    "dhFatoGerador": "2027-06-15T14:00:00-03:00",
+    "municipio": 2927408,
+    "uf": "BA",
+    "itens": [
+      {
+        "numero": 1,
+        "ncm": "84713012",
+        "cst": "620",
+        "cClassTrib": "620004",
+        "baseCalculo": 1000,
+        "quantidade": 1,
+        "unidade": "UN",
+        "aliquotasNominais": {
+          "cbs": 11.2000,
+          "ibsEstadual": 0.0500,
+          "ibsMunicipal": 0.0500
+        }
+      }
+    ]
+  },
+  "engine_response": {
+    "status": 200,
+    "body": {
+      "objetos": [
+        {
+          "nObj": 1,
+          "estadoItem": "NAO_IMPLEMENTADO",
+          "erros": [
+            {
+              "type": "http://127.0.0.1/api/calculadora/observabilidade/erros?codigo=CAL-007",
+              "title": "Classificação tributária em desenvolvimento",
+              "code": "CAL-007",
+              "pointer": "#/itens/0/cClassTrib",
+              "detail": "A classificação tributária 620004 ainda não possui tratamento tributário implementado na Calculadora. Essa funcionalidade está prevista no roadmap e será disponibilizada em versão futura."
+            }
+          ]
+        }
+      ]
+    },
+    "warning": "6"
+  }
+}

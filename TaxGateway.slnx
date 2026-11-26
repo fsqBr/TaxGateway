@@ -1,0 +1,17 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/TaxGateway.Api/TaxGateway.Api.csproj" />
+    <Project Path="src/TaxGateway.Contracts/TaxGateway.Contracts.csproj" />
+    <Project Path="src/TaxGateway.Core/TaxGateway.Core.csproj" />
+    <Project Path="src/TaxGateway.Identity/TaxGateway.Identity.csproj" />
+    <Project Path="src/TaxGateway.Infrastructure/TaxGateway.Infrastructure.csproj" />
+    <Project Path="src/TaxGateway.Migrator/TaxGateway.Migrator.csproj" />
+    <Project Path="src/TaxGateway.Workers/TaxGateway.Workers.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TaxGateway.ContractTests/TaxGateway.ContractTests.csproj" />
+    <Project Path="tests/TaxGateway.GoldenTests/TaxGateway.GoldenTests.csproj" />
+    <Project Path="tests/TaxGateway.SecurityTests/TaxGateway.SecurityTests.csproj" />
+    <Project Path="tests/TaxGateway.UnitTests/TaxGateway.UnitTests.csproj" />
+  </Folder>
+</Solution>

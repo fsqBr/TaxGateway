@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+    <PackageReference Include="Scalar.AspNetCore" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" />
+    <PackageReference Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TaxGateway.Core\TaxGateway.Core.csproj" />
+    <ProjectReference Include="..\TaxGateway.Infrastructure\TaxGateway.Infrastructure.csproj" />
+    <ProjectReference Include="..\TaxGateway.Contracts\TaxGateway.Contracts.csproj" />
+    <ProjectReference Include="..\TaxGateway.Identity\TaxGateway.Identity.csproj" />
+  </ItemGroup>
+
+</Project>
