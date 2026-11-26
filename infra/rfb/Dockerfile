@@ -12,6 +12,9 @@ ARG JRE_IMAGE=eclipse-temurin:25-jre
 #          Os dois motores usam o mesmo banco (README do Simples, passo 3).
 # ---------------------------------------------------------------------------------------------
 FROM ${JDK_IMAGE} AS db
+# D-Q10: o Maven Central devolve 429 quando vários jobs do CI baixam dependências ao mesmo tempo. Mais tentativas,
+# com espera crescente, para 429/503 (propriedades do Maven Resolver; o Maven 3.9 lê MAVEN_ARGS).
+ENV MAVEN_ARGS="-Daether.connector.http.retryHandler.count=8 -Daether.connector.http.retryHandler.interval=5000 -Daether.connector.http.retryHandler.intervalMax=60000 -Daether.connector.http.retryHandler.serviceUnavailable=429,503"
 # D-Q03: pipe com falha propagada (o hash do banco vira label de rastreabilidade; vazio não pode passar).
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG REGULAR_TAG
@@ -34,6 +37,9 @@ RUN --mount=type=cache,target=/root/.m2 \
 # Stage 2: build do motor. Testes oficiais rodam em job separado (exigem o banco).
 # ---------------------------------------------------------------------------------------------
 FROM ${JDK_IMAGE} AS build
+# D-Q10: o Maven Central devolve 429 quando vários jobs do CI baixam dependências ao mesmo tempo. Mais tentativas,
+# com espera crescente, para 429/503 (propriedades do Maven Resolver; o Maven 3.9 lê MAVEN_ARGS).
+ENV MAVEN_ARGS="-Daether.connector.http.retryHandler.count=8 -Daether.connector.http.retryHandler.interval=5000 -Daether.connector.http.retryHandler.intervalMax=60000 -Daether.connector.http.retryHandler.serviceUnavailable=429,503"
 ARG ENGINE_REPO
 ARG ENGINE_TAG
 ARG ENGINE_SHA
