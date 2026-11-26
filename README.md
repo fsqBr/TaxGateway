@@ -83,6 +83,13 @@ python tests/smoke/stack_smoke.py           # roteiro ponta a ponta contra a pil
 
 Os testes Golden e de contrato usam Testcontainers e os motores da RFB rodando localmente.
 
+## CI/CD
+
+* **CI** (`.github/workflows/ci.yml`) em todo push e PR: build e testes .NET, front, motores da RFB, Helm e golden.
+* **Deploy** (`deploy.yml`): imagens no GHCR → staging → produção com aprovação. Fica desligado até existir cluster:
+  ligue com a variável de repositório `DEPLOY_ENABLED=true` e os segredos `KUBECONFIG_STAGING`/`KUBECONFIG_PRODUCTION`.
+* **Atualização fiscal** (`fiscal-update.yml`): diária; abre PR com o relatório de regressão quando a RFB publica (ou republica) um motor.
+
 ## Documentação
 
 | Documento | Conteúdo |

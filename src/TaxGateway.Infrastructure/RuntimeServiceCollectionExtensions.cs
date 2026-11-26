@@ -107,6 +107,9 @@ public static class RuntimeServiceCollectionExtensions
             .AddResilienceHandler(name, (b, ctx) =>
             {
                 var o = pick(ctx.ServiceProvider.GetRequiredService<IOptions<EngineOptions>>().Value);
+                // D-Q08: timeouts e esperas de rede são tempo real, nunca o relógio de negócio (TimeProvider do DI pode ser
+                // controlado em teste; com ele, a espera entre tentativas nunca terminava e a requisição pendurava).
+                b.TimeProvider = TimeProvider.System;
                 b.AddConcurrencyLimiter(new ConcurrencyLimiterOptions
                 {
                     PermitLimit = o.MaxConcurrency,

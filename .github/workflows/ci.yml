@@ -58,13 +58,15 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+      - name: Registro no GHCR (nome em minúsculas, D-Q07)
+        run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/taxgateway" >> "$GITHUB_ENV"
       - uses: docker/setup-buildx-action@v3
       - name: Build das imagens dos motores
-        run: bash infra/rfb/build.sh ghcr.io/${{ github.repository_owner }}/taxgateway
+        run: bash infra/rfb/build.sh "$REGISTRY"
       - name: Os dois motores sobem e respondem /versao
         run: |
           set -euo pipefail
-          prefix=ghcr.io/${{ github.repository_owner }}/taxgateway
+          prefix="$REGISTRY"
           for e in regular:1.7.2:8080:9101 simples:1.0.2:8082:9103; do
             IFS=: read -r name tag port mgmt <<<"$e"
             docker run -d --name "rtc-$name" --read-only --tmpfs /tmp:exec \
@@ -82,7 +84,7 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker image ls --format '{{.Repository}}:{{.Tag}}' | grep "^ghcr.io/${{ github.repository_owner }}/taxgateway/rtc-" | xargs -n1 docker push
+          docker image ls --format '{{.Repository}}:{{.Tag}}' | grep "^$REGISTRY/rtc-" | xargs -n1 docker push
 
   engine-tests:
     runs-on: ubuntu-24.04
@@ -158,15 +160,22 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           global-json-file: global.json
-      - name: Motor regular
+      - name: Motores regular e Simples Nacional (o corpus tem 45 casos do Simples, D-Q08)
         run: |
           bash infra/rfb/build.sh taxgateway
           docker run -d --name rtc-regular --read-only --tmpfs /tmp:exec \
             -e VERSAO_OFFLINE_URL=http://127.0.0.1:9/disabled -p 8080:8080 taxgateway/rtc-regular:1.7.2
-          for _ in $(seq 1 90); do curl -fs http://127.0.0.1:8080/api/calculadora/dados-abertos/versao >/dev/null && break; sleep 2; done
+          docker run -d --name rtc-simples --read-only --tmpfs /tmp:exec \
+            -e VERSAO_URL=http://127.0.0.1:9/disabled -p 8082:8082 taxgateway/rtc-simples:1.0.2
+          for _ in $(seq 1 90); do
+            curl -fs http://127.0.0.1:8080/api/calculadora/dados-abertos/versao >/dev/null \
+              && curl -fs http://127.0.0.1:8082/api/versao >/dev/null && break
+            sleep 2
+          done
       - name: Corpus golden (simulação reproduz 100%; auditoria XML sem falso positivo)
         env:
           RTC_REGULAR_URL: http://127.0.0.1:8080/api/
+          RTC_SIMPLES_URL: http://127.0.0.1:8082/api/
         run: dotnet test tests/TaxGateway.GoldenTests -c Release
       - name: Contrato dos motores (OpenAPI)
         run: dotnet test tests/TaxGateway.ContractTests -c Release

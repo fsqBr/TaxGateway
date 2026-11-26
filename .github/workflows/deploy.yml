@@ -18,17 +18,19 @@ concurrency:
   group: deploy
   cancel-in-progress: false
 
-env:
-  REGISTRY: ghcr.io/${{ github.repository_owner }}/taxgateway
-
 jobs:
   images:
+    # D-Q07: só publica/implanta com a variável de repositório DEPLOY_ENABLED=true (ou disparo manual). Antes de existir
+    # cluster e segredos KUBECONFIG_*, cada push na main publicaria imagens e falharia no staging.
+    if: vars.DEPLOY_ENABLED == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+      - name: Registro no GHCR (nome em minúsculas, D-Q07)
+        run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/taxgateway" >> "$GITHUB_ENV"
       - uses: docker/setup-buildx-action@v3
       - id: meta
         run: echo "tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
@@ -59,6 +61,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - name: Registro no GHCR (nome em minúsculas, D-Q07)
+        run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/taxgateway" >> "$GITHUB_ENV"
       - uses: azure/setup-helm@v4
       - name: Kubeconfig
         run: echo "${{ secrets.KUBECONFIG_STAGING }}" > "$RUNNER_TEMP/kubeconfig"
@@ -78,6 +82,8 @@ jobs:
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
+      - name: Registro no GHCR (nome em minúsculas, D-Q07)
+        run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/taxgateway" >> "$GITHUB_ENV"
       - uses: azure/setup-helm@v4
       - name: Kubeconfig
         run: echo "${{ secrets.KUBECONFIG_PRODUCTION }}" > "$RUNNER_TEMP/kubeconfig"
