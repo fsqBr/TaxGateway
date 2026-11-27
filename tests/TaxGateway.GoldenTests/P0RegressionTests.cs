@@ -102,9 +102,13 @@ public sealed class P0RegressionTests(GoldenFixture env)
         Assert.True(inedita.Body!["is_billable"]!.GetValue<bool>());
         Assert.Contains(inedita.Body["avisos"]!.AsArray(), x => x!["codigo"]!.GetValue<string>() == "REPROCESSAMENTO_SEM_AUDITORIA_ANTERIOR");
 
+        // D-R07: reprocessamento pedido é cobrado; a retentativa do mesmo conteúdo (sem reprocess) continua grátis.
         var repro = await SendAsync(HttpMethod.Post, "/v1/auditoria/xml?direction=OUTBOUND&reprocess=true", Xml(doc), Guid.NewGuid().ToString("N"));
-        Assert.False(repro.Body!["is_billable"]!.GetValue<bool>());
+        Assert.True(repro.Body!["is_billable"]!.GetValue<bool>());
         Assert.True(repro.Body["reprocessamento"]!.GetValue<bool>());
+        var retry = await SendAsync(HttpMethod.Post, "/v1/auditoria/xml?direction=OUTBOUND", Xml(doc), Guid.NewGuid().ToString("N"));
+        Assert.True(retry.Body!["replay"]!.GetValue<bool>());
+        Assert.False(retry.Body["is_billable"]!.GetValue<bool>());
     }
 
     /// <summary>D-P04: replay por chave de acesso só com o MESMO conteúdo; XML alterado com a mesma chave é auditado de novo.</summary>

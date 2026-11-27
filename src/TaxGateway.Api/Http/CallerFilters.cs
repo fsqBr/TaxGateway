@@ -39,7 +39,10 @@ public static class Scopes
 /// Quem chama (API key ou token OAuth resolvido), os limites efetivos do plano e, se informado, o CNPJ do
 /// cliente final em nome de quem o OEM chama (<c>X-On-Behalf-Of-CNPJ</c>, SDD §3.3; D-805).
 /// </summary>
-public sealed record Caller(ApiKeyIdentity Identity, PlanLimits Limits, string? OnBehalfOf = null)
+/// <summary>Teto de excedente definido pelo cliente e se a titularidade do CNPJ foi verificada (D-R08, D-R10).</summary>
+public sealed record TenantBilling(long OverageCapCents, bool CnpjVerified);
+
+public sealed record Caller(ApiKeyIdentity Identity, PlanLimits Limits, string? OnBehalfOf = null, TenantBilling? Billing = null)
 {
     /// <summary>Com o header, o CNPJ sujeito do documento/simulação precisa ser exatamente o declarado.</summary>
     public void EnsureOnBehalfOf(string subjectCnpj)
@@ -113,12 +116,16 @@ public sealed class ApiKeyFilter(ApiKeyAuthenticator auth, BearerAuthenticator b
         }
 
         // Plano, situação e overrides sempre do perfil do tenant (cache de 30 s invalidado ao mudar, D-C08) — não do cache da credencial.
+        var billing = new TenantBilling(0, false);
         if (await profiles.GetAsync(identity.Tenant, http.RequestAborted).ConfigureAwait(false) is { } profile)
         {
             identity = identity with { PlanCode = profile.PlanCode, TenantStatus = profile.Status, LimitsOverrideJson = profile.LimitsOverrideJson, AutoProvisionCnpj = profile.AutoProvisionCnpj };
+            billing = new TenantBilling(profile.OverageCapCents, profile.CnpjVerified);
         }
 
-        if (identity.TenantStatus != "ACTIVE" || revocations.IsTenantSuspended(identity.Tenant))
+        // D-R09: RESTRICTED (inadimplência a partir do 10º dia) autentica para consultar, exportar e pagar; o consumo é
+        // barrado no QuotaFilter. Suspenso ou encerrado não entra.
+        if (identity.TenantStatus is not ("ACTIVE" or "RESTRICTED") || revocations.IsTenantSuspended(identity.Tenant))
         {
             return ApiProblem.Result(403, "ERR_TENANT_SUSPENDED", "Tenant suspenso ou encerrado");
         }
@@ -142,7 +149,7 @@ public sealed class ApiKeyFilter(ApiKeyAuthenticator auth, BearerAuthenticator b
         }
 
         var limits = ParamSnapshotService.EffectiveLimits(snapshots.Current, identity.PlanCode, identity.LimitsOverrideJson);
-        http.SetCaller(new Caller(identity, limits, onBehalfOf));
+        http.SetCaller(new Caller(identity, limits, onBehalfOf, billing));
         return await next(context).ConfigureAwait(false);
     }
 }
@@ -271,7 +278,11 @@ public sealed class AdminKeyFilter(ApiKeyHasher hasher, Microsoft.Extensions.Opt
 
         if (key.Length is < 32 or > 256)
         {
-            Interlocked.Increment(ref failures.Count);
+            if (key.Length > 0)
+            {
+                Interlocked.Increment(ref failures.Count);   // requisição sem chave não conta (não bloqueia a automação legítima)
+            }
+
             return ApiProblem.Result(401, "ERR_UNAUTHENTICATED", "Chave de operador ausente ou inválida");
         }
 

@@ -90,6 +90,10 @@ const FRIENDLY: Record<string, string> = {
   ERR_TENANT_SUSPENDED: 'A conta da empresa está suspensa. Fale com o suporte do TaxGateway.',
   ERR_SEM_EMPRESA: 'Escolha a empresa no menu lateral para continuar.',
   ERR_CREDENCIAIS: 'E-mail ou senha incorretos.',
+  ERR_TETO_EXCEDENTE: 'A franquia do mês acabou e o teto de excedente foi atingido. Aumente o teto em Plano e cobrança ou troque de plano.',
+  ERR_FRANQUIA_ESGOTADA: 'A franquia do mês acabou. Troque de plano em Plano e cobrança para continuar.',
+  ERR_PAGAMENTO_PENDENTE: 'Há um pagamento pendente: cálculos e auditorias estão bloqueados. Regularize em Plano e cobrança.',
+  ERR_EMPRESA_NAO_VERIFICADA: 'Verifique a empresa em Plano e cobrança (certificado e-CNPJ ou código no e-mail do cadastro da Receita).',
 };
 
 /** Mensagem legível para o usuário a partir de qualquer erro. */

@@ -95,6 +95,69 @@ public sealed class BillingTests(PostgresFixture db)
         }
     }
 
+    /// <summary>
+    /// D-R01: assinante da Stripe é cobrado pela assinatura — o fechamento registra o período como SUBSCRIPTION e não
+    /// emite fatura avulsa (antes cobrava em dobro). Simulações descontam a franquia do plano antes do excedente.
+    /// </summary>
+    [Fact]
+    public async Task Subscriber_gets_no_standalone_invoice_and_simulations_respect_the_allowance()
+    {
+        var month = new DateOnly(2026, 10, 1);
+        var e = Guid.CreateVersion7();
+        var f = Guid.CreateVersion7();
+        await using (var su = new NpgsqlConnection(db.SuperuserConnection))
+        {
+            await su.OpenAsync();
+            await using var cmd = new NpgsqlCommand($"""
+                INSERT INTO plans (code, rpm, burst, concurrency, batch_max_docs, batch_max_bytes, queue_priority, included_docs, included_cnpjs, price_cents,
+                                   overage_doc_millicents, overage_sim_millicents, cnpj_price_cents, included_simulations)
+                VALUES ('BILLSUB', 60, 10, 2, 500, 1000000, 'normal', 1000, 5, 14900, 4500, 1000, 1500, 100) ON CONFLICT (code) DO NOTHING;
+                INSERT INTO tenants (id, name, root_cnpj, plan_code, kms_key_ref, billing_customer_ref, stripe_subscription_id, subscription_status) VALUES
+                    ('{e}', 'Assinante', '{Cnpj(5)}', 'BILLSUB', 'k', 'cus_E', 'sub_E', 'active'),
+                    ('{f}', 'Avulso', '{Cnpj(6)}', 'BILLSUB', 'k', 'cus_F', NULL, NULL);
+                INSERT INTO usage_ledger (billing_month, tenant_id, metric, cnpj_subject, source_id)
+                SELECT '{month:yyyy-MM-dd}', CASE WHEN g <= 10 THEN '{e}'::uuid ELSE '{f}'::uuid END, 'SIMULATION', '{Cnpj(5)}', md5('sub' || g)::uuid
+                  FROM generate_series(1, 160) g;
+                """, su);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        try
+        {
+            await using var billing = NpgsqlDataSource.Create(db.ConnectionFor("tg_billing"));
+            var provider = new FakeProvider();
+            var service = new BillingService(new BillingDataSource(billing), provider, NullLogger<BillingService>.Instance);
+            await service.CloseMonthAsync(month, CancellationToken.None);
+            await service.InvoiceAsync(month, CancellationToken.None);
+
+            async Task<(string Status, long Amount)> P(Guid t)
+            {
+                await using var q = billing.CreateCommand("SELECT status, amount_cents FROM billing_periods WHERE tenant_id = $1 AND billing_month = $2");
+                q.Parameters.Add(new() { Value = t });
+                q.Parameters.Add(new() { Value = month });
+                await using var r = await q.ExecuteReaderAsync();
+                await r.ReadAsync();
+                return (r.GetString(0), r.GetInt64(1));
+            }
+
+            Assert.Equal("SUBSCRIPTION", (await P(e)).Status);
+            Assert.DoesNotContain(provider.Charges.Keys, k => k.StartsWith(e.ToString(), StringComparison.Ordinal));
+            // Avulso: 149,00 + (150 − 100 incluídas) × 1 centavo.
+            Assert.Equal(("INVOICED", 14900L + 50), await P(f));
+        }
+        finally
+        {
+            await using var su = new NpgsqlConnection(db.SuperuserConnection);
+            await su.OpenAsync();
+            await using var clean = new NpgsqlCommand($"""
+                DELETE FROM billing_periods WHERE tenant_id IN ('{e}', '{f}');
+                DELETE FROM usage_ledger WHERE tenant_id IN ('{e}', '{f}');
+                DELETE FROM tenants WHERE id IN ('{e}', '{f}');
+                """, su);
+            await clean.ExecuteNonQueryAsync();
+        }
+    }
+
     private async Task RunAsync(Guid c, Guid d)
     {
         await using var billing = NpgsqlDataSource.Create(db.ConnectionFor("tg_billing"));

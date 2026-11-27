@@ -23,7 +23,8 @@ public sealed record SimulationRecord(
     long ParamSnapshotId,
     string RequestJson,
     string ResultJson,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt,
+    bool Billable = true);   // D-R06: simulação sem nenhum item calculado fica na trilha, mas não é cobrada
 
 /// <summary>
 /// Persistência fora do caminho crítico (SDD §16.2 item 6): as simulações entram num Channel e são gravadas
@@ -163,6 +164,7 @@ public sealed partial class SimulationWriter(ITenantDb db, ILogger<SimulationWri
             sim.Parameters.Add(new() { Value = rows.Select(r => r.CreatedAt.UtcDateTime).ToArray() });
             batch.BatchCommands.Add(sim);
 
+            var billable = rows.Where(r => r.Billable).ToList();
             // Cobrança: uma linha por simulação; a UNIQUE (billing_month, metric, source_id) impede cobrança dupla.
             var ledger = new NpgsqlBatchCommand("""
                 INSERT INTO usage_ledger (billing_month, tenant_id, metric, cnpj_subject, source_id, occurred_at)
@@ -170,11 +172,11 @@ public sealed partial class SimulationWriter(ITenantDb db, ILogger<SimulationWri
                   FROM unnest($1::uuid[], $2::date[], $4::text[], $5::timestamptz[]) AS u(id, m, cnpj, at)
                 ON CONFLICT (billing_month, metric, source_id) DO NOTHING
                 """);
-            ledger.Parameters.Add(new() { Value = rows.Select(r => r.Id).ToArray() });
-            ledger.Parameters.Add(new() { Value = rows.Select(r => r.BillingMonth).ToArray() });
+            ledger.Parameters.Add(new() { Value = billable.Select(r => r.Id).ToArray() });
+            ledger.Parameters.Add(new() { Value = billable.Select(r => r.BillingMonth).ToArray() });
             ledger.Parameters.Add(new() { Value = tenant });
-            ledger.Parameters.Add(new() { Value = rows.Select(r => r.CnpjSubject).ToArray() });
-            ledger.Parameters.Add(new() { Value = rows.Select(r => r.CreatedAt.UtcDateTime).ToArray() });
+            ledger.Parameters.Add(new() { Value = billable.Select(r => r.CnpjSubject).ToArray() });
+            ledger.Parameters.Add(new() { Value = billable.Select(r => r.CreatedAt.UtcDateTime).ToArray() });
             batch.BatchCommands.Add(ledger);
 
             var activity = new NpgsqlBatchCommand("""
@@ -183,8 +185,8 @@ public sealed partial class SimulationWriter(ITenantDb db, ILogger<SimulationWri
                 ON CONFLICT DO NOTHING
                 """);
             activity.Parameters.Add(new() { Value = tenant });
-            activity.Parameters.Add(new() { Value = rows.Select(r => r.BillingMonth).ToArray() });
-            activity.Parameters.Add(new() { Value = rows.Select(r => r.CnpjSubject).ToArray() });
+            activity.Parameters.Add(new() { Value = billable.Select(r => r.BillingMonth).ToArray() });
+            activity.Parameters.Add(new() { Value = billable.Select(r => r.CnpjSubject).ToArray() });
             batch.BatchCommands.Add(activity);
 
             return await batch.ExecuteNonQueryAsync(ct).ConfigureAwait(false);

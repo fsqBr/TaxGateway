@@ -19,12 +19,14 @@ using TaxGateway.Infrastructure.Xml;
 namespace TaxGateway.Api.Audit;
 
 /// <summary>ConfirmedIndicios: regras INDICIO que o cliente confirmou com contexto (ex.: "R021"), D-505.</summary>
-public sealed record AuditRequest(byte[] Xml, string Direction, bool Reprocess, bool SignatureOptional, IReadOnlySet<string>? ConfirmedIndicios = null);
+/// <param name="PlatformInitiated">Reprocessamento feito pela plataforma (mudança de regra, D-408): nunca cobrado.</param>
+public sealed record AuditRequest(byte[] Xml, string Direction, bool Reprocess, bool SignatureOptional, IReadOnlySet<string>? ConfirmedIndicios = null,
+    bool PlatformInitiated = false);
 
 /// <summary>
 /// <c>POST /v1/auditoria/xml</c> de saída (SDD §6.2): endurecimento → XSD → assinatura → mapeamento → motor →
 /// regras → gravação atômica (§10.2). Replay da mesma chave de acesso, em qualquer mês, devolve a auditoria
-/// existente sem cobrança; <c>reprocess=true</c> reaudita sem cobrar.
+/// existente sem cobrança (retentativa do mesmo conteúdo); <c>reprocess=true</c> reaudita e é cobrado (D-R07).
 /// </summary>
 public sealed partial class AuditService(
     IRfbTaxEngineAdapter engine,
@@ -110,9 +112,10 @@ public sealed partial class AuditService(
             return AsReplay(existing.ResponseJson);
         }
 
-        // Reprocessamento gratuito só de documento JÁ auditado com o mesmo conteúdo (D-P04): antes, reprocess=true num
-        // XML inédito auditava sem cobrar.
-        var freeReprocess = req.Reprocess && existing is not null && !contentChanged;
+        // D-R07 (decisão do produto, 26/11/2026): todo documento que passa pelo motor é cobrado — inclusive o
+        // reprocessamento pedido pelo cliente. Grátis só a retentativa do MESMO conteúdo sem pedir reprocessamento
+        // (replay acima, proteção contra timeout/rede) e o reprocessamento feito pela plataforma quando a regra muda.
+        var freeReprocess = req.PlatformInitiated;
         var updatesExisting = existing is not null;
 
         var snapshot = snapshots.Current;

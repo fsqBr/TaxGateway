@@ -65,7 +65,18 @@ public sealed partial class StripeEventProcessor(BillingDataSource db, StackExch
 
             try
             {
-                var changed = await ApplyAsync(conn, tx, type, payload["data"]?["object"] as JsonObject ?? [], ct).ConfigureAwait(false);
+                // D-R02: eventos do mesmo cliente em série entre réplicas (lock na transação) e com proteção a evento velho.
+                var obj = payload["data"]?["object"] as JsonObject ?? [];
+                if (Str(obj, "customer") is { } customerId)
+                {
+                    await using var serial = new NpgsqlCommand("SELECT pg_advisory_xact_lock(hashtext('stripe:' || $1))", conn, tx);
+                    serial.Parameters.Add(new() { Value = customerId });
+                    await serial.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                }
+
+                // Sem "created" (a Stripe sempre manda; só payload manual), vale como agora — nunca como "velho".
+                var created = payload["created"] is JsonValue cv && cv.TryGetValue<long>(out var c) ? c : DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                var changed = await ApplyAsync(conn, tx, type, obj, created, ct).ConfigureAwait(false);
                 await using var done = new NpgsqlCommand("UPDATE stripe_events SET processed_at = now(), attempts = attempts + 1, last_error = NULL WHERE id = $1", conn, tx);
                 done.Parameters.Add(new() { Value = id });
                 await done.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
@@ -99,19 +110,57 @@ public sealed partial class StripeEventProcessor(BillingDataSource db, StackExch
     }
 
     /// <summary>Aplica o evento; devolve os tenants cujo plano/assinatura mudou (para avisar as instâncias da API).</summary>
-    private static async Task<List<Guid>> ApplyAsync(NpgsqlConnection conn, NpgsqlTransaction tx, string type, JsonObject o, CancellationToken ct)
+    private static async Task<List<Guid>> ApplyAsync(NpgsqlConnection conn, NpgsqlTransaction tx, string type, JsonObject o, long created, CancellationToken ct)
     {
         var changed = new List<Guid>();
+        // D-R09: régua de inadimplência — a falha abre (o DunningWorker avisa no dia 0 e segue os passos) e o pagamento fecha,
+        // devolvendo o acesso na hora (só a suspensão por inadimplência; a manual do backoffice continua).
+        if (type == "invoice.payment_failed")
+        {
+            changed.AddRange(await ExecAsync(conn, tx, """
+                UPDATE tenants SET payment_failed_at = coalesce(payment_failed_at, now()),
+                       dunning_stage = CASE WHEN payment_failed_at IS NULL THEN -1 ELSE dunning_stage END
+                 WHERE billing_customer_ref = $1 RETURNING id
+                """, ct, Str(o, "customer")).ConfigureAwait(false));
+        }
+        else if (type == "invoice.paid")
+        {
+            var restored = await ExecAsync(conn, tx, """
+                UPDATE tenants SET payment_failed_at = NULL, dunning_stage = 0,
+                       status = CASE WHEN status = 'RESTRICTED' OR (status = 'SUSPENDED' AND suspended_reason = 'INADIMPLENCIA') THEN 'ACTIVE' ELSE status END,
+                       suspended_reason = CASE WHEN status = 'SUSPENDED' AND suspended_reason = 'INADIMPLENCIA' THEN NULL ELSE suspended_reason END
+                 WHERE billing_customer_ref = $1 AND payment_failed_at IS NOT NULL RETURNING id
+                """, ct, Str(o, "customer")).ConfigureAwait(false);
+            foreach (var paid in restored)
+            {
+                await using var notice = new NpgsqlCommand("""
+                    INSERT INTO tenant_notifications (tenant_id, kind, severity, title, body, link, audience, dedupe_key)
+                    VALUES ($1, 'PAGAMENTO_REGULARIZADO', 'info', 'Pagamento confirmado', 'A fatura foi paga e o acesso está normal.',
+                            '/portal/cobranca', '{owner,admin,finance}', 'pago:' || $2)
+                    ON CONFLICT (tenant_id, dedupe_key) DO NOTHING
+                    """, conn, tx);
+                notice.Parameters.Add(new() { Value = paid });
+                notice.Parameters.Add(new() { Value = Str(o, "id") ?? Guid.NewGuid().ToString("N") });
+                await notice.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+
+            changed.AddRange(restored);
+        }
+
         switch (type)
         {
             case "checkout.session.completed":
                 if (Str(o, "mode") == "subscription" && Guid.TryParse(o["metadata"]?["tenant_id"]?.GetValue<string>(), out var t))
                 {
+                    // D-R02: só libera o plano com o pagamento confirmado (Pix/boleto chegam depois, por subscription.updated).
+                    var paid = Str(o, "payment_status") is "paid" or "no_payment_required";
                     changed.AddRange(await ExecAsync(conn, tx, """
                         UPDATE tenants SET billing_provider = 'STRIPE', billing_customer_ref = $2, stripe_subscription_id = $3,
-                               plan_code = coalesce((SELECT code FROM plans WHERE code = $4), plan_code), subscription_status = 'active'
-                         WHERE id = $1 RETURNING id
-                        """, ct, t, Str(o, "customer"), Str(o, "subscription"), o["metadata"]?["plan_code"]?.GetValue<string>()).ConfigureAwait(false));
+                               plan_code = CASE WHEN $5 THEN coalesce((SELECT code FROM plans WHERE code = $4), plan_code) ELSE plan_code END,
+                               subscription_status = CASE WHEN $5 THEN 'active' ELSE 'incomplete' END,
+                               subscription_event_at = greatest(coalesce(subscription_event_at, 0), $6)
+                         WHERE id = $1 AND coalesce(subscription_event_at, 0) <= $6 RETURNING id
+                        """, ct, t, Str(o, "customer"), Str(o, "subscription"), o["metadata"]?["plan_code"]?.GetValue<string>(), paid, created).ConfigureAwait(false));
                 }
 
                 break;
@@ -120,20 +169,30 @@ public sealed partial class StripeEventProcessor(BillingDataSource db, StackExch
                     var status = Str(o, "status");
                     var deleted = type.EndsWith("deleted", StringComparison.Ordinal) || status is "canceled" or "incomplete_expired";
                     var plan = o["metadata"]?["plan_code"]?.GetValue<string>();
+                    // O plano vem dos preços da assinatura (troca pelo portal da Stripe não muda a metadata).
+                    var priceIds = o["items"]?["data"]?.AsArray().Select(i => i?["price"]?["id"]?.GetValue<string>()).Where(x => x is not null).ToArray() ?? [];
                     long? periodEnd = o["current_period_end"]?.GetValue<long>()
                         ?? o["items"]?["data"]?.AsArray().Select(i => i?["current_period_end"]?.GetValue<long>()).FirstOrDefault(x => x is not null);
                     // Ativa/em teste: aplica o plano da assinatura. Cancelada: volta ao Sandbox. Inadimplente: mantém o plano e
                     // registra o status (o aviso e a eventual suspensão seguem a régua de cobrança da Stripe).
+                    // D-R02: só a assinatura CORRENTE do tenant (ou a primeira, se ainda não há) e nunca um evento mais velho
+                    // que o último aplicado — cancelar uma assinatura duplicada antiga não rebaixa o cliente, e a reentrega
+                    // atrasada de um "updated" não ressuscita uma assinatura cancelada.
                     changed.AddRange(await ExecAsync(conn, tx, """
                     UPDATE tenants SET stripe_subscription_id = CASE WHEN $5 THEN NULL ELSE $2 END,
                            subscription_status = $3,
                            current_period_end = CASE WHEN $6::bigint IS NULL THEN current_period_end ELSE to_timestamp($6::bigint) END,
                            plan_code = CASE WHEN $5 THEN $7
-                                            WHEN $3 IN ('active','trialing') THEN coalesce((SELECT code FROM plans WHERE code = $4), plan_code)
-                                            ELSE plan_code END
-                     WHERE billing_customer_ref = $1 OR stripe_subscription_id = $2
+                                            WHEN $3 IN ('active','trialing') THEN coalesce(
+                                                 (SELECT code FROM plans WHERE stripe_price_id = ANY($9::text[]) LIMIT 1),
+                                                 (SELECT code FROM plans WHERE code = $4), plan_code)
+                                            ELSE plan_code END,
+                           subscription_event_at = greatest(coalesce(subscription_event_at, 0), $8)
+                     WHERE billing_customer_ref = $1
+                       AND (stripe_subscription_id = $2 OR (stripe_subscription_id IS NULL AND NOT $5))
+                       AND coalesce(subscription_event_at, 0) <= $8
                     RETURNING id
-                    """, ct, Str(o, "customer"), Str(o, "id"), status, plan, deleted, periodEnd, FallbackPlan).ConfigureAwait(false));
+                    """, ct, Str(o, "customer"), Str(o, "id"), status, plan, deleted, periodEnd, FallbackPlan, created, priceIds).ConfigureAwait(false));
                     break;
                 }
 
@@ -300,17 +359,38 @@ public sealed partial class StripeUsageReporter(BillingDataSource db, StripeClie
         while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false));
     }
 
+    /// <summary>
+    /// D-R05: reporta a competência corrente e, nas primeiras 24 h do mês, também a anterior (o uso entre a última
+    /// execução e a meia-noite não se perde), com o horário do evento dentro do período. Cada envio grava antes o
+    /// intervalo pendente com um identificador fixo; se o envio passar e a gravação final falhar, a próxima execução
+    /// reenvia o MESMO identificador — a Stripe deduplica — em vez de um delta novo (antes cobrava em dobro).
+    /// </summary>
     public async Task<int> RunOnceAsync(CancellationToken ct)
     {
         var now = clock.GetUtcNow();
-        var local = TimeZoneInfo.ConvertTime(now, TimeZoneInfo.FindSystemTimeZoneById(OperatingSystem.IsWindows() ? "E. South America Standard Time" : "America/Sao_Paulo"));
+        var local = now.ToOffset(TimeSpan.FromHours(-3));   // Brasília, sem horário de verão desde 2019
         var month = new DateOnly(local.Year, local.Month, 1);
-        var rows = new List<(Guid Tenant, string Customer, long Docs, long ReportedDocs, long Cnpjs)>();
+        var n = 0;
+        if (local.Day == 1)
+        {
+            var previous = month.AddMonths(-1);
+            var lastSecond = new DateTimeOffset(month.Year, month.Month, 1, 0, 0, 0, TimeSpan.FromHours(-3)).AddSeconds(-1);
+            n += await ReportMonthAsync(previous, lastSecond, now, ct).ConfigureAwait(false);
+        }
+
+        return n + await ReportMonthAsync(month, now, now, ct).ConfigureAwait(false);
+    }
+
+    private async Task<int> ReportMonthAsync(DateOnly month, DateTimeOffset eventTime, DateTimeOffset now, CancellationToken ct)
+    {
+        var rows = new List<(Guid Tenant, string Customer, long Docs, long ReportedDocs, long Cnpjs, long? PendingQty, string? PendingId)>();
         await using (var cmd = db.DataSource.CreateCommand("""
             SELECT t.id, t.billing_customer_ref,
                    (SELECT count(*) FROM usage_ledger l WHERE l.tenant_id = t.id AND l.billing_month = $1 AND l.metric = 'DOC_AUDIT'),
                    coalesce((SELECT r.reported_qty FROM stripe_usage_reports r WHERE r.tenant_id = t.id AND r.billing_month = $1 AND r.metric = 'documentos'), 0),
-                   (SELECT count(*) FROM cnpj_monthly_activity a WHERE a.tenant_id = t.id AND a.billing_month = $1)
+                   (SELECT count(*) FROM cnpj_monthly_activity a WHERE a.tenant_id = t.id AND a.billing_month = $1),
+                   (SELECT r.pending_qty FROM stripe_usage_reports r WHERE r.tenant_id = t.id AND r.billing_month = $1 AND r.metric = 'documentos'),
+                   (SELECT r.pending_identifier FROM stripe_usage_reports r WHERE r.tenant_id = t.id AND r.billing_month = $1 AND r.metric = 'documentos')
               FROM tenants t
              WHERE t.stripe_subscription_id IS NOT NULL AND t.billing_customer_ref IS NOT NULL
                AND t.subscription_status IN ('active','trialing','past_due')
@@ -320,34 +400,55 @@ public sealed partial class StripeUsageReporter(BillingDataSource db, StripeClie
             await using var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await r.ReadAsync(ct).ConfigureAwait(false))
             {
-                rows.Add((r.GetGuid(0), r.GetString(1), r.GetInt64(2), r.GetInt64(3), r.GetInt64(4)));
+                rows.Add((r.GetGuid(0), r.GetString(1), r.GetInt64(2), r.GetInt64(3), r.GetInt64(4), r.IsDBNull(5) ? null : r.GetInt64(5), r.IsDBNull(6) ? null : r.GetString(6)));
             }
         }
 
         var o = options.Value;
         foreach (var row in rows)
         {
-            var delta = row.Docs - row.ReportedDocs;
+            // Pendente de uma execução anterior: reenvia exatamente o mesmo intervalo e identificador.
+            var (target, identifier) = row.PendingQty is { } pq && row.PendingId is { } pid
+                ? (pq, pid)
+                : (row.Docs, $"{row.Tenant:N}-{month:yyyyMM}-doc-{row.ReportedDocs}-{row.Docs}");
+            var delta = target - row.ReportedDocs;
             if (delta > 0)
             {
-                await stripe.SendMeterEventAsync(o.DocumentsMeterEvent, row.Customer, delta,
-                    $"{row.Tenant:N}-{month:yyyyMM}-doc-{row.Docs}", now, ct).ConfigureAwait(false);
-                await SaveAsync(row.Tenant, month, "documentos", row.Docs, ct).ConfigureAwait(false);
+                await MarkPendingAsync(row.Tenant, month, row.ReportedDocs, target, identifier, ct).ConfigureAwait(false);
+                await stripe.SendMeterEventAsync(o.DocumentsMeterEvent, row.Customer, delta, identifier, eventTime, ct).ConfigureAwait(false);
+                await SaveAsync(row.Tenant, month, "documentos", target, ct).ConfigureAwait(false);
             }
 
             await stripe.SendMeterEventAsync(o.CnpjsMeterEvent, row.Customer, row.Cnpjs,
-                $"{row.Tenant:N}-{month:yyyyMM}-cnpj-{now:yyyyMMddHH}", now, ct).ConfigureAwait(false);
+                $"{row.Tenant:N}-{month:yyyyMM}-cnpj-{now:yyyyMMddHH}", eventTime, ct).ConfigureAwait(false);
             await SaveAsync(row.Tenant, month, "cnpjs", row.Cnpjs, ct).ConfigureAwait(false);
         }
 
         return rows.Count;
     }
 
+    private async Task MarkPendingAsync(Guid tenant, DateOnly month, long reported, long target, string identifier, CancellationToken ct)
+    {
+        await using var cmd = db.DataSource.CreateCommand("""
+            INSERT INTO stripe_usage_reports (tenant_id, billing_month, metric, reported_qty, pending_qty, pending_identifier, pending_at)
+            VALUES ($1, $2, 'documentos', $3, $4, $5, now())
+            ON CONFLICT (tenant_id, billing_month, metric) DO UPDATE
+               SET pending_qty = EXCLUDED.pending_qty, pending_identifier = EXCLUDED.pending_identifier, pending_at = now(), updated_at = now()
+            """);
+        cmd.Parameters.Add(new() { Value = tenant });
+        cmd.Parameters.Add(new() { Value = month, NpgsqlDbType = NpgsqlDbType.Date });
+        cmd.Parameters.Add(new() { Value = reported });
+        cmd.Parameters.Add(new() { Value = target });
+        cmd.Parameters.Add(new() { Value = identifier });
+        await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+    }
+
     private async Task SaveAsync(Guid tenant, DateOnly month, string metric, long qty, CancellationToken ct)
     {
         await using var cmd = db.DataSource.CreateCommand("""
             INSERT INTO stripe_usage_reports (tenant_id, billing_month, metric, reported_qty) VALUES ($1, $2, $3, $4)
-            ON CONFLICT (tenant_id, billing_month, metric) DO UPDATE SET reported_qty = EXCLUDED.reported_qty, updated_at = now()
+            ON CONFLICT (tenant_id, billing_month, metric) DO UPDATE SET reported_qty = EXCLUDED.reported_qty, updated_at = now(),
+                   pending_qty = NULL, pending_identifier = NULL, pending_at = NULL
             """);
         cmd.Parameters.Add(new() { Value = tenant });
         cmd.Parameters.Add(new() { Value = month, NpgsqlDbType = NpgsqlDbType.Date });

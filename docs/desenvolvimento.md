@@ -62,7 +62,7 @@ curl -s -X POST 'http://127.0.0.1:5205/v1/auditoria/xml?direction=OUTBOUND' -H "
 ```
 
 * Em dev, só a ICP-Brasil real é âncora. XML assinado pela PKI de teste (`tests/golden/pki`) sai como `ASSINATURA_INVALIDA`.
-* `?assinatura=opcional` aceita XML sem assinatura; `?reprocess=true` reaudita sem cobrar.
+* `?assinatura=opcional` aceita XML sem assinatura; `?reprocess=true` reaudita e **é cobrado** (D-R07); o replay da mesma nota e o reprocessamento automático da plataforma não são.
 * Os XMLs ficam cifrados no SeaweedFS (bucket `taxgateway-xml`, prefixo `t/{tenant}/`).
 
 ## Pipeline fiscal e deploy (Fase 4)
@@ -241,6 +241,13 @@ docker compose -f docker-compose.yml -f docker-compose.capacity.yml -f docker-co
   dizem "não configurado" e o resto funciona.
 - **Avisos** (D-J03): os workers mandam por e-mail (Mailpit em dev) os avisos de franquia, webhook pausado,
   certificado vencendo e mudança de alíquota; `Workers:Notifications=false` desliga.
+- **Teto, inadimplência e titularidade** (D-R08 a D-R10): teto de excedente padrão 0 (`PUT /v1/cobranca/teto`); a
+  régua roda no `DunningWorker` (workers com `ConnectionStrings__Billing`) a partir de `invoice.payment_failed`;
+  `CnpjRegistry__BaseUrl` aponta a consulta pública de CNPJ que devolve `{"email": ...}` (vazio = só certificado e
+  manual). Empresa do autocadastro nasce não verificada: em dev, verifique pelo backoffice (Tenants → detalhe →
+  "Marcar verificada") ou envie o A1 de teste da mesma raiz.
+- **Cliente sintético** (D-R11): `python tests/smoke/cliente_sintetico.py` faz a jornada de uma empresa nova pela
+  pilha do compose (precisa do Mailpit).
 
 ## Versão, novidades e central de ajuda (D-W11 a D-W13)
 

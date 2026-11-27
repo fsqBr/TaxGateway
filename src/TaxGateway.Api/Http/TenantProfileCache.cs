@@ -8,7 +8,7 @@ using TaxGateway.Core.Tenancy;
 
 namespace TaxGateway.Api.Http;
 
-public sealed record TenantProfile(string PlanCode, string Status, string LimitsOverrideJson, bool AutoProvisionCnpj);
+public sealed record TenantProfile(string PlanCode, string Status, string LimitsOverrideJson, bool AutoProvisionCnpj, long OverageCapCents = 0, bool CnpjVerified = false);
 
 /// <summary>
 /// Perfil do tenant (plano, situação, overrides) para TODAS as credenciais — API key, OAuth e sessão (D-C08). Antes, o
@@ -47,7 +47,7 @@ public sealed class TenantProfileCache
             return p;
         }
 
-        await using var cmd = _appDb.CreateCommand("SELECT plan_code, tenant_status, limits_override::text, auto_provision_cnpj FROM app.tenant_profile($1)");
+        await using var cmd = _appDb.CreateCommand("SELECT plan_code, tenant_status, limits_override::text, auto_provision_cnpj, overage_cap_cents, cnpj_verified FROM app.tenant_profile($1)");
         cmd.Parameters.Add(new() { Value = tenant.Value });
         await using var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
         if (!await r.ReadAsync(ct).ConfigureAwait(false))
@@ -55,7 +55,7 @@ public sealed class TenantProfileCache
             return null;
         }
 
-        p = new TenantProfile(r.GetString(0), r.GetString(1), r.GetString(2), r.GetBoolean(3));
+        p = new TenantProfile(r.GetString(0), r.GetString(1), r.GetString(2), r.GetBoolean(3), r.GetInt64(4), r.GetBoolean(5));
         _cache.Set(key, p, new MemoryCacheEntryOptions { AbsoluteExpirationRelativeToNow = Ttl, Size = 1 });
         return p;
     }

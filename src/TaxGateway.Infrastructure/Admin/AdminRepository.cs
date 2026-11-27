@@ -45,7 +45,9 @@ public sealed class AdminRepository(AdminDataSource admin)
         await using var batch = new NpgsqlBatch(conn, tx);
 
         var ins = new NpgsqlBatchCommand("""
-            INSERT INTO tenants (id, name, root_cnpj, plan_code, auto_provision_cnpj, kms_key_ref, xml_retention_days) VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO tenants (id, name, root_cnpj, plan_code, auto_provision_cnpj, kms_key_ref, xml_retention_days,
+                                 cnpj_verified_at, cnpj_verification_method, cnpj_verified_by)   -- D-R10: contrato conferido pelo comercial
+            VALUES ($1, $2, $3, $4, $5, $6, $7, now(), 'MANUAL', 'backoffice')
             """);
         ins.Parameters.Add(new() { Value = tenant.Value });
         ins.Parameters.Add(new() { Value = t.Name });
@@ -123,6 +125,20 @@ public sealed class AdminRepository(AdminDataSource admin)
         if (string.Equals(proposer, approver, StringComparison.Ordinal))
         {
             throw new ParamChangeConflictException("Domínio fiscal exige dois aprovadores diferentes (SDD §15.1).");
+        }
+
+        // D-R04: duas pessoas DE VERDADE — quem aprova não pode ser um operador criado por quem propôs (nem o contrário).
+        await using (var puppet = new NpgsqlCommand("""
+            SELECT EXISTS (SELECT 1 FROM users WHERE realm = 'operator'
+                             AND ((email = $1 AND operator_created_by = $2) OR (email = $2 AND operator_created_by = $1)))
+            """, conn, tx))
+        {
+            puppet.Parameters.Add(new() { Value = approver });
+            puppet.Parameters.Add(new() { Value = proposer });
+            if (await puppet.ExecuteScalarAsync(ct).ConfigureAwait(false) is true)
+            {
+                throw new ParamChangeConflictException("Quem aprova não pode ter criado (nem ter sido criado por) quem propôs a mudança (D-R04).");
+            }
         }
 
         var payload = JsonSerializer.Deserialize(payloadJson, AdminJsonContext.Default.RatePayload)!;

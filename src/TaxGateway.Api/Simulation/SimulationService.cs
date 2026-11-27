@@ -115,13 +115,21 @@ public sealed partial class SimulationService(
             await ToCacheAsync(cacheKey, response).ConfigureAwait(false);
         }
 
+        // D-R06: se o motor recusou TODOS os itens não houve cálculo — a resposta continua 200 com os erros por item
+        // (contrato v1), mas com um aviso explícito e SEM cobrança (antes era cobrada e os totais zerados enganavam).
+        var billable = response.Itens.Count == 0 || !response.Itens.All(i => i.Estado.StartsWith("INCONSISTENCIA", StringComparison.Ordinal));
+        if (!billable && !response.Avisos.Any(a => a.Codigo == "NENHUM_ITEM_CALCULADO"))
+        {
+            response.Avisos.Add(new AvisoDto { Codigo = "NENHUM_ITEM_CALCULADO", Mensagem = "O motor oficial recusou todos os itens (veja erros por item): os totais não representam imposto devido e a chamada não foi cobrada." });
+        }
+
         var id = Guid.CreateVersion7();
         response.SimulationId = $"sim_{id:N}";
         var json = JsonSerializer.SerializeToUtf8Bytes(response, ContractsJsonContext.Default.SimulacaoResponse);
 
         writer.Enqueue(new SimulationRecord(
             caller.Identity.Tenant, id, BillingMonth(receivedAt), v.Cnpj, response.RegimeCalculo, response.RfbEngineVersion.Bundle,
-            snapshot.Id, rawRequest, System.Text.Encoding.UTF8.GetString(json), receivedAt));
+            snapshot.Id, rawRequest, System.Text.Encoding.UTF8.GetString(json), receivedAt, billable));
         return new SimulationOutcome(response, json);
     }
 
@@ -231,9 +239,15 @@ public sealed partial class SimulationService(
                 Err($"{p}.nbs", "INVALIDO", "NBS com 9 dígitos.");
             }
 
-            if (it.ValorBaseCalculo is not { } vbc || vbc < 0)
+            // D-R06: limites do leiaute (13 inteiros e 2 decimais) — acima disso o motor recusa e antes saía 200 zerado.
+            if (it.ValorBaseCalculo is not { } vbc || vbc < 0 || vbc >= 10_000_000_000_000m)
             {
-                Err($"{p}.valor_base_calculo", "INVALIDO", "Valor da base de cálculo obrigatório e não negativo.");
+                Err($"{p}.valor_base_calculo", "INVALIDO", "Valor da base de cálculo obrigatório, não negativo e com até 13 dígitos inteiros.");
+            }
+
+            if (it.Quantidade is { } qtd && qtd <= 0)
+            {
+                Err($"{p}.quantidade", "INVALIDO", "Quantidade deve ser maior que zero.");
             }
 
             if (it.ImpostoSeletivo is { } s && (s.Cst is null || !Cst().IsMatch(s.Cst) || s.CClassTrib is null

@@ -76,6 +76,8 @@ public static class WorkerHost
             builder.Services.AddHostedService(sp => sp.GetRequiredService<TaxGateway.Infrastructure.Billing.StripeEventProcessor>());
             builder.Services.AddHostedService(sp => sp.GetRequiredService<TaxGateway.Infrastructure.Billing.StripeCatalogSync>());
             builder.Services.AddHostedService(sp => sp.GetRequiredService<TaxGateway.Infrastructure.Billing.StripeUsageReporter>());
+            builder.Services.AddSingleton<TaxGateway.Infrastructure.Billing.DunningWorker>();   // D-R09
+            builder.Services.AddHostedService(sp => sp.GetRequiredService<TaxGateway.Infrastructure.Billing.DunningWorker>());
         }
 
         // LCR compartilhada (D-P23): os workers têm saída para a internet; baixam as LCRs pedidas e publicam no bucket.

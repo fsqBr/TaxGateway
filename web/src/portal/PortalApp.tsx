@@ -7,7 +7,8 @@ import { portal } from '../lib/api';
 import { Overview, Simular, Auditar, Lotes } from './Operacao';
 import { ApiKeys, Webhooks } from './Integracao';
 import { Cnpjs, Dfe, Titulares } from './Cadastros';
-import { Equipe, MinhaConta } from './Conta';
+import { ContestarTitularidade, Equipe, MinhaConta } from './Conta';
+import { useSession } from '../auth/session';
 import { Documentos } from './Documentos';
 import { Classificacao } from './Classificacao';
 import { Avisos, AvisosBell } from './Avisos';
@@ -41,12 +42,24 @@ const nav: NavItem[] = [
   { to: '/portal/cobranca', label: 'Plano e cobrança', icon: CreditCard, section: 'Conta', scope: 'billing:manage' },
 ];
 
+/** Conta sem empresa (convite pendente ou CNPJ já cadastrado por outra pessoa, D-R10). */
+function SemEmpresa() {
+  return (
+    <>
+      <PageHeader title="Sua conta ainda não tem empresa" description="Peça um convite a quem administra a empresa no TaxGateway. Se você é o titular e o CNPJ foi cadastrado por outra pessoa, conteste abaixo com o e-CNPJ." />
+      <ContestarTitularidade />
+    </>
+  );
+}
+
 export default function PortalApp() {
-  const me = useLoad(() => portal<Me>('/v1/me'));
+  const { sessao } = useSession();
+  const semEmpresa = !!sessao && (sessao.empresas?.length ?? 0) === 0;
+  const me = useLoad(() => (semEmpresa ? Promise.resolve(undefined) : portal<Me>('/v1/me')), [semEmpresa]);
   return (
     <Shell realm="portal" nav={nav} topbar={<AvisosBell />}>
       <Routes>
-        <Route index element={<Overview me={me.data} />} />
+        <Route index element={semEmpresa ? <SemEmpresa /> : <Overview me={me.data} />} />
         <Route path="simular" element={me.data ? <Simular me={me.data} /> : null} />
         <Route path="auditoria" element={<Auditar me={me.data} />} />
         <Route path="documentos" element={<Documentos />} />

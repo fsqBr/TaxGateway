@@ -295,7 +295,7 @@ public static class BatchWebhookEndpoints
             return ApiProblem.Result(400, "ERR_JSON_INVALIDO", "JSON inválido", "Esperado {\"url\": \"https://...\", \"eventos\": [\"document.audited\"]}.");
         }
 
-        if (url is null || !Uri.TryCreate(url, UriKind.Absolute, out var uri) || events.Count == 0)
+        if (url is null || url.Length > 2048 || !Uri.TryCreate(url, UriKind.Absolute, out var uri) || events.Count == 0)
         {
             return ApiProblem.Result(400, "ERR_VALIDATION", "Informe url (https) e eventos (ex.: document.audited, batch.audit.completed ou *)");
         }

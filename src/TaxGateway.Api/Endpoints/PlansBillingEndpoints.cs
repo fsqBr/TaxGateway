@@ -111,12 +111,44 @@ public static class PlansBillingEndpoints
                 """);
             return (string)(await cmd.ExecuteScalarAsync(ct))!;
         }, http.RequestAborted);
+        var caller = http.GetCaller();
+        var extra = await db.InTenantAsync(caller.Identity.Tenant, async (s, ct) =>
+        {
+            await using var cmd = s.CreateCommand("""
+                SELECT t.overage_cap_cents, t.cnpj_verified_at, t.cnpj_verification_method, t.payment_failed_at, t.status,
+                       (SELECT count(*) FROM usage_ledger WHERE billing_month = $1 AND metric = 'DOC_AUDIT'),
+                       (SELECT count(*) FROM usage_ledger WHERE billing_month = $1 AND metric = 'SIMULATION')
+                  FROM tenants t
+                """);
+            cmd.Parameters.Add(new() { Value = TaxGateway.Api.Simulation.SimulationService.BillingMonth(DateTimeOffset.UtcNow), NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Date });
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            await r.ReadAsync(ct);
+            return (Cap: r.GetInt64(0), Verified: r.IsDBNull(1) ? (DateTimeOffset?)null : r.GetFieldValue<DateTimeOffset>(1), Method: r.IsDBNull(2) ? null : r.GetString(2),
+                Failed: r.IsDBNull(3) ? (DateTimeOffset?)null : r.GetFieldValue<DateTimeOffset>(3), Status: r.GetString(4), Docs: r.GetInt64(5), Sims: r.GetInt64(6));
+        }, http.RequestAborted);
+        var overage = QuotaFilter.OverageCents(caller.Limits, extra.Docs, extra.Sims);
         return Results.Ok(new JsonObject
         {
             ["plano"] = t.Plan,
             ["assinatura"] = t.Subscription is null ? null : new JsonObject { ["situacao"] = t.Status, ["renova_em"] = t.PeriodEnd },
             ["pagamento_online"] = stripe.Enabled,
             ["faturas"] = JsonNode.Parse(invoices),
+            ["excedente"] = new JsonObject
+            {
+                ["teto_centavos"] = extra.Cap,
+                ["usado_centavos"] = (long)Math.Round(overage),
+                ["franquia_rigida"] = caller.Limits.HardQuota,
+                ["preco_documento_milicentavos"] = caller.Limits.OverageDocMillicents,
+                ["preco_simulacao_milicentavos"] = caller.Limits.OverageSimMillicents,
+            },
+            ["verificacao"] = new JsonObject { ["verificada"] = extra.Verified is not null, ["verificada_em"] = extra.Verified, ["metodo"] = extra.Method },
+            ["inadimplencia"] = extra.Failed is null ? null : new JsonObject
+            {
+                ["desde"] = extra.Failed,
+                ["situacao"] = extra.Status,
+                ["restringe_em"] = extra.Failed.Value.AddDays(10),
+                ["suspende_em"] = extra.Failed.Value.AddDays(15),
+            },
         });
     }
 
@@ -153,6 +185,13 @@ public static class PlansBillingEndpoints
             return ApiProblem.Result(503, "ERR_PAGAMENTO_INDISPONIVEL", "Pagamento online não configurado", "Fale com vendas para contratar.");
         }
 
+        // D-R10: plano pago só com a titularidade do CNPJ verificada.
+        if (http.GetCaller().Billing is not { CnpjVerified: true })
+        {
+            return ApiProblem.Result(403, "ERR_EMPRESA_NAO_VERIFICADA", "Verifique a empresa antes de contratar",
+                "Confirme a titularidade do CNPJ em Plano e cobrança (certificado e-CNPJ, código no e-mail do cadastro da Receita ou análise do suporte).");
+        }
+
         var body = await JsonNode.ParseAsync(http.Request.Body, cancellationToken: http.RequestAborted) as JsonObject;
         var code = body?["plano"]?.GetValue<string>() ?? "";
         var plan = await PaidPlanAsync(appDb, code, http.RequestAborted);
@@ -166,6 +205,14 @@ public static class PlansBillingEndpoints
         if (plan.Cnpjs is not null)
         {
             prices.Add((plan.Cnpjs, true));
+        }
+
+        // D-R02: assinatura existente e não encerrada (inclusive incompleta ou inadimplente) é resolvida no portal de
+        // cobrança — um segundo checkout criaria uma segunda assinatura para o mesmo cliente.
+        if (t.Subscription is not null && t.Status is "incomplete" or "unpaid" or "paused")
+        {
+            return ApiProblem.Result(409, "ERR_ASSINATURA_PENDENTE", "Há uma assinatura com pagamento pendente",
+                "Conclua ou cancele o pagamento em \"Gerenciar pagamento\" (portal de cobrança) antes de assinar de novo.");
         }
 
         if (t.Subscription is not null && t.Status is "active" or "trialing" or "past_due")

@@ -122,7 +122,7 @@ public static partial class OpenApiDocs
 
         ["GET /v1/me"] = new("Credenciais", "Dados da credencial em uso",
             Description: "Tenant, CNPJ raiz, plano, escopos e limites efetivos. Não exige escopo específico.",
-            Response: $$$"""{"tenant_id":"{{{Id}}}","nome":"Empresa Exemplo Ltda","cnpj_raiz":"11222333000181","plano":"GROWTH","situacao":"ACTIVE","auto_provisionar_cnpj":false,"credencial":"api_key","scopes":["simulacao:write","auditoria:write"],"limites":{"rpm":600,"concorrencia":20}}"""),
+            Response: $$$"""{"tenant_id":"{{{Id}}}","nome":"Empresa Exemplo Ltda","cnpj_raiz":"11222333000181","plano":"GROWTH","situacao":"ACTIVE","auto_provisionar_cnpj":false,"credencial":"api_key","scopes":["simulacao:write","auditoria:write"],"limites":{"rpm":600,"concorrencia":10}}"""),
         ["GET /v1/api-keys"] = new("Credenciais", "Lista as API keys (sem o segredo)",
             Response: $$"""{"api_keys":[{"id":"{{Id}}","nome":"erp-producao","prefixo":"AbCd1234","scopes":["simulacao:write"],"expira_em":null,"revogada_em":null,"ultimo_uso":"{{Ts}}","criada_em":"{{Ts}}","atual":true}]}"""),
         ["POST /v1/api-keys"] = new("Credenciais", "Cria uma API key",
@@ -166,7 +166,7 @@ public static partial class OpenApiDocs
 
         ["GET /admin/v1/me"] = new("Admin: tenants", "Operador autenticado", Response: """{"operador":"fiscal-a","scopes":["admin:fiscal","admin:commercial"]}"""),
         ["GET /admin/v1/plans"] = new("Admin: tenants", "Planos e limites",
-            Response: """{"planos":[{"codigo":"GROWTH","rpm":600,"concorrencia":20,"lote_max_documentos":5000}]}"""),
+            Response: """{"planos":[{"codigo":"GROWTH","rpm":600,"concorrencia":10,"lote_max_documentos":5000}]}"""),
         ["GET /admin/v1/tenants/{id}"] = new("Admin: tenants", "Detalhe do tenant",
             Description: "Assinatura, pessoas com acesso (papel e MFA), CNPJs, API keys (sem segredo), consumo dos últimos 3 meses e as 12 últimas faturas.",
             Response: $$$"""{"tenant":{"tenant_id":"{{{Id}}}","nome":"Empresa Exemplo Ltda","cnpj_raiz":"11222333000181","plano":"PROFISSIONAL","situacao":"ACTIVE","cobranca":{"provedor":"STRIPE","situacao_assinatura":"active"}},"pessoas":[{"nome":"Maria","email":"maria@exemplo.com.br","papel":"owner","mfa":true,"situacao":"ACTIVE","ultimo_acesso":"{{{Ts}}}"}],"cnpjs":[{"cnpj":"11222333000181","ativo":true,"criado_em":"{{{Ts}}}"}],"api_keys":[],"consumo":[{"competencia":"2026-11","documentos":1240,"simulacoes":8800}],"faturas":[]}"""),

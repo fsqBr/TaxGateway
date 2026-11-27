@@ -127,6 +127,9 @@ public static class AdminEndpoints
     public const string Fiscal = "admin:fiscal";
     public const string Commercial = "admin:commercial";
 
+    /// <summary>Gerir operadores e ler a trilha de ações (D-R04).</summary>
+    public const string Security = "admin:security";
+
     public static RouteGroupBuilder MapAdmin(this RouteGroupBuilder admin)
     {
         admin.MapPost("/tenants", CreateTenantAsync).WithMetadata(new RequiredScope(Commercial));
@@ -174,10 +177,13 @@ public static class AdminEndpoints
                 Scopes = [.. Scopes.TenantDefault],
             });
         }
-        catch (Npgsql.PostgresException ex) when (ex.SqlState is Npgsql.PostgresErrorCodes.UniqueViolation or Npgsql.PostgresErrorCodes.ForeignKeyViolation)
+        catch (Npgsql.PostgresException ex) when (ex.SqlState == Npgsql.PostgresErrorCodes.ForeignKeyViolation)
         {
-            return ApiProblem.Result(409, "ERR_CONFLICT", "Tenant não criado", ex.SqlState == Npgsql.PostgresErrorCodes.UniqueViolation
-                ? "Já existe tenant com este CNPJ raiz." : "Plano inexistente.");
+            return ApiProblem.Result(400, "ERR_VALIDATION", "Plano inexistente", "Use um código da lista de planos (GET /admin/v1/planos), em maiúsculas.");
+        }
+        catch (Npgsql.PostgresException ex) when (ex.SqlState == Npgsql.PostgresErrorCodes.UniqueViolation)
+        {
+            return ApiProblem.Result(409, "ERR_CONFLICT", "Tenant não criado", "Já existe tenant com este CNPJ raiz.");
         }
     }
 

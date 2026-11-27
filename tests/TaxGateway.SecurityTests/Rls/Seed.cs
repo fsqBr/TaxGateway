@@ -69,6 +69,13 @@ internal static class Seed
         ["stripe_usage_reports"] = "INSERT INTO stripe_usage_reports (tenant_id, billing_month, metric, reported_qty) VALUES (@t, '2026-11-01', 'documentos', 1)",
         ["dfe_sync_state"] = $"INSERT INTO dfe_sync_state (tenant_id, cnpj) VALUES (@t, {Cnpj})",
         ["dfe_documents"] = $"INSERT INTO dfe_documents (tenant_id, cnpj, nsu, schema, kind, status) VALUES (@t, {Cnpj}, 1, 'resNFe_v1.01.xsd', 'RESUMO', 'RECEBIDO')",
+        ["cnpj_verification_codes"] = "INSERT INTO cnpj_verification_codes (tenant_id, code_hash, email, expires_at) VALUES (@t, '\\x01', 'seed@seed.test', now() + interval '1 hour')",
+        ["cnpj_disputes"] = """
+            INSERT INTO users (id, realm, email, name, password_hash, password_salt)
+            VALUES (md5(@t::text || 'disp')::uuid, 'customer', 'd' || @n || '@seed.test', 'seed', '\x01', '\x01') ON CONFLICT DO NOTHING;
+            INSERT INTO cnpj_disputes (id, cnpj_root, tenant_id, claimant_user, method, certificate)
+            VALUES (md5(@t::text || 'dispute')::uuid, '00000000000000', @t, md5(@t::text || 'disp')::uuid, 'CERTIFICADO', 'seed')
+            """,
         ["tenant_notifications"] = "INSERT INTO tenant_notifications (tenant_id, kind, severity, title, body, dedupe_key) VALUES (@t, 'FRANQUIA_80', 'aviso', 'seed', 'seed', 'seed-' || @n)",
         ["titular_requests"] = "INSERT INTO titular_requests (id, tenant_id, cpf_hmac, action, documents, requested_by) VALUES (md5(@t::text || 'tit')::uuid, @t, '\\x01', 'LOCALIZAR', 0, 'seed')",
     };

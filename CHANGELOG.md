@@ -7,6 +7,41 @@ Todas as mudanças relevantes para quem usa o TaxGateway. A versão em uso apare
 > Este arquivo é a fonte do aviso de novidades exibido no portal e da página `/ajuda/novidades`. Ao lançar uma versão:
 > atualize `VERSION`, `web/package.json` e o `Chart.yaml`, e acrescente a seção aqui (o CI confere que as versões batem).
 
+## [0.12.0] - 2026-11-26
+
+### Novidades
+- **Teto de excedente**: nos planos pagos, o que passa da franquia só é cobrado até o teto mensal que você definir em Plano e cobrança. O teto começa em zero — nada além da mensalidade sem sua autorização. Avisos em 80% e ao atingir.
+- **Pagamento que falhou**: avisos no dia da falha e nos dias 3 e 7; no dia 10 cálculos e auditorias ficam bloqueados (consultas e exportações continuam); no dia 15 a conta é suspensa. Pagou, volta na hora.
+- **Verificação da empresa**: confirme a titularidade do CNPJ com o certificado e-CNPJ, com um código no e-mail do cadastro da Receita ou pelo suporte. Exigida para plano pago e captura de notas (DF-e); enviar o A1 da matriz já verifica.
+- **Contestar a titularidade**: se outra pessoa cadastrou o CNPJ da sua empresa, prove com o e-CNPJ em Minha conta; o suporte transfere a empresa.
+- Backoffice: teto e verificação manual no detalhe do cliente e página **Disputas de CNPJ**.
+
+### Mudanças na API
+- `POST /v1/auditoria/xml?reprocess=true` **passa a ser cobrado** (é uma nova auditoria). Reenviar a mesma nota sem `reprocess` continua devolvendo o resultado guardado, sem cobrança.
+- Planos pagos fora da franquia: `402 ERR_TETO_EXCEDENTE` ao atingir o teto (padrão 0 = para ao esgotar a franquia).
+- Conta com pagamento pendente há 10 dias: cálculo e auditoria respondem `402 ERR_PAGAMENTO_PENDENTE`.
+- `POST /v1/cobranca/checkout` e a captura de DF-e exigem empresa verificada: `403 ERR_EMPRESA_NAO_VERIFICADA`.
+- `GET /v1/cobranca` traz `excedente`, `verificacao` e `inadimplencia`.
+- `POST /v1/conta/cadastro` com CNPJ já cadastrado responde `202` como um cadastro novo (antes `409`); a explicação vai por e-mail.
+
+## [0.11.1] - 2026-11-26
+
+### Correções
+- Assinantes da Stripe não recebem mais uma fatura avulsa além da assinatura; simulações descontam a franquia do plano antes do excedente.
+- Eventos da Stripe aplicados na ordem certa: uma reentrega atrasada não reativa assinatura cancelada, e boleto/Pix só libera o plano depois de compensado.
+- Consumo medido enviado à Stripe sem duplicar em caso de falha e sem perder o uso do fim do mês.
+- Verificação em duas etapas protegida contra tentativa e erro: 5 códigos errados encerram a sessão e bloqueiam a conta temporariamente.
+- Filtros de documentos com data fora do intervalo respondem 400 (antes, erro interno e CSV cortado).
+- Simulação em que o motor recusa todos os itens não é cobrada e traz o aviso `NENHUM_ITEM_CALCULADO`.
+
+### Mudanças na API
+- `POST /v1/calculo/simular`: `valor_base_calculo` com até 13 dígitos inteiros e `quantidade` maior que zero (`400`).
+- Filtros de `/v1/auditoria/documentos*`: datas entre 2025 e 2100; `limite` inválido responde `400` em problem+json.
+- `GET /v1/cnpjs/{cnpj}/dfe/documentos`: `status` desconhecido responde `400`.
+- `POST /v1/cobranca/checkout` com assinatura pendente responde `409 ERR_ASSINATURA_PENDENTE` (resolva no portal de cobrança).
+- Corpo grande demais responde `413 ERR_PAYLOAD_TOO_LARGE`.
+- Backoffice: gerir operadores e ler a trilha exigem o escopo `admin:security`; ninguém concede escopo que não tem.
+
 ## [0.11.0] - 2026-11-26
 
 ### Novidades

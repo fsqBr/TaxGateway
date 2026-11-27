@@ -94,6 +94,12 @@ if (billingConnection is not null)
 // Npgsql, expostos em /metrics SÓ na porta de gestão (Metrics:Port, padrão 9464) — fora do Service público.
 var metricsPort = builder.Configuration.GetValue("Metrics:Port", 9464);
 builder.Services.AddTaxGatewayTelemetry(builder.Configuration, builder.Logging, "taxgateway-api", prometheus: true);   // D-P17
+// D-R10: titularidade do CNPJ — certificado e-CNPJ (cadeia ICP-Brasil) e e-mail do cadastro público da Receita.
+builder.Services.AddSingleton(sp => new TaxGateway.Infrastructure.Tenancy.CnpjCertificateVerifier(
+    sp.GetRequiredService<TaxGateway.Infrastructure.Xml.TrustAnchors>(), sp.GetRequiredService<TimeProvider>()));
+builder.Services.AddOptions<TaxGateway.Infrastructure.Tenancy.CnpjRegistryOptions>().Bind(builder.Configuration.GetSection(TaxGateway.Infrastructure.Tenancy.CnpjRegistryOptions.Section));
+builder.Services.AddHttpClient<TaxGateway.Infrastructure.Tenancy.ICnpjRegistry, TaxGateway.Infrastructure.Tenancy.HttpCnpjRegistry>(c => c.Timeout = TimeSpan.FromSeconds(10));
+
 // D-P25: até 30 s para drenar as requisições em voo após o SIGTERM (grace period do pod: 45 s, preStop: 10 s).
 builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(30));
 
@@ -209,9 +215,11 @@ v1.MapListings();
 v1.MapDocuments();        // D-J01
 v1.MapClassification();   // D-J02
 v1.MapNotices();          // D-J03/D-J04
+v1.MapCompany();          // D-R08/D-R10: teto de excedente e titularidade do CNPJ
 v1.MapBilling();
 
 app.MapAccounts(includeOperators: adminConnection is not null);
+app.MapCompanyDispute();  // D-R10
 
 // D-J05: rota inexistente da API responde problem+json (antes, 404 com corpo vazio — o cliente não sabia o motivo).
 app.MapFallback("/{**path}", (HttpContext http) =>
@@ -223,14 +231,14 @@ app.MapStripeWebhook();
 
 if (adminConnection is not null)
 {
-    var admin = app.MapGroup("/admin/v1").AddEndpointFilter<AdminKeyFilter>().MapAdmin().MapIdentityAdmin().MapAdminListings().MapOperators().MapAdminPlans();
+    var admin = app.MapGroup("/admin/v1").AddEndpointFilter<AdminKeyFilter>().MapAdmin().MapIdentityAdmin().MapAdminListings().MapOperators().MapAdminPlans().MapAdminCompany();
     if (billingConnection is not null)
     {
         admin.MapBillingAdmin();
     }
 }
 
-// Primeiro operador do backoffice (D-U08): "create-operator --email x --nome y --escopos admin:commercial,admin:fiscal".
+// Primeiro operador do backoffice (D-U08): "create-operator --email x --nome y --escopos admin:commercial,admin:fiscal,admin:security".
 // Imprime o link de primeiro acesso (definir senha + MFA); também é enviado por e-mail.
 if (args.Length > 0 && args[0] == "create-operator")
 {

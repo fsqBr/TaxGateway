@@ -61,10 +61,12 @@ services:
       <<: *app-env
       ConnectionStrings__App: Host=postgres;Database=taxgateway;Username=tg_app;Password=dev-only
       ConnectionStrings__Admin: Host=postgres;Database=taxgateway;Username=tg_admin;Password=dev-only
+      ConnectionStrings__Billing: Host=postgres;Database=taxgateway;Username=tg_billing;Password=dev-only   # /admin/v1/billing/* (backoffice)
       Engines__Regular__BaseUrl: http://rtc-regular:8080/api/
       Admin__Operators__0__Name: gate
       Admin__Operators__0__KeyHash: 83d24950fd38f124697ddad62aaca4b01538e587473d4a65af48e9faf9f311f8
       Admin__Operators__0__Scopes__0: admin:commercial
+      Admin__Operators__0__Scopes__1: admin:security   # gerir operadores (D-R04)
     deploy:
       resources:
         limits: { cpus: "2", memory: 1g }

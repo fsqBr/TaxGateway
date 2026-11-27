@@ -84,11 +84,16 @@ public sealed class ProductJourneyTests(GoldenFixture env)
         Assert.Contains("chave_acesso;direcao;modelo;status", csv.Text, StringComparison.Ordinal);
         Assert.Contains(chave2, csv.Text, StringComparison.Ordinal);
 
+        // D-R06: data extrema é 400 também no resumo e na exportação (antes 500 e CSV cortado).
+        Assert.Equal(HttpStatusCode.BadRequest, (await SendAsync(HttpMethod.Get, "/v1/auditoria/resumo?ate=0001-01-05")).Status);
+        Assert.Equal(HttpStatusCode.BadRequest, (await SendAsync(HttpMethod.Get, "/v1/auditoria/documentos/exportar?de=9999-12-30&ate=9999-12-31")).Status);
+
         var resumo = await SendAsync(HttpMethod.Get, "/v1/auditoria/resumo");
         Assert.True(resumo.Body!["total"]!.GetValue<long>() >= 2);
 
         // Entradas inválidas: 400, nunca 500. Dígitos arábico-índicos não passam por dígito.
-        foreach (var bad in new[] { "status=FOO", "de=2026-13-01", "de=2026-01-10&ate=2026-01-01", "cnpj=١١٢٢٢٣٣٣٠٠٠١٨١", "direcao=lateral", "cursor=xyz", "lote=1" })
+        foreach (var bad in new[] { "status=FOO", "de=2026-13-01", "de=2026-01-10&ate=2026-01-01", "cnpj=١١٢٢٢٣٣٣٠٠٠١٨١", "direcao=lateral", "cursor=xyz", "lote=1",
+                                         "de=9999-12-30&ate=9999-12-31", "ate=0001-01-01", "limite=abc", "limite=0" })
         {
             Assert.Equal(HttpStatusCode.BadRequest, (await SendAsync(HttpMethod.Get, $"/v1/auditoria/documentos?{bad}")).Status);
         }
@@ -139,7 +144,14 @@ public sealed class ProductJourneyTests(GoldenFixture env)
         Assert.Equal(HttpStatusCode.NotFound, (await SendAsync(HttpMethod.Post, $"/v1/avisos/{aviso["id"]!.GetValue<Guid>()}/lido")).Status);
 
         var mailer = env.WorkerServices.GetRequiredService<TaxGateway.Workers.NotificationMailer>();
-        Assert.True(await mailer.RunOnceAsync(CancellationToken.None) >= 0);
+        Assert.True(await mailer.RunOnceAsync(CancellationToken.None) >= 1);
+        var emailed = await db.InTenantAsync(tenant, async (s, ct) =>
+        {
+            await using var cmd = s.CreateCommand("SELECT emailed_at IS NOT NULL FROM tenant_notifications WHERE dedupe_key = $1");
+            cmd.Parameters.Add(new() { Value = dedupe });
+            return (bool)(await cmd.ExecuteScalarAsync(ct))!;
+        }, CancellationToken.None);
+        Assert.True(emailed);   // tratado pelo worker (sem destinatário verificado, fica só no portal)
 
         var steps = await SendAsync(HttpMethod.Get, "/v1/primeiros-passos");
         Assert.Equal(6, steps.Body!["total"]!.GetValue<int>());
@@ -191,6 +203,39 @@ public sealed class ProductJourneyTests(GoldenFixture env)
         var oldDate = JsonNode.Parse(sample)!.AsObject();
         oldDate["data_fato_gerador"] = "2025-06-01T10:00:00-03:00";
         Assert.Equal(HttpStatusCode.BadRequest, (await SendAsync(HttpMethod.Post, "/v1/calculo/simular", JsonContent.Create(oldDate))).Status);
+
+        // D-R06: limites do leiaute e quantidade positiva são validados antes do motor.
+        var huge = JsonNode.Parse(sample)!.AsObject();
+        huge["itens"]![0]!["valor_base_calculo"] = 1e15m;
+        Assert.Equal(HttpStatusCode.BadRequest, (await SendAsync(HttpMethod.Post, "/v1/calculo/simular", JsonContent.Create(huge))).Status);
+        var negQty = JsonNode.Parse(sample)!.AsObject();
+        negQty["itens"]![0]!["quantidade"] = -5;
+        Assert.Equal(HttpStatusCode.BadRequest, (await SendAsync(HttpMethod.Post, "/v1/calculo/simular", JsonContent.Create(negQty))).Status);
+
+        // Motor recusa todos os itens (cClassTrib inexistente): 200 com erros por item, aviso explícito e sem cobrança.
+        var rejected = JsonNode.Parse(sample)!.AsObject();
+        rejected["itens"]![0]!["c_class_trib"] = "999999";
+        var rej = await SendAsync(HttpMethod.Post, "/v1/calculo/simular", JsonContent.Create(rejected));
+        Assert.Equal(HttpStatusCode.OK, rej.Status);
+        Assert.Contains(rej.Body!["avisos"]!.AsArray(), a => a!["codigo"]!.GetValue<string>() == "NENHUM_ITEM_CALCULADO");
+        var simId = Guid.ParseExact(rej.Body["simulation_id"]!.GetValue<string>()[4..], "N");
+        var tenantId = new TenantId((await SendAsync(HttpMethod.Get, "/v1/me")).Body!["tenant_id"]!.GetValue<Guid>());
+        var tdb = env.Services.GetRequiredService<ITenantDb>();
+        (long Sims, long Ledger) counts = default;
+        for (var i = 0; i < 50 && counts.Sims == 0; i++)
+        {
+            await Task.Delay(100);
+            counts = await tdb.InTenantAsync(tenantId, async (s, ct) =>
+            {
+                await using var cmd = s.CreateCommand("SELECT (SELECT count(*) FROM simulations WHERE id = $1), (SELECT count(*) FROM usage_ledger WHERE source_id = $1)");
+                cmd.Parameters.Add(new() { Value = simId });
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                await r.ReadAsync(ct);
+                return (r.GetInt64(0), r.GetInt64(1));
+            }, CancellationToken.None);
+        }
+
+        Assert.Equal((1L, 0L), counts);   // fica na trilha, não entra na cobrança
 
         var arabic = JsonNode.Parse(sample)!.AsObject();
         arabic["itens"]![0]!["ncm"] = "٢٢٠٢١٠٠٠";

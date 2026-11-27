@@ -116,6 +116,20 @@ public static class EmailTemplates
         Html(title, $"<b>{WebUtility.HtmlEncode(tenant)}</b><br>{WebUtility.HtmlEncode(body)}", link, "Ver no portal",
             "Você recebe este aviso por ter acesso a esta empresa no TaxGateway. Os avisos também ficam no sino do portal."));
 
+    /// <summary>Cadastro com CNPJ que já tem conta (D-R10): sem revelar quem é cliente para quem não confirmou o e-mail.</summary>
+    public static EmailMessage CompanyAlreadyRegistered(string to, string name, string company, string link) => new(to, "Confirme seu e-mail no TaxGateway",
+        $"Olá, {name}.\n\nConfirme seu e-mail para ativar a conta:\n{link}\n\nA empresa {company} já tem cadastro no TaxGateway. Depois de entrar, "
+        + "peça a quem administra a conta da empresa um convite para o seu e-mail. Se você é o responsável legal e não reconhece esse cadastro, "
+        + "use o certificado digital e-CNPJ da empresa em Minha conta → Contestar titularidade.",
+        Html("Confirme seu e-mail", $"Olá, {WebUtility.HtmlEncode(name)}. Confirme seu e-mail para ativar a conta.<br><br>A empresa <b>{WebUtility.HtmlEncode(company)}</b> já tem cadastro no TaxGateway: depois de entrar, peça um convite a quem administra a conta. Se você é o responsável legal e não reconhece esse cadastro, conteste a titularidade com o certificado e-CNPJ da empresa.", link, "Confirmar e-mail"));
+
+    /// <summary>Código de verificação da titularidade enviado ao e-mail do cadastro da Receita (D-R10).</summary>
+    public static EmailMessage CnpjVerificationCode(string to, string company, string code) => new(to, $"Código de verificação: {code}",
+        $"Alguém pediu, no TaxGateway, a verificação de que a empresa {company} é cliente titular deste CNPJ. Código: {code}\n\n"
+        + "O código vale por 30 minutos. Se você não reconhece o pedido, ignore este e-mail.",
+        Html($"Código {code}", $"Alguém pediu, no TaxGateway, a confirmação de titularidade do CNPJ da empresa <b>{WebUtility.HtmlEncode(company)}</b>. Informe o código <b style=\"font-size:20px;letter-spacing:4px\">{code}</b> na tela de verificação. Vale por 30 minutos.", null, null,
+            "Este e-mail foi enviado para o endereço do cadastro público do CNPJ na Receita Federal. Se você não reconhece o pedido, ignore."));
+
     public static EmailMessage SecurityNotice(string to, string name, string what) => new(to, "Aviso de segurança do TaxGateway",
         $"Olá, {name}.\n\n{what}\n\nSe não foi você, redefina sua senha imediatamente e fale com o administrador da sua conta.",
         Html("Aviso de segurança", $"Olá, {WebUtility.HtmlEncode(name)}. {WebUtility.HtmlEncode(what)} Se não foi você, redefina sua senha imediatamente.", null, null));

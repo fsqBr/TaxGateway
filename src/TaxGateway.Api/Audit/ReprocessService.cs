@@ -58,7 +58,7 @@ public sealed partial class ReprocessService(ITenantDb db, TenantSettingsService
             try
             {
                 var xml = await vault.GetAsync(kek, key, ct).ConfigureAwait(false);
-                await audit.AuditAsync(caller, new AuditRequest(xml, "OUTBOUND", Reprocess: true, SignatureOptional: false), ct).ConfigureAwait(false);
+                await audit.AuditAsync(caller, new AuditRequest(xml, "OUTBOUND", Reprocess: true, SignatureOptional: false, PlatformInitiated: true), ct).ConfigureAwait(false);
                 ok++;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)

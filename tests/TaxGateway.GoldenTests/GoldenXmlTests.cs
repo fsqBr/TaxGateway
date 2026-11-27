@@ -101,7 +101,7 @@ public sealed class GoldenXmlTests(GoldenFixture env)
     }
 
     [Fact]
-    public async Task Replay_in_another_month_is_not_billed_and_reprocess_is_free()
+    public async Task Replay_in_another_month_is_not_billed_and_requested_reprocess_is_billed()
     {
         var doc = Base(800_001);
         var xml = NfeBuilder.Bytes(doc);
@@ -123,7 +123,7 @@ public sealed class GoldenXmlTests(GoldenFixture env)
             var (s3, reprocess) = await AuditAsync(xml, env.ApiKey, "&reprocess=true");
             Assert.Equal(200, s3);
             Assert.True(reprocess!["reprocessamento"]!.GetValue<bool>());
-            Assert.False(reprocess["is_billable"]!.GetValue<bool>());
+            Assert.True(reprocess["is_billable"]!.GetValue<bool>());   // D-R07: reprocessamento pedido é cobrado
             Assert.NotEqual(first["audit_id"]!.GetValue<string>(), reprocess["audit_id"]!.GetValue<string>());
 
             // Depois do reprocessamento, o replay devolve a auditoria mais recente, ainda sem cobrança.
@@ -142,7 +142,7 @@ public sealed class GoldenXmlTests(GoldenFixture env)
         cmd.Parameters.Add(new() { Value = chave });
         await using var r = await cmd.ExecuteReaderAsync();
         await r.ReadAsync();
-        Assert.Equal(1, r.GetInt64(0));   // uma única cobrança
+        Assert.Equal(2, r.GetInt64(0));   // original + reprocessamento pedido (D-R07); os replays não cobram
         Assert.Equal(2, r.GetInt64(1));   // original + reprocessamento
         Assert.Equal(1, r.GetInt64(2));
     }

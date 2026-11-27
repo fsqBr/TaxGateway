@@ -554,3 +554,63 @@ contrato do QA. Migrações `V0017` e `V0018`.
 classificação, avisos lidos/enviados, primeiros passos, contrato estrito, detalhe e paginação do backoffice e o 404 em
 problem+json); Security (RLS de `tenant_notifications` e leitura do `tg_admin` só por colunas); Vitest (inclui DV da chave
 do XML de exemplo); E2E com a primeira auditoria pelo XML de exemplo, comparação por item, histórico e classificação.
+
+## Correções da revisão de QA e arquitetura (26/11/2026)
+
+Depois do commit da 0.11.0, um agente de QA (cobertura e testes exploratórios contra a pilha) e um de arquitetura
+(revisão de código independente) revisaram o sistema. Os achados abaixo foram **conferidos no código** antes de
+corrigir. Migração `V0019`.
+
+| ID | Decisão | Motivo | Alternativas descartadas | Onde |
+|:--|:--|:--|:--|:--|
+| D-R01 | **Assinante da Stripe não recebe fatura avulsa**: o fechamento grava o período com status `SUBSCRIPTION` (a assinatura cobra mensalidade e excedente medido) e só os contratos sem assinatura vão para a cobrança avulsa; **simulações descontam `included_simulations`** antes do excedente | Todo assinante era cobrado duas vezes no dia 1 (assinatura + fatura avulsa) e 20 mil simulações incluídas viravam excedente — contrariava D-C02 | Desligar o fechamento para todos (perderia contratos sem assinatura e a reconciliação) | `BillingServices.cs`, `V0019` |
+| D-R02 | **Eventos da Stripe em ordem e da assinatura certa**: lock por cliente na transação (réplicas em série), `created` do último evento aplicado guardado (evento mais velho é ignorado), atualização só da assinatura corrente do tenant (cancelar uma duplicata antiga não rebaixa), plano derivado dos preços da assinatura, checkout só libera o plano com `payment_status` pago (Pix/boleto chegam por `subscription.updated`) e novo checkout recusado (`409 ERR_ASSINATURA_PENDENTE`) com assinatura pendente | Reentrega atrasada ressuscitava assinatura cancelada; duas réplicas aplicavam fora de ordem; boleto não pago liberava o plano; segundo checkout criava segunda assinatura | Buscar a assinatura na API da Stripe a cada evento (mais chamadas e dependência no processamento; fica como melhoria) | `StripeWorkers.cs`, `PlansBillingEndpoints.cs`, `V0019` |
+| D-R03 | **MFA sem força bruta**: o bloqueio da conta vale também no segundo fator e **5 códigos errados encerram a sessão** (a senha volta a ser exigida); as falhas de código contam no mesmo limite da senha | Com a senha vazada, o código podia ser testado ~86 mil vezes por dia por IP | Só limite por IP (contornável com vários IPs) | `AccountService.cs`, `V0019` |
+| D-R04 | **Gestão de operadores com escopo próprio (`admin:security`)** e **ninguém concede escopo que não tem**; trilha de ações também em `admin:security`; na aprovação de alíquota, o aprovador **não pode ter sido criado pelo proponente** (nem o contrário) — fecha a regra de duas pessoas contra contas "fantoche" | Operador comercial criava operadores fiscais e aprovava sozinho uma alíquota (furava D-204) | Exigir dois aprovadores para criar operador (mais atrito; pode vir depois) | `AccountService.cs`, `OperatorEndpoints.cs`, `AdminRepository.cs`, `V0019` |
+| D-R05 | **Consumo medido com estado pendente**: o intervalo e o identificador são gravados antes do envio à Stripe e reenviados iguais em caso de falha (a Stripe deduplica); no primeiro dia do mês o mês anterior também é reportado, com horário dentro do período | Falha entre enviar e gravar cobrava o mesmo delta de novo; o uso entre a última execução e a meia-noite nunca era cobrado — contrariava D-C06 | Identificador pelo total (era o defeito) | `StripeWorkers.cs`, `V0019` |
+| D-R06 | **Validações apontadas pelo QA**: datas dos filtros de documentos entre 2025 e 2100 (antes `9999-12-31` dava 500 e o CSV saía cortado); `limite` e `status` do DF-e validados com problem+json; base de cálculo com até 13 inteiros e quantidade positiva; **simulação em que o motor recusa todos os itens não é cobrada** e traz o aviso `NENHUM_ITEM_CALCULADO` (o contrato 200 com erros por item continua); plano inexistente na criação de tenant = 400; URL de webhook até 2.048 caracteres; 413 com `ERR_PAYLOAD_TOO_LARGE`; requisição admin **sem** chave não conta para o bloqueio da chave estática; compose com `ConnectionStrings__Billing` na API (as rotas de faturamento do backoffice davam 404) | 500 reproduzível, cobrança de chamada sem cálculo e mensagens inconsistentes | 422 quando o motor recusa tudo (quebraria o contrato de erro por item usado por 66 casos golden) | `DocumentEndpoints.cs`, `SimulationService.cs`, `SimulationWriter.cs`, `KeyAndAdminEndpoints.cs`, `BatchWebhookEndpoints.cs`, `ApiProblem.cs`, `CallerFilters.cs`, `docker-compose.capacity.yml` |
+
+**Testes novos:** assinante sem fatura avulsa e franquia de simulações (Security); eventos da Stripe fora de ordem,
+de outra assinatura e com pagamento pendente (Golden); 5 códigos de MFA errados encerram a sessão e bloqueiam
+(Golden); operador não concede escopo que não tem e operador comercial não acessa a trilha (Golden); datas extremas,
+`limite` inválido, valor acima do leiaute, quantidade negativa e simulação sem item calculado fora da cobrança
+(Golden); e-mail de aviso realmente tratado pelo worker (antes o teste era tautológico); filtros, limite e CSV seguro
+(Unit, `DocumentFilterTests`); revogação de API key confirmada de verdade e consumo por mês no Vitest.
+
+**Ficam registrados (não corrigidos agora):**
+* **A3 — operadores pelo role da API pública**: `tg_app` ainda grava `users`/`user_sessions` de qualquer realm; um
+  pod público comprometido poderia criar um operador ou uma sessão de operador. Mitigação atual: só a rede (api-admin
+  alcançável apenas pelo backoffice, D-P29). Correção planejada: RLS em `users`/`user_sessions` para o `tg_app` só em
+  `realm='customer'` e o realm `operator` servido pelo `tg_admin` na api-admin.
+* Médios da arquitetura: admin rebaixar dono e corrida para deixar o tenant sem dono (M1); API keys sem vínculo com
+  quem as criou (M2); política de rollback "só forward-fix" a formalizar (M3); anti-affinity/topology spread (M4);
+  lease da Idempotency-Key menor que a ingestão de lote grande (M5); limites por IP dependentes de
+  `TrustedProxyNetworks` (M6); advisory lock de sessão e PgBouncer em modo transaction (M7); UPDATE de sessão a cada
+  requisição (M8); runbook de cobrança/Stripe (M9).
+* QA: replay A→B→A cobra cada versão diferente (segue D-P04; o rótulo "reprocessamento" confunde); CSV do relatório
+  de lote com `,` e o da exportação com `;`; `upload-url` em dev aponta para o host interno do Docker; auto
+  provisionamento aceita CNPJ de outra empresa (sem verificação de titularidade) — a titularidade da empresa e a régua
+  de inadimplência foram decididas em D-R08 a D-R10; a titularidade de cada CNPJ adicional (filial de outra raiz no
+  OEM) continua pendente.
+* Cobertura que ainda falta: rotas `billing/*` do backoffice com stub da Stripe (o caminho de falha dos webhooks, as
+  rotas de conta e as telas de cobrança, titularidade e disputas foram cobertos em D-R11).
+
+## Regras de cobrança e titularidade (26/11/2026)
+
+Decididas com o dono do produto depois da revisão: cobrar só o que o cliente autorizou, ter régua clara para pagamento
+que falhou, cobrar todo documento que passa pelo motor a pedido do cliente e proteger o CNPJ contra uso por terceiros.
+
+| # | Decisão | Por quê | Alternativa descartada | Onde |
+|---|---|---|---|---|
+| D-R07 | **Reprocessamento a pedido é cobrado**: `reprocess=true` passa pelo motor de novo e gera linha no ledger. Continuam sem cobrança o **replay** (mesma nota, mesmo conteúdo, devolve o resultado guardado) e o **reprocessamento automático da plataforma** após mudança oficial (`AuditRequest.PlatformInitiated`) | Toda nota que o cliente manda reauditar consome motor e é um resultado novo; a regra anterior (reprocessamento grátis) era usada para auditar de graça (D-P04) | Cobrar também o replay idêntico (o cliente pagaria por retentativa de rede) | `AuditService.cs`, `ReprocessService.cs` |
+| D-R08 | **Excedente só até o teto autorizado**: `tenants.overage_cap_cents` (padrão **0**, até R$ 1 milhão/mês). Plano pago passa da franquia só enquanto `excedente acumulado + preço da unidade ≤ teto`; senão `402 ERR_TETO_EXCEDENTE`. Avisos `TETO_80` e `TETO_ATINGIDO`. Teto ajustável pelo cliente (`PUT /v1/cobranca/teto`, `billing:manage`) e pelo comercial (`PUT /admin/v1/tenants/{id}/teto`), ambos na trilha | Cobrança automática de excedente sem limite surpreende o cliente e vira disputa/estorno; com teto zero nada é cobrado além da mensalidade sem autorização expressa | Cobrar excedente ilimitado (padrão de mercado, mas sem consentimento) ou bloquear sempre na franquia (perde receita de quem quer pagar) | `QuotaFilter.cs`, `CompanyEndpoints.cs`, `V0020` |
+| D-R09 | **Régua de inadimplência** a partir de `invoice.payment_failed`: aviso nos dias **0, 3 e 7**; no dia **10** a conta fica `RESTRICTED` (cálculo e auditoria respondem `402 ERR_PAGAMENTO_PENDENTE`; consulta, exportação e portal continuam); no dia **15** `SUSPENDED` com motivo `INADIMPLENCIA`. `invoice.paid` limpa a régua e devolve `ACTIVE` na hora (só desfaz suspensão por inadimplência, nunca uma manual), com aviso `PAGAMENTO_REGULARIZADO`. `DunningWorker` nos workers (tg_billing) | Cliente precisa de tempo e de avisos antes de perder o acesso; bloquear só o consumo primeiro preserva os dados e a consulta (obrigação fiscal do cliente) | Suspender direto quando a Stripe desiste (sem aviso intermediário) ou nunca bloquear (inadimplência sem custo) | `DunningWorker.cs`, `StripeWorkers.cs`, `CallerFilters.cs`, `V0020` |
+| D-R10 | **Titularidade do CNPJ**: empresa do autocadastro nasce **não verificada**; plano pago (`403 ERR_EMPRESA_NAO_VERIFICADA` no checkout) e captura de DF-e exigem verificação. Três caminhos: **certificado e-CNPJ** ICP-Brasil da mesma raiz (cadeia conferida com as âncoras do produto; o envio do A1 da matriz em DF-e já verifica), **código de 6 dígitos no e-mail do cadastro público do CNPJ** (`CnpjRegistry:BaseUrl`; o e-mail aparece mascarado, 30 min, 5 tentativas) ou **manual** pelo backoffice (`admin:security`, com observação na trilha). Tenant criado pelo backoffice nasce verificado (contrato). **Cadastro com CNPJ já existente** responde o mesmo 202 (sem enumerar clientes) e manda e-mail explicando convite e contestação; quem tem o e-CNPJ **contesta** (`POST /v1/conta/disputa-cnpj`, sessão com MFA), a conta atual recebe aviso `DISPUTA_CNPJ` e o backoffice transfere (a conta atual perde o acesso, o requerente vira dono, a empresa fica verificada) ou rejeita. Empresa verificada não pode ser contestada | Sem prova, qualquer pessoa podia "tomar" um CNPJ, contratar em nome dele e capturar as notas de terceiros pela SEFAZ; o certificado é a prova legal de representação da empresa | Validar só pelo DV do CNPJ (não prova nada) ou exigir documento em todos os cadastros (atrito no Sandbox, que não expõe dados de terceiros) | `CnpjOwnership.cs`, `CompanyEndpoints.cs`, `AccountService.cs`, `DfeEndpoints.cs`, `PlansBillingEndpoints.cs`, `V0020` |
+| D-R11 | **Cliente sintético e lacunas de teste**: `tests/smoke/cliente_sintetico.py` faz a jornada de uma empresa nova pelos nginx (cadastro, e-mail no Mailpit, MFA com TOTP, cookie e anti-CSRF, chave criada no portal, simulação, teto, cadastro repetido sem enumerar, verificação manual liberando DF-e, sessões, webhook num destino real que recusa e retry manual). Golden novos: teto e régua (`BillingRulesTests`), titularidade por certificado, por e-mail e disputa, rotas de conta (`sessoes`, `sair-outras`, `novos-codigos`, `senha/alterar`), falha de webhook (503 → nova tentativa → retry manual assinado; 410 → DEAD e webhook desativado). Unit: excedente e máscara de e-mail. Vitest: cobrança (teto, verificação, inadimplência), conta sem empresa (contestação) e disputas no backoffice | A pergunta "foi testado como um cliente usando?" — os testes de rota provavam cada peça, não a jornada | Só testes de rota | `tests/smoke/`, `tests/TaxGateway.GoldenTests/`, `web/src/test/` |
+
+**Configuração nova:** `CnpjRegistry:BaseUrl` (consulta pública de CNPJ que devolve `{"email": ...}`; vazio desliga o
+caminho por e-mail). Avisos novos: `TETO_80`, `TETO_ATINGIDO`, `PAGAMENTO_PENDENTE`, `ACESSO_RESTRITO`,
+`CONTA_SUSPENSA`, `PAGAMENTO_REGULARIZADO`, `EMPRESA_VERIFICADA`, `DISPUTA_CNPJ`.
+
+**Correções achadas no caminho:** a máscara do e-mail devolvia o valor inteiro quando não havia `@`; o aviso
+`EMPRESA_VERIFICADA` existia no catálogo mas nunca era emitido (agora sai na primeira verificação, por qualquer caminho).

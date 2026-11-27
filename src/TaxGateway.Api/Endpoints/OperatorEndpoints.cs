@@ -22,16 +22,17 @@ public static class OperatorEndpoints
                   FROM users WHERE realm = 'operator'
                 """);
             return Results.Text((string)(await cmd.ExecuteScalarAsync(ct))!, "application/json");
-        }).WithMetadata(new RequiredScope(AdminEndpoints.Commercial));
+        }).WithMetadata(new RequiredScope(AdminEndpoints.Security));
 
         admin.MapPost("/operadores", async (HttpContext http, AccountService accounts) =>
         {
             var b = await JsonNode.ParseAsync(http.Request.Body, cancellationToken: http.RequestAborted) as JsonObject;
             var scopes = b?["escopos"] is JsonArray a ? a.Select(x => x!.GetValue<string>()).ToList() : [];
+            var op = AdminKeyFilter.Get(http);
             await accounts.CreateOperatorAsync(b?["email"]?.GetValue<string>() ?? "", b?["nome"]?.GetValue<string>() ?? "", scopes,
-                AdminKeyFilter.Get(http).Name, http.RequestAborted);
+                op.Name, http.RequestAborted, op.Scopes);
             return Results.Accepted(value: new JsonObject { ["mensagem"] = "Convite enviado por e-mail (vale 24 h)." });
-        }).WithMetadata(new RequiredScope(AdminEndpoints.Commercial));
+        }).WithMetadata(new RequiredScope(AdminEndpoints.Security));
 
         admin.MapPost("/operadores/{id:guid}/desativar", async (Guid id, HttpContext http, AdminDataSource db, AccountService accounts) =>
         {
@@ -45,7 +46,7 @@ public static class OperatorEndpoints
 
             await accounts.AuditAsync(null, "operator", AdminKeyFilter.Get(http).Name, "operador.desativado", id.ToString(), http.Connection.RemoteIpAddress?.ToString(), new JsonObject(), http.RequestAborted);
             return Results.NoContent();
-        }).WithMetadata(new RequiredScope(AdminEndpoints.Commercial));
+        }).WithMetadata(new RequiredScope(AdminEndpoints.Security));
 
         // Trilha de auditoria (login, MFA, senha, membros, ações de operador): filtro por tenant ou ator.
         admin.MapGet("/auditoria-acoes", async (Guid? tenant, string? ator, AdminDataSource db, CancellationToken ct) =>
@@ -60,7 +61,7 @@ public static class OperatorEndpoints
             cmd.Parameters.Add(new() { Value = (object?)tenant ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Uuid });
             cmd.Parameters.Add(new() { Value = (object?)ator ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
             return Results.Text((string)(await cmd.ExecuteScalarAsync(ct))!, "application/json");
-        }).WithMetadata(new RequiredScope(AdminEndpoints.Commercial));
+        }).WithMetadata(new RequiredScope(AdminEndpoints.Security));
         return admin;
     }
 }

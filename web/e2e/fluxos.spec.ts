@@ -115,12 +115,15 @@ test('operador recebe convite, define senha, ativa MFA e opera o backoffice', as
   await expect(page.getByText('Senha definida. Entre com a nova senha.')).toBeVisible();
   await login(page, BACKOFFICE, email, true);
   await expect(page.getByRole('heading', { name: 'Tenants', level: 1 })).toBeVisible();
-  for (const [link, heading] of [['Planos', 'Planos'], ['Faturamento', 'Faturamento'], ['Revogar token', 'Revogar token OAuth'], ['Operadores', 'Operadores'], ['Trilha de auditoria', 'Trilha de auditoria'], ['Tenants', 'Tenants']]) {
+  for (const [link, heading] of [['Planos', 'Planos'], ['Faturamento', 'Faturamento'], ['Revogar token', 'Revogar token OAuth'], ['Tenants', 'Tenants']]) {
     await page.getByRole('link', { name: link, exact: true }).click();
     await expect(page.getByRole('heading', { name: heading, level: 1 })).toBeVisible();
   }
 
   await expect(page.getByRole('link', { name: 'Alíquotas' })).toHaveCount(0);   // sem admin:fiscal
+  // D-R04: gerir operadores e ler a trilha exigem admin:security (este operador só tem admin:commercial).
+  await expect(page.getByRole('link', { name: 'Operadores', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Trilha de auditoria', exact: true })).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 

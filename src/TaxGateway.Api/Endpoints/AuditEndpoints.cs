@@ -21,7 +21,7 @@ public static class AuditEndpoints
 
     /// <summary>
     /// Corpo application/xml. <c>Idempotency-Key</c> obrigatório (SDD §6). Parâmetros: direction (OUTBOUND),
-    /// reprocess (true reaudita sem cobrar), assinatura=opcional (aceita XML sem assinatura).
+    /// reprocess (true reaudita e cobra; D-R07), assinatura=opcional (aceita XML sem assinatura).
     /// </summary>
     private static async Task<IResult> AuditXmlAsync(HttpContext http, AuditService service, IdempotencyStore idempotency,
         string? direction, bool? reprocess, string? assinatura, string? confirmar)

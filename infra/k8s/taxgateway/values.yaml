@@ -132,7 +132,7 @@ monitoring:
 # Segredos (connection strings, pepper, KMS) vêm de Secrets externos (ExternalSecrets/secret manager), UM POR
 # WORKLOAD (D-P29) — o comprometimento de um pod não entrega as credenciais dos outros:
 #   api       -> ConnectionStrings__App (tg_app), Valkey, Storage, OpenBao, pepper, Identity__*, Stripe__SecretKey,
-#                Stripe__WebhookSecret, Email__*. SEM ConnectionStrings__Admin/Billing.
+#                Stripe__WebhookSecret, Email__*, CnpjRegistry__BaseUrl (D-R10). SEM ConnectionStrings__Admin/Billing.
 #   apiAdmin  -> o mesmo da api + ConnectionStrings__Admin (tg_admin) e ConnectionStrings__Billing (tg_billing).
 #   workers   -> ConnectionStrings__Worker (tg_worker), Relay (tg_relay), Billing, Valkey, Storage, OpenBao, Stripe, Dfe__*.
 #   migrator  -> TG_OWNER_CONNECTION (tg_owner); só o Job de migrations o monta.

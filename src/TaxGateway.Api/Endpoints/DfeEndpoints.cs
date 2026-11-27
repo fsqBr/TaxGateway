@@ -35,7 +35,8 @@ public static class DfeEndpoints
     }
 
     /// <summary>Corpo: {"pfx_base64": "...", "senha": "..."}. A resposta nunca devolve o PFX nem a senha.</summary>
-    private static async Task<IResult> UploadAsync(HttpContext http, string cnpj, TenantCnpjService cnpjs, CertificateStore store)
+    private static async Task<IResult> UploadAsync(HttpContext http, string cnpj, TenantCnpjService cnpjs, CertificateStore store,
+        TaxGateway.Infrastructure.Tenancy.CnpjCertificateVerifier verifier, Npgsql.NpgsqlDataSource app, StackExchange.Redis.IConnectionMultiplexer valkey, ITenantDb db)
     {
         var (c, error) = await ResolveAsync(http, cnpj, cnpjs);
         if (error is not null)
@@ -62,7 +63,34 @@ public static class DfeEndpoints
 
         try
         {
-            var info = await store.StoreAsync(http.GetCaller().Identity.Tenant, c!, pfx, senha, http.RequestAborted);
+            var tenant = http.GetCaller().Identity.Tenant;
+            var info = await store.StoreAsync(tenant, c!, pfx, senha, http.RequestAborted);
+            // D-R10: A1 ICP-Brasil da mesma raiz da empresa prova a titularidade — a empresa fica verificada.
+            if (http.GetCaller().Billing is not { CnpjVerified: true })
+            {
+                var root = await db.InTenantAsync(tenant, async (s, ct) =>
+                {
+                    await using var q = s.CreateCommand("SELECT root_cnpj FROM tenants");
+                    return (string)(await q.ExecuteScalarAsync(ct))!;
+                }, http.RequestAborted);
+                try
+                {
+                    var proof = verifier.Verify(pfx, senha);
+                    if (string.Equals(proof.Cnpj[..8], root[..8], StringComparison.Ordinal))
+                    {
+                        await using var mark = app.CreateCommand("SELECT app.mark_cnpj_verified($1, 'CERTIFICADO', $2)");
+                        mark.Parameters.Add(new() { Value = tenant.Value });
+                        mark.Parameters.Add(new() { Value = $"A1 {proof.Thumbprint}" });
+                        await mark.ExecuteNonQueryAsync(http.RequestAborted);
+                        await TenantProfileCache.PublishChangedAsync(valkey, tenant.Value);
+                    }
+                }
+                catch (CertificateRejectedException)
+                {
+                    // guardado para o DF-e, mas não serve de prova (ex.: cadeia fora da ICP-Brasil)
+                }
+            }
+
             return Results.Ok(Dto(info));
         }
         catch (CertificateRejectedException ex)
@@ -102,6 +130,13 @@ public static class DfeEndpoints
     /// </summary>
     private static async Task<IResult> SyncAsync(HttpContext http, string cnpj, TenantCnpjService cnpjs, CertificateStore store, ITenantDb db)
     {
+        // D-R10: captura de notas de terceiros só para empresa com titularidade verificada (o envio do A1 da matriz já verifica).
+        if (http.GetCaller().Billing is not { CnpjVerified: true })
+        {
+            return ApiProblem.Result(403, "ERR_EMPRESA_NAO_VERIFICADA", "Verifique a empresa antes de ligar a captura",
+                "Envie o certificado A1 da matriz (ele mesmo comprova a titularidade) ou verifique em Plano e cobrança.");
+        }
+
         var (c, error) = await ResolveAsync(http, cnpj, cnpjs);
         if (error is not null)
         {

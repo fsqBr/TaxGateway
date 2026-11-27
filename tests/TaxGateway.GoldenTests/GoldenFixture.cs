@@ -125,6 +125,32 @@ public sealed class GoldenFixture : IAsyncLifetime
         }
 
         AppConnection = For("tg_app");
+
+        // Consulta pública de CNPJ simulada (D-R10): devolve "titular-<cnpj>@empresa.test" — o teste lê o código no e-mail capturado.
+        var registryPort = FreeTcpPort();
+        var registry = new System.Net.HttpListener();
+        registry.Prefixes.Add($"http://127.0.0.1:{registryPort}/");
+        registry.Start();
+        _stopRegistry = registry.Close;
+        _ = Task.Run(async () =>
+        {
+            while (registry.IsListening)
+            {
+                try
+                {
+                    var ctx = await registry.GetContextAsync();
+                    var cnpj = ctx.Request.Url!.Segments[^1];
+                    var body = System.Text.Encoding.UTF8.GetBytes(cnpj.StartsWith("99", StringComparison.Ordinal) ? "{\"email\":null}" : $"{{\"email\":\"Titular-{cnpj}@Empresa.test\"}}");
+                    ctx.Response.ContentType = "application/json";
+                    await ctx.Response.OutputStream.WriteAsync(body);
+                    ctx.Response.Close();
+                }
+                catch (Exception ex) when (ex is System.Net.HttpListenerException or ObjectDisposedException or InvalidOperationException)
+                {
+                    break;
+                }
+            }
+        });
         var operatorHash = Convert.ToHexStringLower(System.Security.Cryptography.HMACSHA256.HashData(
             Convert.FromBase64String(Pepper), System.Text.Encoding.UTF8.GetBytes(OperatorKey)));
         var settings = new Dictionary<string, string?>
@@ -133,6 +159,7 @@ public sealed class GoldenFixture : IAsyncLifetime
             ["ConnectionStrings:Admin"] = For("tg_admin"),
             ["ConnectionStrings:Valkey"] = _valkey.GetConnectionString(),
             ["Engines:Bundle"] = Paths.Bundle,
+            ["CnpjRegistry:BaseUrl"] = $"http://127.0.0.1:{registryPort}/",
             ["Engines:Regular:BaseUrl"] = EngineUrl,
             ["Engines:Simples:BaseUrl"] = Environment.GetEnvironmentVariable("RTC_SIMPLES_URL") ?? "http://127.0.0.1:8082/api/",
             ["Engines:Regular:SyncTimeoutMs"] = "5000",
@@ -141,6 +168,7 @@ public sealed class GoldenFixture : IAsyncLifetime
             ["Admin:Operators:0:KeyHash"] = operatorHash,
             ["Admin:Operators:0:Scopes:0"] = "admin:commercial",
             ["Admin:Operators:0:Scopes:1"] = "admin:fiscal",
+            ["Admin:Operators:0:Scopes:2"] = "admin:security",
             ["Logging:LogLevel:Default"] = "Warning",
             ["Kms:LocalMasterKey"] = Convert.ToBase64String(System.Security.Cryptography.SHA256.HashData("golden-kms"u8)),
             ["Storage:ServiceUrl"] = $"http://{_s3.Hostname}:{_s3.GetMappedPublicPort(8333)}",
@@ -299,8 +327,18 @@ public sealed class GoldenFixture : IAsyncLifetime
     private string For(string role) =>
         new NpgsqlConnectionStringBuilder(_pg!.GetConnectionString()) { Username = role, Password = "dev-only" }.ConnectionString;
 
+    private Action? _stopRegistry;
+
+    private static int FreeTcpPort()
+    {
+        using var l = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        l.Start();
+        return ((System.Net.IPEndPoint)l.LocalEndpoint).Port;
+    }
+
     public async Task DisposeAsync()
     {
+        _stopRegistry?.Invoke();
         Api?.Dispose();
         if (_factory is not null)
         {

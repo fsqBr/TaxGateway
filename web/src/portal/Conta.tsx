@@ -5,7 +5,7 @@ import { useSession } from '../auth/session';
 import { Alert, Badge, Card, Field, Loading, PageHeader, Table, useAction, useLoad } from '../components/ui';
 import { ConfirmButton } from '../components/ConfirmDialog';
 import { account } from '../lib/api';
-import { dateTime } from '../lib/format';
+import { dateTime, fileToBase64 } from '../lib/format';
 
 export const ROLE_LABEL: Record<string, string> = {
   owner: 'Dono', admin: 'Administrador', fiscal: 'Fiscal', developer: 'Desenvolvedor', finance: 'Financeiro', viewer: 'Leitura',
@@ -18,6 +18,35 @@ const ROLE_HELP: Record<string, string> = {
   finance: 'Consumo, plano, faturas e consulta de documentos',
   viewer: 'Consulta de consumo e documentos auditados (sem enviar nem alterar)',
 };
+
+/**
+ * D-R10: quem tem o e-CNPJ de uma empresa já cadastrada por outra pessoa contesta a titularidade.
+ * A conta atual é avisada e o suporte decide; empresa já verificada não pode ser contestada.
+ */
+export function ContestarTitularidade() {
+  const { busy, error, run } = useAction();
+  const [pfx, setPfx] = useState<File>();
+  const [senha, setSenha] = useState('');
+  const [ok, setOk] = useState<string>();
+  const enviar = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!pfx) return;
+    const r = await run(async () => account<{ mensagem: string }>('portal', '/disputa-cnpj', { method: 'POST', body: { pfx_base64: await fileToBase64(pfx), senha } }));
+    if (r) setOk(r.mensagem);
+  };
+  return (
+    <Card title="Contestar a titularidade de uma empresa" description="Sua empresa já tem cadastro aberto por outra pessoa? Prove com o certificado e-CNPJ (A1) da matriz: avisamos a conta atual e o suporte transfere a empresa para você.">
+      {ok ? <Alert kind="success">{ok}</Alert> : (
+        <form onSubmit={(e) => void enviar(e)} className="row" style={{ gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+          <Field label="Certificado e-CNPJ (.pfx)"><input type="file" accept=".pfx,.p12" onChange={(e) => setPfx(e.target.files?.[0])} /></Field>
+          <Field label="Senha do certificado"><input type="password" autoComplete="off" value={senha} onChange={(e) => setSenha(e.target.value)} /></Field>
+          <button type="submit" className="secondary" disabled={busy || !pfx || !senha}>Enviar contestação</button>
+        </form>
+      )}
+      <Alert>{error}</Alert>
+    </Card>
+  );
+}
 
 /** Minha conta: senha, verificação em duas etapas e sessões abertas (D-U01). */
 export function MinhaConta() {
@@ -89,6 +118,7 @@ export function MinhaConta() {
         )}
         <Alert>{out.error ?? sessions.error}</Alert>
       </Card>
+      <ContestarTitularidade />
     </>
   );
 }

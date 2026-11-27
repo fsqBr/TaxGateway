@@ -46,6 +46,12 @@ public static class DocumentEndpoints
             return (null, ApiProblem.Result(400, "ERR_VALIDATION", "Datas no formato AAAA-MM-DD", "Use de=2026-01-01&ate=2026-01-31."));
         }
 
+        // D-R06: datas só entre 2025 e 2100 (antes ate=9999-12-31 estourava em AddDays e dava 500; a exportação cortava o CSV).
+        if (D("ate") is { Year: < 2025 or > 2100 } || D("de") is { Year: < 2025 or > 2100 })
+        {
+            return (null, ApiProblem.Result(400, "ERR_VALIDATION", "Datas entre 2025 e 2100"));
+        }
+
         var ate = D("ate") ?? today;
         var de = D("de") ?? ate.AddDays(-90);
         if (de > ate || ate.DayNumber - de.DayNumber > MaxRangeDays)
@@ -182,15 +188,39 @@ public static class DocumentEndpoints
     /// <summary>"Hoje" em Brasília: UTC−03:00 fixo (sem horário de verão desde 2019; a imagem chiseled pode não ter tzdata).</summary>
     private static DateOnly Today(TimeProvider clock) => DateOnly.FromDateTime(clock.GetUtcNow().ToOffset(TimeSpan.FromHours(-3)).DateTime);
 
-    private static async Task<IResult> ListAsync(HttpContext http, ITenantDb db, TimeProvider clock, string? cursor, int? limite)
+    /// <summary>Lê um inteiro opcional da query; texto inválido vira 400 com problem+json (não o 400 vazio do binding).</summary>
+    public static bool TryLimit(string? raw, int fallback, int max, out int value)
     {
+        value = fallback;
+        if (string.IsNullOrEmpty(raw))
+        {
+            return true;
+        }
+
+        if (!int.TryParse(raw, System.Globalization.NumberStyles.None, CultureInfo.InvariantCulture, out var v) || v < 1)
+        {
+            return false;
+        }
+
+        value = Math.Min(v, max);
+        return true;
+    }
+
+    private static readonly string[] DfeStatuses = ["RECEBIDO", "CIENCIA_ENVIADA", "CIENCIA_FALHOU", "AUDITADO", "REJEITADO", "IGNORADO"];
+
+    private static async Task<IResult> ListAsync(HttpContext http, ITenantDb db, TimeProvider clock, string? cursor, string? limite)
+    {
+        if (!TryLimit(limite, 50, 200, out var limit))
+        {
+            return ApiProblem.Result(400, "ERR_VALIDATION", "limite deve ser um inteiro de 1 a 200");
+        }
+
         var (f, error) = ParseFilter(http.Request, Today(clock));
         if (error is not null)
         {
             return error;
         }
 
-        var limit = Math.Clamp(limite ?? 50, 1, 200);
         (DateTimeOffset At, Guid Id)? after = null;
         if (!string.IsNullOrEmpty(cursor))
         {
@@ -400,15 +430,24 @@ public static class DocumentEndpoints
         return v.IndexOfAny([';', '"', '\n', '\r']) >= 0 ? "\"" + v.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"" : v;
     }
 
-    private static async Task<IResult> DfeListAsync(HttpContext http, string cnpj, ITenantDb db, string? status, int? limite)
+    private static async Task<IResult> DfeListAsync(HttpContext http, string cnpj, ITenantDb db, string? status, string? limite)
     {
         if (!IsAsciiDigits(cnpj, 14))
         {
             return ApiProblem.Result(400, "ERR_VALIDATION", "CNPJ com 14 dígitos, sem pontuação");
         }
 
+        if (!TryLimit(limite, 100, 500, out var limit))
+        {
+            return ApiProblem.Result(400, "ERR_VALIDATION", "limite deve ser um inteiro de 1 a 500");
+        }
+
+        if (status is not null && !DfeStatuses.Contains(status.ToUpperInvariant()))
+        {
+            return ApiProblem.Result(400, "ERR_VALIDATION", $"Situação desconhecida: {status}", $"Use: {string.Join(", ", DfeStatuses)}.");
+        }
+
         var caller = http.GetCaller();
-        var limit = Math.Clamp(limite ?? 100, 1, 500);
         var list = await db.InTenantAsync(caller.Identity.Tenant, async (s, ct) =>
         {
             await using var cmd = s.CreateCommand("""

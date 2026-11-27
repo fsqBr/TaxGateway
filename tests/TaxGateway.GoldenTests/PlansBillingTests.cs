@@ -111,7 +111,7 @@ public sealed class PlansBillingTests(GoldenFixture env)
         var (tenant, _) = await env.CreateTenantWithIdAsync("Stripe", GoldenFixture.NewCnpj());
         var now = env.Clock.GetUtcNow().ToUnixTimeSeconds();
         var suffix = Guid.NewGuid().ToString("N")[..10];
-        var checkout = $$$$$"""{"id":"evt_co_{{{{{suffix}}}}}","type":"checkout.session.completed","data":{"object":{"mode":"subscription","customer":"cus_{{{{{suffix}}}}}","subscription":"sub_{{{{{suffix}}}}}","metadata":{"tenant_id":"{{{{{tenant}}}}}","plan_code":"ESSENCIAL"}}}}""";
+        var checkout = $$$$$"""{"id":"evt_co_{{{{{suffix}}}}}","type":"checkout.session.completed","created":1000,"data":{"object":{"mode":"subscription","payment_status":"paid","customer":"cus_{{{{{suffix}}}}}","subscription":"sub_{{{{{suffix}}}}}","metadata":{"tenant_id":"{{{{{tenant}}}}}","plan_code":"ESSENCIAL"}}}}""";
 
         Assert.Equal(HttpStatusCode.BadRequest, await PostWebhookAsync(checkout, "t=1,v1=00"));                       // assinatura inválida
         Assert.Equal(HttpStatusCode.BadRequest, await PostWebhookAsync(checkout, Sign(checkout, now - 3600)));        // fora da tolerância
@@ -149,6 +149,58 @@ public sealed class PlansBillingTests(GoldenFixture env)
         Assert.Equal(HttpStatusCode.OK, await PostWebhookAsync(deleted, Sign(deleted, now)));
         await processor.RunOnceAsync(CancellationToken.None);
         Assert.Equal(("SANDBOX", "canceled", (string?)null), await Tenant());
+    }
+
+    /// <summary>
+    /// D-R02: pagamento pendente não libera o plano; evento velho (reentrega atrasada) não ressuscita assinatura
+    /// cancelada; cancelar uma assinatura duplicada antiga não rebaixa quem tem outra ativa.
+    /// </summary>
+    [Fact]
+    public async Task Eventos_da_Stripe_fora_de_ordem_ou_de_outra_assinatura_nao_mudam_o_plano()
+    {
+        var (tenant, _) = await env.CreateTenantWithIdAsync("Stripe ordem", GoldenFixture.NewCnpj());
+        var now = env.Clock.GetUtcNow().ToUnixTimeSeconds();
+        var s = Guid.NewGuid().ToString("N")[..10];
+        await using var billing = NpgsqlDataSource.Create(env.ConnectionFor("tg_billing"));
+        await using var valkey = await ConnectionMultiplexer.ConnectAsync(env.ValkeyConnection);
+        var processor = new StripeEventProcessor(new BillingDataSource(billing), valkey, NullLogger<StripeEventProcessor>.Instance);
+        async Task Post(string json)
+        {
+            Assert.Equal(HttpStatusCode.OK, await PostWebhookAsync(json, Sign(json, now)));
+            await processor.RunOnceAsync(CancellationToken.None);
+        }
+
+        async Task<(string Plan, string? Status)> State()
+        {
+            await using var cmd = billing.CreateCommand("SELECT plan_code, subscription_status FROM tenants WHERE id = $1");
+            cmd.Parameters.Add(new() { Value = tenant });
+            await using var r = await cmd.ExecuteReaderAsync();
+            await r.ReadAsync();
+            return (r.GetString(0), r.IsDBNull(1) ? null : r.GetString(1));
+        }
+
+        string Sub(string type, string sub, string status, string plan, long created, string id) =>
+            $$$$$"""{"id":"evt_{{{{{id}}}}}_{{{{{s}}}}}","type":"customer.subscription.{{{{{type}}}}}","created":{{{{{created}}}}},"data":{"object":{"id":"{{{{{sub}}}}}_{{{{{s}}}}}","customer":"cus_o_{{{{{s}}}}}","status":"{{{{{status}}}}}","metadata":{"tenant_id":"{{{{{tenant}}}}}","plan_code":"{{{{{plan}}}}}"}}}}""";
+
+        var initialPlan = (await State()).Plan;
+
+        // Checkout com boleto/Pix ainda não compensado: fica pendente, sem plano novo.
+        await Post($$$$$"""{"id":"evt_co_{{{{{s}}}}}","type":"checkout.session.completed","created":100,"data":{"object":{"mode":"subscription","payment_status":"unpaid","customer":"cus_o_{{{{{s}}}}}","subscription":"sub_a_{{{{{s}}}}}","metadata":{"tenant_id":"{{{{{tenant}}}}}","plan_code":"PROFISSIONAL"}}}}""");
+        Assert.Equal((initialPlan, "incomplete"), await State());
+
+        await Post(Sub("updated", "sub_a", "active", "PROFISSIONAL", 200, "up1"));
+        Assert.Equal(("PROFISSIONAL", "active"), await State());
+
+        // Assinatura duplicada antiga (sub_b) cancelada: não mexe no tenant, que está na sub_a.
+        await Post(Sub("deleted", "sub_b", "canceled", "ESSENCIAL", 250, "delb"));
+        Assert.Equal(("PROFISSIONAL", "active"), await State());
+
+        await Post(Sub("deleted", "sub_a", "canceled", "PROFISSIONAL", 300, "dela"));
+        Assert.Equal(("SANDBOX", "canceled"), await State());
+
+        // Reentrega atrasada de um "updated" anterior ao cancelamento: ignorada.
+        await Post(Sub("updated", "sub_a", "active", "PROFISSIONAL", 250, "up2"));
+        Assert.Equal(("SANDBOX", "canceled"), await State());
     }
 
     private static async Task WaitAsync(Func<Task<bool>> condition, int seconds = 15)

@@ -83,6 +83,8 @@ public sealed partial class ApiExceptionHandler(ILogger<ApiExceptionHandler> log
                 }).ToList()),
             EngineUnavailableException => ApiProblem.Result(503, "ERR_ENGINE_UNAVAILABLE",
                 "Motor fiscal indisponível", "Tente novamente em instantes."),
+            BadHttpRequestException { StatusCode: 413 } => ApiProblem.Result(413, "ERR_PAYLOAD_TOO_LARGE", "Corpo da requisição grande demais",
+                "Veja o limite da rota na referência (/docs); para muitos documentos use o envio em lote."),
             BadHttpRequestException b => ApiProblem.Result(b.StatusCode, "ERR_BAD_REQUEST", "Requisição inválida", b.Message),
             _ => null,
         };

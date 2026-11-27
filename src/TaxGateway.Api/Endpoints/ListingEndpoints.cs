@@ -165,7 +165,9 @@ public static class ListingEndpoints
               'tenant', (SELECT json_build_object('tenant_id', t.id, 'nome', t.name, 'cnpj_raiz', t.root_cnpj, 'plano', t.plan_code,
                          'situacao', t.status, 'auto_provisionar_cnpj', t.auto_provision_cnpj, 'retencao_xml_dias', t.xml_retention_days,
                          'criado_em', t.created_at, 'cobranca', json_build_object('provedor', t.billing_provider, 'cliente', t.billing_customer_ref,
-                         'assinatura', t.stripe_subscription_id, 'situacao_assinatura', t.subscription_status, 'fim_do_periodo', t.current_period_end))
+                         'assinatura', t.stripe_subscription_id, 'situacao_assinatura', t.subscription_status, 'fim_do_periodo', t.current_period_end),
+                         'teto_centavos', t.overage_cap_cents, 'verificada_em', t.cnpj_verified_at, 'metodo_verificacao', t.cnpj_verification_method,
+                         'verificada_por', t.cnpj_verified_by, 'inadimplente_desde', t.payment_failed_at, 'motivo_suspensao', t.suspended_reason)
                          FROM tenants t WHERE t.id = $1),
               'pessoas', (SELECT coalesce(json_agg(json_build_object('nome', u.name, 'email', u.email, 'papel', m.role, 'mfa', u.totp_enabled_at IS NOT NULL,
                           'situacao', u.status, 'ultimo_acesso', u.last_login_at) ORDER BY m.role, u.email), '[]')

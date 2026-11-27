@@ -32,6 +32,11 @@ function mockApi(handler: Handler) {
 
 const me = { tenant_id: 't1', nome: 'Empresa X', cnpj_raiz: '11222333000181', plano: 'PROFISSIONAL', situacao: 'ACTIVE', credencial: 'sessao', auto_provisionar_cnpj: false, scopes: ['keys:manage', 'simulacao:write', 'usage:read'], limites: { rpm: 600, concorrencia: 20 } };
 const usage = { competencia: '2026-11', plano: 'PROFISSIONAL', documentos_auditados: 1234, simulacoes: 10, cnpjs_ativos: 2, franquia_documentos: 1000, excedente_documentos: 234, atualizado_em: '2026-11-25T12:00:00Z' };
+/** Consumo por competência (respeita ?mes=): só o mês corrente tem uso, como na tela de histórico. */
+const usageFor = (url: string) => {
+  const mes = new URL(url, 'http://x').searchParams.get('mes') ?? currentMonth();
+  return mes === currentMonth() ? { ...usage, competencia: mes } : { ...usage, competencia: mes, documentos_auditados: 0, simulacoes: 0, excedente_documentos: 0 };
+};
 const empresa = { tenant_id: 't1', nome: 'Empresa X', cnpj_raiz: '11222333000181', papel: 'owner', plano: 'PROFISSIONAL', situacao: 'ACTIVE' };
 const sessaoOk = {
   usuario: { id: 'u1', nome: 'Maria Fiscal', email: 'maria@x.test' }, mfa: 'ok', empresas: [empresa], empresa_ativa: 't1', papel: 'owner',
@@ -86,7 +91,7 @@ describe('portal do cliente', () => {
         return { status: 204 };
       }
       if (r.url === '/v1/me') return { json: me };
-      if (r.url.startsWith('/v1/usage')) return { json: usage };
+      if (r.url.startsWith('/v1/usage')) return { json: usageFor(r.url) };
       if (r.url === '/v1/primeiros-passos') return { json: { passos: [{ id: 'simular', titulo: 'Simule um cálculo', descricao: 'd', link: '/portal/simular', feito: true }, { id: 'auditar', titulo: 'Audite uma nota', descricao: 'd', link: '/portal/auditoria', feito: false }], concluidos: 1, total: 2 } };
       if (r.url.startsWith('/v1/avisos')) return { json: { avisos: [], nao_lidos: 2 } };
       return undefined;
@@ -118,7 +123,7 @@ describe('portal do cliente', () => {
     mockApi((r) => {
       if (r.url === '/v1/conta/sessao') return { json: { ...sessaoOk, papel: 'finance', escopos: ['usage:read', 'billing:manage'] } };
       if (r.url === '/v1/me') return { json: me };
-      if (r.url.startsWith('/v1/usage')) return { json: usage };
+      if (r.url.startsWith('/v1/usage')) return { json: usageFor(r.url) };
       return undefined;
     });
     renderAt('/portal');
@@ -137,6 +142,7 @@ describe('portal do cliente', () => {
       if (r.url === '/v1/me') return { json: me };
       if (r.url === '/v1/api-keys' && r.method === 'GET') return { json: { api_keys: keys } };
       if (r.url === '/v1/api-keys' && r.method === 'POST') return { status: 201, json: { id: 'k3', api_key: 'tg_live_sk_NEWKEY00_secret', prefixo: 'NEWKEY00', scopes: ['simulacao:write'] } };
+      if (r.url === '/v1/api-keys/k2' && r.method === 'DELETE') return { status: 204 };
       return undefined;
     });
     renderAt('/portal/api-keys');
@@ -148,6 +154,12 @@ describe('portal do cliente', () => {
     expect(within(confirm).getByRole('button', { name: 'Cancelar' })).toHaveFocus();
     await userEvent.keyboard('{Escape}');
     expect(screen.queryByRole('alertdialog')).toBeNull();
+
+    // Confirmando de verdade: a revogação é enviada para a chave certa.
+    await userEvent.click(within(antiga).getByRole('button', { name: 'Revogar' }));
+    const again = await screen.findByRole('alertdialog', { name: 'Revogar a chave "erp-antigo"?' });
+    await userEvent.click(within(again).getByRole('button', { name: /Revogar/ }));
+    await waitFor(() => expect(calls.some((c) => c.method === 'DELETE' && c.url === '/v1/api-keys/k2')).toBe(true));
 
     // Escopo que a sessão não tem fica desabilitado.
     expect(screen.getByRole('checkbox', { name: /dfe:manage/ })).toBeDisabled();
@@ -164,7 +176,7 @@ describe('portal do cliente', () => {
       if (r.url === '/v1/conta/sessao') return loggedIn ? { json: sessaoOk } : { status: 401, json: { code: 'ERR_UNAUTHENTICATED', title: 'x' } };
       if (r.url === '/v1/conta/sair') { loggedIn = false; return { status: 204 }; }
       if (r.url === '/v1/me') return { json: me };
-      if (r.url.startsWith('/v1/usage')) return { json: usage };
+      if (r.url.startsWith('/v1/usage')) return { json: usageFor(r.url) };
       return undefined;
     });
     renderAt('/portal');
@@ -185,6 +197,57 @@ describe('portal do cliente', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Criar conta' }));
     expect(await screen.findByRole('heading', { name: 'Confira seu e-mail' })).toBeInTheDocument();
     expect(calls.find((c) => c.url === '/v1/conta/cadastro')!.body).toMatchObject({ empresa: { cnpj: '11222333000181' }, aceite_termos: true });
+  });
+
+  it('cobrança: teto de excedente, verificação da empresa e régua de inadimplência (D-R08/D-R09/D-R10)', async () => {
+    let verificada = false;
+    const cobranca = () => ({
+      plano: 'ESSENCIAL', assinatura: { situacao: 'past_due', renova_em: null }, pagamento_online: true, faturas: [],
+      excedente: { teto_centavos: 0, usado_centavos: 0, franquia_rigida: false, preco_documento_milicentavos: 9000, preco_simulacao_milicentavos: 500 },
+      verificacao: { verificada, verificada_em: verificada ? '2026-11-20T10:00:00Z' : null, metodo: verificada ? 'EMAIL_RECEITA' : null },
+      inadimplencia: { desde: '2026-11-10T10:00:00Z', situacao: 'RESTRICTED', restringe_em: '2026-11-20T10:00:00Z', suspende_em: '2026-11-25T10:00:00Z' },
+    });
+    mockApi((r) => {
+      if (r.url === '/v1/conta/sessao') return { json: { ...sessaoOk, escopos: [...sessaoOk.escopos, 'billing:manage'] } };
+      if (r.url === '/v1/me') return { json: me };
+      if (r.url === '/v1/conta/planos') return { json: [] };
+      if (r.url === '/v1/cobranca') return { json: cobranca() };
+      if (r.url === '/v1/verificacao-cnpj') return { json: { cnpj: '11222333000181', verificada, metodos_disponiveis: ['CERTIFICADO', 'EMAIL_RECEITA', 'MANUAL'] } };
+      if (r.url === '/v1/verificacao-cnpj/email') return { status: 202, json: { enviado_para: 'ti***@empresa.test', expira_em_minutos: 30 } };
+      if (r.url === '/v1/verificacao-cnpj/email/confirmar') { verificada = true; return { json: { verificada: true, metodo: 'EMAIL_RECEITA' } }; }
+      if (r.url === '/v1/cobranca/teto') return { json: { teto_centavos: 5000 } };
+      return undefined;
+    });
+    renderAt('/portal/cobranca');
+    expect(await screen.findByText(/cálculos e auditorias estão bloqueados/)).toBeInTheDocument();
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Enviar código' }));
+    await userEvent.type(await screen.findByLabelText(/Código enviado para ti\*\*\*@empresa.test/), '123456');
+    await userEvent.click(screen.getByRole('button', { name: 'Confirmar código' }));
+    expect(await screen.findByText('verificada')).toBeInTheDocument();
+    expect(calls.find((c) => c.url === '/v1/verificacao-cnpj/email/confirmar')!.body).toEqual({ codigo: '123456' });
+
+    const teto = screen.getByLabelText(/Teto mensal de excedente/);
+    await userEvent.clear(teto);
+    await userEvent.type(teto, '50,00');
+    await userEvent.click(screen.getByRole('button', { name: 'Salvar teto' }));
+    await waitFor(() => expect(calls.find((c) => c.url === '/v1/cobranca/teto')?.body).toEqual({ teto_centavos: 5000 }));
+  });
+
+  it('conta sem empresa vê como pedir convite ou contestar a titularidade com o e-CNPJ', async () => {
+    mockApi((r) => {
+      if (r.url === '/v1/conta/sessao') return { json: { ...sessaoOk, empresas: [], empresa_ativa: undefined, escopos: [] } };
+      if (r.url === '/v1/conta/disputa-cnpj') return { status: 202, json: { mensagem: 'Pedido registrado. A conta atual foi avisada.' } };
+      return undefined;
+    });
+    renderAt('/portal');
+    expect(await screen.findByRole('heading', { name: 'Sua conta ainda não tem empresa' })).toBeInTheDocument();
+    expect(calls.some((c) => c.url === '/v1/me')).toBe(false);
+    await userEvent.upload(screen.getByLabelText('Certificado e-CNPJ (.pfx)'), new File([new Uint8Array([1, 2, 3])], 'a1.pfx'));
+    await userEvent.type(screen.getByLabelText('Senha do certificado'), 'senha-a1');
+    await userEvent.click(screen.getByRole('button', { name: 'Enviar contestação' }));
+    expect(await screen.findByText(/Pedido registrado/)).toBeInTheDocument();
+    expect(calls.find((c) => c.url === '/v1/conta/disputa-cnpj')!.body).toEqual({ pfx_base64: 'AQID', senha: 'senha-a1' });
   });
 });
 
@@ -208,6 +271,27 @@ describe('backoffice', () => {
     expect(api.every((c) => !('X-Admin-Key' in c.headers) && !('X-Api-Key' in c.headers) && c.headers[CSRF_HEADER] === '1')).toBe(true);
     // Sem admin:commercial, o menu esconde as áreas comerciais.
     expect(screen.queryByRole('link', { name: 'Operadores' })).toBeNull();
+  });
+
+  it('disputas de CNPJ: só as abertas podem ser decididas e transferir pede confirmação (D-R10)', async () => {
+    mockApi((r) => {
+      if (r.url === '/admin/v1/conta/sessao') return { json: { usuario: { id: 'o1', nome: 'Seg', email: 'seg@tg.test' }, mfa: 'ok', escopos: ['admin:security'] } };
+      if (r.url === '/admin/v1/me') return { json: { operador: 'seg@tg.test', scopes: ['admin:security'] } };
+      if (r.url === '/admin/v1/disputas') {
+        return { json: { disputas: [
+          { id: 'd1', cnpj: '11222333', tenant_id: 't1', empresa: 'Empresa X', requerente: 'real@x.test', requerente_nome: 'Titular', certificado: 'ABC', situacao: 'ABERTA', criada_em: '2026-11-20T10:00:00Z', resolvida_por: null, resolvida_em: null },
+          { id: 'd2', cnpj: '44555666', tenant_id: 't2', empresa: 'Empresa Y', requerente: 'y@x.test', requerente_nome: 'Outro', certificado: 'DEF', situacao: 'REJEITADA', criada_em: '2026-11-01T10:00:00Z', resolvida_por: 'seg@tg.test', resolvida_em: '2026-11-02T10:00:00Z' },
+        ] } };
+      }
+      if (r.url === '/admin/v1/disputas/d1/resolver') return { json: { disputa: 'd1', acao: 'transferir', tenant_id: 't1' } };
+      return undefined;
+    });
+    renderAt('/backoffice/disputas');
+    expect(await screen.findAllByRole('button', { name: 'Transferir' })).toHaveLength(1);
+    await userEvent.click(screen.getByRole('button', { name: 'Transferir' }));
+    const dialog = await screen.findByRole('alertdialog', { name: 'Transferir Empresa X para real@x.test?' });
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Transferir empresa' }));
+    await waitFor(() => expect(calls.find((c) => c.url === '/admin/v1/disputas/d1/resolver')?.body).toEqual({ acao: 'transferir' }));
   });
 
   it('sem sessão de operador vai para o login do backoffice', async () => {

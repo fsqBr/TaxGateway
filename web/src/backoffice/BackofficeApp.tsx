@@ -1,8 +1,10 @@
 import { Fragment, useState, type FormEvent } from 'react';
 import { Route, Routes } from 'react-router-dom';
-import { Ban, Building2, History, Layers3, Percent, Receipt, UserCog } from 'lucide-react';
+import { Ban, Building2, History, Layers3, Percent, Receipt, Scale, UserCog } from 'lucide-react';
 import { Operadores, Trilha } from './Operadores';
 import { Planos } from './Planos';
+import { Disputas } from './Disputas';
+import { useSession } from '../auth/session';
 import { Shell, type NavItem } from '../components/Shell';
 import { ConfirmButton } from '../components/ConfirmDialog';
 import { Alert, Badge, Card, Confirm, Field, Json, Loading, PageHeader, SecretOnce, StatusBadge, Table, useAction, useLoad } from '../components/ui';
@@ -19,8 +21,9 @@ const nav: NavItem[] = [
   { to: '/backoffice/aliquotas', label: 'Alíquotas', icon: Percent, section: 'Fiscal', scope: 'admin:fiscal' },
   { to: '/backoffice/planos', label: 'Planos', icon: Layers3, section: 'Financeiro', scope: 'admin:commercial' },
   { to: '/backoffice/faturamento', label: 'Faturamento', icon: Receipt, section: 'Financeiro' },
-  { to: '/backoffice/operadores', label: 'Operadores', icon: UserCog, section: 'Segurança', scope: 'admin:commercial' },
-  { to: '/backoffice/trilha', label: 'Trilha de auditoria', icon: History, section: 'Segurança', scope: 'admin:commercial' },
+  { to: '/backoffice/operadores', label: 'Operadores', icon: UserCog, section: 'Segurança', scope: 'admin:security' },
+  { to: '/backoffice/disputas', label: 'Disputas de CNPJ', icon: Scale, section: 'Segurança', scope: 'admin:security' },
+  { to: '/backoffice/trilha', label: 'Trilha de auditoria', icon: History, section: 'Segurança', scope: 'admin:security' },
 ];
 
 export default function BackofficeApp() {
@@ -44,6 +47,7 @@ export default function BackofficeApp() {
         <Route path="tokens" element={<Tokens />} />
         <Route path="operadores" element={<Operadores />} />
         <Route path="planos" element={<Planos />} />
+        <Route path="disputas" element={<Disputas />} />
         <Route path="trilha" element={<Trilha />} />
       </Routes>
     </Shell>
@@ -174,7 +178,9 @@ export function Tenants() {
 
 interface TenantDetail {
   tenant: { tenant_id: string; nome: string; cnpj_raiz: string; plano: string; situacao: string; criado_em: string;
-    cobranca: { provedor: string | null; cliente: string | null; assinatura: string | null; situacao_assinatura: string | null; fim_do_periodo: string | null } };
+    cobranca: { provedor: string | null; cliente: string | null; assinatura: string | null; situacao_assinatura: string | null; fim_do_periodo: string | null };
+    teto_centavos: number; verificada_em: string | null; metodo_verificacao: string | null; verificada_por: string | null;
+    inadimplente_desde: string | null; motivo_suspensao: string | null };
   pessoas: { nome: string; email: string; papel: string; mfa: boolean; situacao: string; ultimo_acesso: string | null }[];
   cnpjs: { cnpj: string; ativo: boolean; criado_em: string }[];
   api_keys: { nome: string; prefixo: string; scopes: string[]; expira_em: string | null; revogada_em: string | null; ultimo_uso: string | null; criada_em: string }[];
@@ -194,6 +200,22 @@ function TenantDetalhe({ tenant, planos, onClose, onChange }: { tenant: Tenant; 
     }
   };
   const t = d.data?.tenant;
+  const { can } = useSession();
+  const [teto, setTeto] = useState<string>();
+  const [obs, setObs] = useState('');
+  const salvarTeto = async () => {
+    const centavos = Math.round(Number((teto ?? '0').replace(',', '.')) * 100);
+    if (await run(() => backoffice(`/admin/v1/tenants/${tenant.tenant_id}/teto`, { method: 'PUT', body: { teto_centavos: centavos } })) !== undefined) {
+      setTeto(undefined);
+      await d.reload();
+    }
+  };
+  const verificar = async () => {
+    if (await run(() => backoffice(`/admin/v1/tenants/${tenant.tenant_id}/verificar`, { method: 'POST', body: { observacao: obs } })) !== undefined) {
+      setObs('');
+      await d.reload();
+    }
+  };
   return (
     <Drawer title={tenant.nome} onClose={onClose} wide>
       {d.loading && <Loading />}
@@ -206,7 +228,27 @@ function TenantDetalhe({ tenant, planos, onClose, onChange }: { tenant: Tenant; 
             <div><dt>Plano</dt><dd>{t.plano}</dd></div>
             <div><dt>Assinatura</dt><dd>{t.cobranca.situacao_assinatura ?? 'sem assinatura'}{t.cobranca.fim_do_periodo && <span className="sub">até {dateTime(t.cobranca.fim_do_periodo)}</span>}</dd></div>
             <div><dt>Cliente desde</dt><dd>{dateTime(t.criado_em)}</dd></div>
+            <div><dt>Titularidade</dt><dd>{t.verificada_em ? <><Badge tone="ok">verificada</Badge><span className="sub">{t.metodo_verificacao} · {t.verificada_por ?? '—'} · {dateTime(t.verificada_em)}</span></> : <Badge tone="warn">não verificada</Badge>}</dd></div>
+            <div><dt>Teto de excedente</dt><dd>{t.teto_centavos === 0 ? 'zero (para na franquia)' : money(t.teto_centavos / 100)}</dd></div>
+            {t.inadimplente_desde && <div><dt>Inadimplente desde</dt><dd><Badge tone="bad">{dateTime(t.inadimplente_desde)}</Badge>{t.motivo_suspensao && <span className="sub">{t.motivo_suspensao}</span>}</dd></div>}
           </dl>
+          {can('admin:commercial') && (
+            <Card title="Teto de excedente" description="Quanto o cliente autoriza pagar além da franquia por mês. 0 = o consumo para ao esgotar a franquia. Fica na trilha.">
+              <div className="row">
+                <input aria-label="Teto em reais" inputMode="decimal" value={teto ?? String(t.teto_centavos / 100)} onChange={(e) => setTeto(e.target.value)} style={{ maxWidth: 160 }} />
+                <button type="button" className="secondary" disabled={busy || teto === undefined} onClick={() => void salvarTeto()}>Salvar teto</button>
+              </div>
+            </Card>
+          )}
+          {can('admin:security') && !t.verificada_em && (
+            <Card title="Verificar titularidade manualmente" description="Só depois de conferir contrato social ou documento equivalente. Registre o que foi conferido — fica na trilha.">
+              <div className="row">
+                <input aria-label="Documento conferido" placeholder="Ex.: contrato social 3ª alteração, JUCESP 2025" maxLength={500} value={obs} onChange={(e) => setObs(e.target.value)} />
+                <ConfirmButton label="Marcar verificada" tone="secondary" disabled={busy || obs.trim().length < 5} title={`Verificar a titularidade de ${t.nome}?`}
+                  impact="Libera plano pago e captura de DF-e e impede contestações futuras deste CNPJ." confirmLabel="Marcar verificada" onConfirm={verificar} />
+              </div>
+            </Card>
+          )}
           <Card title="Trocar plano" description="Vale na hora para limites e franquia; a cobrança da Stripe segue a assinatura do cliente. Fica na trilha de auditoria.">
             <div className="row">
               <select aria-label="Novo plano" value={plano} onChange={(e) => setPlano(e.target.value)} style={{ width: 'auto' }}>

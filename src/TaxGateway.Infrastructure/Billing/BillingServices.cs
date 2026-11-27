@@ -46,7 +46,11 @@ public sealed partial class BillingService(BillingDataSource billing, IBillingPr
 
     public static string Key(Guid tenant, DateOnly month, int version) => $"{tenant}:{month:yyyy-MM}:v{version}";
 
-    /// <summary>Fecha o mês para todos os tenants com uso ou mensalidade. Idempotente.</summary>
+    /// <summary>
+    /// Fecha o mês para todos os tenants com uso ou mensalidade. Idempotente. D-R01: quem tem assinatura na Stripe fica
+    /// com o status SUBSCRIPTION (a assinatura cobra mensalidade e excedente medido) e NUNCA recebe fatura avulsa — antes
+    /// todo assinante era cobrado duas vezes. O valor calculado fica no período para a reconciliação.
+    /// </summary>
     public async Task<int> CloseMonthAsync(DateOnly month, CancellationToken ct)
     {
         await using var cmd = Db.CreateCommand("""
@@ -59,16 +63,18 @@ public sealed partial class BillingService(BillingDataSource billing, IBillingPr
                 SELECT t.id AS tenant_id, coalesce(u.docs, 0) AS docs, coalesce(u.sims, 0) AS sims, coalesce(c.n, 0)::int AS cnpjs,
                        p.price_cents
                        + round(greatest(coalesce(u.docs, 0) - p.included_docs, 0) * p.overage_doc_millicents / 1000.0)::bigint
-                       + round(coalesce(u.sims, 0) * p.overage_sim_millicents / 1000.0)::bigint
+                       + round(greatest(coalesce(u.sims, 0) - p.included_simulations, 0) * p.overage_sim_millicents / 1000.0)::bigint   -- D-R01: franquia de simulações
                        + greatest(coalesce(c.n, 0) - coalesce(p.included_cnpjs, 0), 0) * p.cnpj_price_cents AS amount
                   FROM tenants t JOIN plans p ON p.code = t.plan_code
                   LEFT JOIN usage u ON u.tenant_id = t.id LEFT JOIN cnpjs c ON c.tenant_id = t.id
                  WHERE t.status <> 'CLOSED' AND (u.tenant_id IS NOT NULL OR p.price_cents > 0)
             )
             INSERT INTO billing_periods (tenant_id, billing_month, status, docs_count, simulations_count, active_cnpjs, amount_cents, provider_idempotency_key, closed_at)
-            SELECT tenant_id, $1, 'CLOSED', docs, sims, cnpjs, amount, tenant_id::text || ':' || to_char($1, 'YYYY-MM') || ':v1', now() FROM calc
+            SELECT c.tenant_id, $1, CASE WHEN t.stripe_subscription_id IS NOT NULL THEN 'SUBSCRIPTION' ELSE 'CLOSED' END,
+                   c.docs, c.sims, c.cnpjs, c.amount, c.tenant_id::text || ':' || to_char($1, 'YYYY-MM') || ':v1', now()
+              FROM calc c JOIN tenants t ON t.id = c.tenant_id
             ON CONFLICT (tenant_id, billing_month) DO UPDATE
-               SET status = 'CLOSED', docs_count = EXCLUDED.docs_count, simulations_count = EXCLUDED.simulations_count,
+               SET status = EXCLUDED.status, docs_count = EXCLUDED.docs_count, simulations_count = EXCLUDED.simulations_count,
                    active_cnpjs = EXCLUDED.active_cnpjs, amount_cents = EXCLUDED.amount_cents,
                    provider_idempotency_key = EXCLUDED.provider_idempotency_key, closed_at = now()
              WHERE billing_periods.status IN ('OPEN', 'CLOSING')

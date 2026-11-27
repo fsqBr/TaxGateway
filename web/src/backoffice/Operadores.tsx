@@ -10,12 +10,12 @@ interface Operador { id: string; email: string; nome: string; escopos: string[];
 export function Operadores() {
   const list = useLoad(() => backoffice<Operador[]>('/admin/v1/operadores'));
   const { busy, error, run } = useAction();
-  const [form, setForm] = useState({ email: '', nome: '', commercial: true, fiscal: false });
+  const [form, setForm] = useState({ email: '', nome: '', commercial: true, fiscal: false, security: false });
   const [sent, setSent] = useState<string>();
 
   const create = async (e: FormEvent) => {
     e.preventDefault();
-    const escopos = [form.commercial && 'admin:commercial', form.fiscal && 'admin:fiscal'].filter(Boolean);
+    const escopos = [form.commercial && 'admin:commercial', form.fiscal && 'admin:fiscal', form.security && 'admin:security'].filter(Boolean);
     if (await run(() => backoffice('/admin/v1/operadores', { method: 'POST', body: { email: form.email, nome: form.nome, escopos } })) !== undefined) {
       setSent(form.email);
       setForm({ ...form, email: '', nome: '' });
@@ -25,14 +25,15 @@ export function Operadores() {
 
   return (
     <>
-      <PageHeader title="Operadores" description="Pessoas do time TaxGateway com acesso ao backoffice. Todas entram com senha e verificação em duas etapas." />
+      <PageHeader title="Operadores" description="Pessoas do time TaxGateway com acesso ao backoffice. Todas entram com senha e verificação em duas etapas. Só é possível conceder escopos que você mesmo tem." />
       <Card title="Convidar operador">
         <form className="row" onSubmit={create} style={{ alignItems: 'flex-end', flexWrap: 'wrap' }}>
           <Field label="Nome"><input value={form.nome} onChange={(e) => setForm({ ...form, nome: e.target.value })} required /></Field>
           <Field label="E-mail"><input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} required /></Field>
           <label className="checkbox small"><input type="checkbox" checked={form.commercial} onChange={(e) => setForm({ ...form, commercial: e.target.checked })} /> Comercial (clientes, planos, faturamento)</label>
           <label className="checkbox small"><input type="checkbox" checked={form.fiscal} onChange={(e) => setForm({ ...form, fiscal: e.target.checked })} /> Fiscal (alíquotas)</label>
-          <button type="submit" disabled={busy || (!form.commercial && !form.fiscal)}>Enviar convite</button>
+          <label className="checkbox small"><input type="checkbox" checked={form.security} onChange={(e) => setForm({ ...form, security: e.target.checked })} /> Segurança (operadores e trilha)</label>
+          <button type="submit" disabled={busy || (!form.commercial && !form.fiscal && !form.security)}>Enviar convite</button>
         </form>
         {sent && <Alert kind="success">Convite enviado para {sent} (vale 24 h).</Alert>}
         <Alert>{error ?? list.error}</Alert>

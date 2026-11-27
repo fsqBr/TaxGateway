@@ -139,9 +139,14 @@ public sealed partial class AccountService(
             fn.Parameters.Add(new() { Value = userId });
             if (!(bool)(await fn.ExecuteScalarAsync(ct).ConfigureAwait(false))!)
             {
-                await tx.RollbackAsync(ct).ConfigureAwait(false);
-                throw new AccountException(409, "ERR_EMPRESA_JA_CADASTRADA", "Esta empresa já tem conta no TaxGateway",
-                    "Peça a quem administra a conta da empresa um convite para o seu e-mail.");
+                // D-R10: empresa já cadastrada — mesma resposta de um cadastro novo (não revela quem é cliente). A conta da
+                // pessoa é criada sem empresa e o e-mail explica: pedir convite ou, sendo o titular, contestar com o e-CNPJ.
+                var tokenExisting = await NewUserTokenAsync(conn, tx, userId, "verify_email", TimeSpan.FromHours(24), ct).ConfigureAwait(false);
+                await tx.CommitAsync(ct).ConfigureAwait(false);
+                await email.SendAsync(EmailTemplates.CompanyAlreadyRegistered(e, name, company,
+                    $"{O.PublicBaseUrl}/portal/confirmar-email?token={tokenExisting}"), ct).ConfigureAwait(false);
+                await AuditAsync(null, "user", userId.ToString(), "signup.empresa_existente", null, ip, new JsonObject(), ct).ConfigureAwait(false);
+                return;
             }
         }
 
@@ -414,11 +419,25 @@ public sealed partial class AccountService(
     }
 
     /// <summary>Segundo fator na entrada: código TOTP ou um código de recuperação (que deixa de valer).</summary>
+    /// <summary>Erros de código seguidos numa mesma sessão antes de ela ser encerrada (D-R03).</summary>
+    public const int MaxMfaFailuresPerSession = 5;
+
     public async Task MfaVerifyAsync(SessionInfo s, string? code, string? recoveryCode, string? ip, CancellationToken ct)
     {
         if (!s.MfaEnabled)
         {
             throw new AccountException(409, "ERR_MFA_NAO_CONFIGURADO", "Configure o MFA primeiro");
+        }
+
+        // D-R03: o bloqueio da conta vale também para o segundo fator (antes só a senha o consultava: com a senha certa,
+        // o código podia ser testado à exaustão, limitado só pelo teto por IP).
+        await using (var locked = appDb.CreateCommand("SELECT locked_until IS NOT NULL AND locked_until > now() FROM users WHERE id = $1"))
+        {
+            locked.Parameters.Add(new() { Value = s.UserId });
+            if (await locked.ExecuteScalarAsync(ct).ConfigureAwait(false) is true)
+            {
+                throw new AccountException(429, "ERR_CONTA_BLOQUEADA", "Conta bloqueada temporariamente", "Muitas tentativas. Aguarde alguns minutos ou redefina a senha.");
+            }
         }
 
         bool ok;
@@ -449,6 +468,17 @@ public sealed partial class AccountService(
         if (!ok)
         {
             await RegisterFailureAsync(s.UserId, s.Name, s.Email, ip, ct).ConfigureAwait(false);
+            await using var count = appDb.CreateCommand("UPDATE user_sessions SET mfa_failures = mfa_failures + 1 WHERE id = $1 RETURNING mfa_failures");
+            count.Parameters.Add(new() { Value = s.SessionId });
+            if (await count.ExecuteScalarAsync(ct).ConfigureAwait(false) is int failures && failures >= MaxMfaFailuresPerSession)
+            {
+                // A sessão "meio autenticada" morre: para tentar de novo é preciso a senha outra vez.
+                await using var kill = appDb.CreateCommand("UPDATE user_sessions SET revoked_at = now() WHERE id = $1");
+                kill.Parameters.Add(new() { Value = s.SessionId });
+                await kill.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                throw new AccountException(401, "ERR_UNAUTHENTICATED", "Muitas tentativas de código", "Entre de novo com e-mail e senha.");
+            }
+
             throw new AccountException(400, "ERR_CODIGO_INVALIDO", "Código inválido", "Confira o código no app autenticador ou use um código de recuperação.");
         }
 
@@ -844,19 +874,31 @@ public sealed partial class AccountService(
     // ------------------------------------------------------------------------------------------------- operadores
 
     /// <summary>Operador do backoffice: conta sem senha utilizável até o primeiro acesso pelo link (24 h), com MFA obrigatório.</summary>
-    public async Task<string> CreateOperatorAsync(string emailAddr, string name, IReadOnlyList<string> scopes, string createdBy, CancellationToken ct)
+    /// <summary>Escopos de operador. admin:security = gerir operadores e ler a trilha de auditoria (D-R04).</summary>
+    public static readonly string[] OperatorScopes = ["admin:commercial", "admin:fiscal", "admin:security"];
+
+    /// <param name="creatorScopes">Escopos de quem cria; null = linha de comando (primeiro operador, acesso ao servidor).</param>
+    public async Task<string> CreateOperatorAsync(string emailAddr, string name, IReadOnlyList<string> scopes, string createdBy, CancellationToken ct,
+        IReadOnlyCollection<string>? creatorScopes = null)
     {
         var e = Normalize(emailAddr);
-        if (!ValidEmail(e) || string.IsNullOrWhiteSpace(name) || scopes.Count == 0 || scopes.Any(x => x is not ("admin:commercial" or "admin:fiscal")))
+        if (!ValidEmail(e) || string.IsNullOrWhiteSpace(name) || scopes.Count == 0 || scopes.Any(x => !OperatorScopes.Contains(x)))
         {
-            throw new AccountException(400, "ERR_VALIDATION", "Dados inválidos", "E-mail, nome e escopos (admin:commercial e/ou admin:fiscal).");
+            throw new AccountException(400, "ERR_VALIDATION", "Dados inválidos", "E-mail, nome e escopos (admin:commercial, admin:fiscal e/ou admin:security).");
+        }
+
+        // D-R04: ninguém concede escopo que não tem (antes um operador comercial criava operadores fiscais e furava a
+        // regra de duas pessoas das alíquotas).
+        if (creatorScopes is not null && scopes.Except(creatorScopes, StringComparer.Ordinal).FirstOrDefault() is { } missing)
+        {
+            throw new AccountException(403, "ERR_FORBIDDEN_SCOPE", "Escopo não permitido", $"Você não tem '{missing}' e por isso não pode concedê-lo.");
         }
 
         var id = Guid.CreateVersion7();
         var (h, s) = Passwords.Hash(OpaqueToken.New());   // senha aleatória e descartada: só o link de primeiro acesso entra
         await using var conn = await appDb.OpenConnectionAsync(ct).ConfigureAwait(false);
         await using (var ins = new NpgsqlCommand("""
-            INSERT INTO users (id, realm, email, name, password_hash, password_salt, operator_scopes) VALUES ($1, 'operator', $2, $3, $4, $5, $6)
+            INSERT INTO users (id, realm, email, name, password_hash, password_salt, operator_scopes, operator_created_by) VALUES ($1, 'operator', $2, $3, $4, $5, $6, $7)
             ON CONFLICT (realm, email) DO NOTHING
             """, conn))
         {
@@ -866,6 +908,7 @@ public sealed partial class AccountService(
             ins.Parameters.Add(new() { Value = h });
             ins.Parameters.Add(new() { Value = s });
             ins.Parameters.Add(new() { Value = scopes.Distinct().ToArray() });
+            ins.Parameters.Add(new() { Value = createdBy });
             if (await ins.ExecuteNonQueryAsync(ct).ConfigureAwait(false) == 0)
             {
                 throw new AccountException(409, "ERR_CONFLICT", "Já existe operador com este e-mail");
