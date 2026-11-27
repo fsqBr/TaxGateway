@@ -39,6 +39,9 @@ builder.Services.AddTaxGatewayRuntime(builder.Configuration);
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddOptions<SimulationOptions>().Bind(builder.Configuration.GetSection(SimulationOptions.Section));
 builder.Services.AddOptions<AdminOperatorOptions>().Bind(builder.Configuration.GetSection(AdminOperatorOptions.Section));
+builder.Services.AddSingleton<TaxGateway.Infrastructure.Params.RateExceptionService>();   // D-R20
+builder.Services.AddSingleton<ApiCallLogWriter>();                                           // D-R27
+builder.Services.AddHostedService(sp => sp.GetRequiredService<ApiCallLogWriter>());
 builder.Services.AddSingleton<SimulationService>();
 // OAuth 2.0 client credentials (Fase 8; D-801): token, JWKS e validação local.
 builder.Services.AddTaxGatewayIdentity(builder.Configuration);
@@ -124,6 +127,11 @@ builder.Services.Configure<Microsoft.AspNetCore.Builder.ForwardedHeadersOptions>
 
 var app = builder.Build();
 
+// D-R22: cobertura do catálogo de alíquotas (dias à frente com referência publicada) → métrica + alerta de 90 dias.
+TaxGateway.Infrastructure.TaxGatewayMetrics.RateCoverageDays = () =>
+    TaxGateway.Api.Endpoints.RatesEndpoints.Coverage(app.Services.GetRequiredService<TaxGateway.Core.Params.IParamSnapshotProvider>().Current,
+        app.Services.GetRequiredService<TimeProvider>()).Select(c => (c.Tributo, (double)c.Dias));
+
 app.UseForwardedHeaders();
 app.UseVersionHeader();   // X-TaxGateway-Version em toda resposta (D-W11)
 app.UseExceptionHandler();
@@ -202,7 +210,8 @@ app.MapHealthChecks("/health/full", new HealthCheckOptions { Predicate = _ => tr
 var v1 = app.MapGroup("/v1")
     .AddEndpointFilter<ApiKeyFilter>()
     .AddEndpointFilter<RateLimitFilter>()
-    .AddEndpointFilter<QuotaFilter>();   // franquia rígida do Sandbox (D-C07)
+    .AddEndpointFilter<QuotaFilter>()    // franquia rígida do Sandbox (D-C07)
+    .AddEndpointFilter<CallLogFilter>(); // D-R27: registro de chamadas para quem integra
 v1.MapSimulation();
 v1.MapApiKeys();
 v1.MapAudit();
@@ -216,10 +225,14 @@ v1.MapDocuments();        // D-J01
 v1.MapClassification();   // D-J02
 v1.MapNotices();          // D-J03/D-J04
 v1.MapCompany();          // D-R08/D-R10: teto de excedente e titularidade do CNPJ
+v1.MapRateExceptions();   // D-R20: exceções do contribuinte
+v1.MapApuracao();         // D-R26: apuração mensal, fornecedores e exportação
+v1.MapIntegration();      // D-R27: clientes OAuth no portal e registro de chamadas
 v1.MapBilling();
 
 app.MapAccounts(includeOperators: adminConnection is not null);
-app.MapCompanyDispute();  // D-R10
+app.MapCompanyDispute();
+app.MapPublicRates();     // D-R21: alíquotas por município e busca de município  // D-R10
 
 // D-J05: rota inexistente da API responde problem+json (antes, 404 com corpo vazio — o cliente não sabia o motivo).
 app.MapFallback("/{**path}", (HttpContext http) =>
@@ -232,6 +245,7 @@ app.MapStripeWebhook();
 if (adminConnection is not null)
 {
     var admin = app.MapGroup("/admin/v1").AddEndpointFilter<AdminKeyFilter>().MapAdmin().MapIdentityAdmin().MapAdminListings().MapOperators().MapAdminPlans().MapAdminCompany();
+    admin.MapAdminCoverage();   // D-R22
     if (billingConnection is not null)
     {
         admin.MapBillingAdmin();

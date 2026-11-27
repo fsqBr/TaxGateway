@@ -143,11 +143,11 @@ describe('portal do cliente', () => {
       if (r.url === '/v1/api-keys' && r.method === 'GET') return { json: { api_keys: keys } };
       if (r.url === '/v1/api-keys' && r.method === 'POST') return { status: 201, json: { id: 'k3', api_key: 'tg_live_sk_NEWKEY00_secret', prefixo: 'NEWKEY00', scopes: ['simulacao:write'] } };
       if (r.url === '/v1/api-keys/k2' && r.method === 'DELETE') return { status: 204 };
+      if (r.url === '/v1/oauth-clients') return { json: { clientes: [] } };
       return undefined;
     });
     renderAt('/portal/api-keys');
-    const rows = await screen.findAllByRole('row');
-    const antiga = rows.find((row) => within(row).queryByText('erp-antigo'))!;
+    const antiga = (await screen.findByText('erp-antigo')).closest('tr')!;
     await userEvent.click(within(antiga).getByRole('button', { name: 'Revogar' }));
     const confirm = await screen.findByRole('alertdialog', { name: 'Revogar a chave "erp-antigo"?' });
     expect(confirm).toHaveTextContent('401 imediatamente');
@@ -162,7 +162,7 @@ describe('portal do cliente', () => {
     await waitFor(() => expect(calls.some((c) => c.method === 'DELETE' && c.url === '/v1/api-keys/k2')).toBe(true));
 
     // Escopo que a sessão não tem fica desabilitado.
-    expect(screen.getByRole('checkbox', { name: /dfe:manage/ })).toBeDisabled();
+    screen.getAllByRole('checkbox', { name: /dfe:manage/ }).forEach((c) => expect(c).toBeDisabled());   // API key e cliente OAuth
     await userEvent.click(screen.getByRole('button', { name: 'Criar' }));
     const dialog = await screen.findByRole('dialog', { name: 'Nova API key' });
     expect(dialog).toHaveTextContent('tg_live_sk_NEWKEY00_secret');
@@ -199,39 +199,90 @@ describe('portal do cliente', () => {
     expect(calls.find((c) => c.url === '/v1/conta/cadastro')!.body).toMatchObject({ empresa: { cnpj: '11222333000181' }, aceite_termos: true });
   });
 
-  it('cobrança: teto de excedente, verificação da empresa e régua de inadimplência (D-R08/D-R09/D-R10)', async () => {
-    let verificada = false;
-    const cobranca = () => ({
+  it('cobrança: teto de excedente e régua de inadimplência; a verificação fica em Empresa (D-R08/D-R09/D-R25)', async () => {
+    const cobranca = {
       plano: 'ESSENCIAL', assinatura: { situacao: 'past_due', renova_em: null }, pagamento_online: true, faturas: [],
       excedente: { teto_centavos: 0, usado_centavos: 0, franquia_rigida: false, preco_documento_milicentavos: 9000, preco_simulacao_milicentavos: 500 },
-      verificacao: { verificada, verificada_em: verificada ? '2026-11-20T10:00:00Z' : null, metodo: verificada ? 'EMAIL_RECEITA' : null },
+      verificacao: { verificada: false, verificada_em: null, metodo: null },
       inadimplencia: { desde: '2026-11-10T10:00:00Z', situacao: 'RESTRICTED', restringe_em: '2026-11-20T10:00:00Z', suspende_em: '2026-11-25T10:00:00Z' },
-    });
+    };
     mockApi((r) => {
       if (r.url === '/v1/conta/sessao') return { json: { ...sessaoOk, escopos: [...sessaoOk.escopos, 'billing:manage'] } };
       if (r.url === '/v1/me') return { json: me };
       if (r.url === '/v1/conta/planos') return { json: [] };
-      if (r.url === '/v1/cobranca') return { json: cobranca() };
-      if (r.url === '/v1/verificacao-cnpj') return { json: { cnpj: '11222333000181', verificada, metodos_disponiveis: ['CERTIFICADO', 'EMAIL_RECEITA', 'MANUAL'] } };
-      if (r.url === '/v1/verificacao-cnpj/email') return { status: 202, json: { enviado_para: 'ti***@empresa.test', expira_em_minutos: 30 } };
-      if (r.url === '/v1/verificacao-cnpj/email/confirmar') { verificada = true; return { json: { verificada: true, metodo: 'EMAIL_RECEITA' } }; }
+      if (r.url === '/v1/cobranca') return { json: cobranca };
       if (r.url === '/v1/cobranca/teto') return { json: { teto_centavos: 5000 } };
       return undefined;
     });
     renderAt('/portal/cobranca');
     expect(await screen.findByText(/cálculos e auditorias estão bloqueados/)).toBeInTheDocument();
-
-    await userEvent.click(await screen.findByRole('button', { name: 'Enviar código' }));
-    await userEvent.type(await screen.findByLabelText(/Código enviado para ti\*\*\*@empresa.test/), '123456');
-    await userEvent.click(screen.getByRole('button', { name: 'Confirmar código' }));
-    expect(await screen.findByText('verificada')).toBeInTheDocument();
-    expect(calls.find((c) => c.url === '/v1/verificacao-cnpj/email/confirmar')!.body).toEqual({ codigo: '123456' });
-
+    expect(screen.getByRole('link', { name: 'Verificar a empresa' })).toHaveAttribute('href', '/portal/empresa');
     const teto = screen.getByLabelText(/Teto mensal de excedente/);
     await userEvent.clear(teto);
     await userEvent.type(teto, '50,00');
     await userEvent.click(screen.getByRole('button', { name: 'Salvar teto' }));
     await waitFor(() => expect(calls.find((c) => c.url === '/v1/cobranca/teto')?.body).toEqual({ teto_centavos: 5000 }));
+  });
+
+  it('empresa: o fiscal verifica pelo código no e-mail do cadastro da Receita (D-R10/D-R25)', async () => {
+    let verificada = false;
+    mockApi((r) => {
+      if (r.url === '/v1/conta/sessao') return { json: { ...sessaoOk, papel: 'fiscal', escopos: ['cnpjs:manage', 'dfe:manage', 'simulacao:write', 'auditoria:write'] } };
+      if (r.url === '/v1/me') return { json: me };
+      if (r.url === '/v1/verificacao-cnpj') return { json: { cnpj: '11222333000181', verificada, verificada_em: verificada ? '2026-11-20T10:00:00Z' : null, metodo: verificada ? 'EMAIL_RECEITA' : null, metodos_disponiveis: ['CERTIFICADO', 'EMAIL_RECEITA', 'MANUAL'] } };
+      if (r.url === '/v1/verificacao-cnpj/email') return { status: 202, json: { enviado_para: 'ti***@empresa.test', expira_em_minutos: 30 } };
+      if (r.url === '/v1/verificacao-cnpj/email/confirmar') { verificada = true; return { json: { verificada: true, metodo: 'EMAIL_RECEITA' } }; }
+      return undefined;
+    });
+    renderAt('/portal/empresa');
+    expect(await screen.findByRole('link', { name: 'Dados e verificação' })).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole('button', { name: 'Enviar código' }));
+    await userEvent.type(await screen.findByLabelText(/Código enviado para ti\*\*\*@empresa.test/), '123456');
+    await userEvent.click(screen.getByRole('button', { name: 'Confirmar código' }));
+    expect(await screen.findByText('verificada')).toBeInTheDocument();
+    expect(calls.find((c) => c.url === '/v1/verificacao-cnpj/email/confirmar')!.body).toEqual({ codigo: '123456' });
+    expect(screen.queryByRole('link', { name: 'Plano e cobrança' })).toBeNull();
+  });
+
+  it('rota fora do papel explica em vez de abrir a tela', async () => {
+    mockApi((r) => {
+      if (r.url === '/v1/conta/sessao') return { json: { ...sessaoOk, papel: 'finance', escopos: ['usage:read', 'billing:manage'] } };
+      if (r.url === '/v1/me') return { json: me };
+      return undefined;
+    });
+    renderAt('/portal/api-keys');
+    expect(await screen.findByRole('heading', { name: 'Sem acesso a esta área' })).toBeInTheDocument();
+    expect(calls.some((c) => c.url === '/v1/api-keys')).toBe(false);
+  });
+
+  it('simulação: município pelo nome, data de hoje, comparação com 2027 e selo de não oficial', async () => {
+    mockApi((r) => {
+      if (r.url === '/v1/conta/sessao') return { json: sessaoOk };
+      if (r.url === '/v1/me') return { json: me };
+      if (r.url.startsWith('/v1/publico/municipios')) return { json: [{ codigo: 3304557, nome: 'Rio de Janeiro', uf: 'RJ' }] };
+      if (r.url === '/v1/calculo/simular') {
+        const d = (r.body as { data_fato_gerador: string }).data_fato_gerador;
+        const cbs = d.startsWith('2027') ? 112 : 9;
+        return { json: { simulation_id: 's', regime_calculo: 'REGULAR', param_snapshot_id: 1, oficial: true, avisos: [{ codigo: 'ALIQUOTA_PROVISORIA', mensagem: 'CBS provisória.' }],
+          totais: { valor_base_total: 1000, cbs_valor: cbs, ibs_uf_valor: 1, ibs_mun_valor: 0, ibs_total_valor: 1, imposto_seletivo_valor: 0 } } };
+      }
+      return undefined;
+    });
+    renderAt('/portal/simular');
+    const campo = await screen.findByLabelText('Município de incidência');
+    await userEvent.clear(campo);
+    await userEvent.type(campo, 'rio de');
+    await userEvent.click(await screen.findByRole('option', { name: /Rio de Janeiro/ }));
+    const data = screen.getByLabelText(/Data e hora do fato gerador/) as HTMLInputElement;
+    expect(data.value.slice(0, 4)).toBe(String(new Date().getFullYear()));
+    await userEvent.clear(data);
+    await userEvent.type(data, '2026-08-10T10:00');
+    await userEvent.click(screen.getByRole('button', { name: 'Simular' }));
+    expect(await screen.findByText('cálculo oficial')).toBeInTheDocument();
+    expect(calls.find((c) => c.url === '/v1/calculo/simular')!.body).toMatchObject({ municipio_ibge: 3304557, uf: 'RJ' });
+    await userEvent.click(screen.getByRole('button', { name: /Comparar com a mesma operação em 2027/ }));
+    expect(await screen.findByRole('columnheader', { name: 'Em 2027' })).toBeInTheDocument();
+    expect(screen.getAllByText(/CBS provisória\./).length).toBeGreaterThan(0);
   });
 
   it('conta sem empresa vê como pedir convite ou contestar a titularidade com o e-CNPJ', async () => {

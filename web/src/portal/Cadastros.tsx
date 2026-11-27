@@ -81,6 +81,43 @@ interface Cert { cnpj: string; thumbprint: string; titular: string; vence_em: st
 interface DfeStatus {
   cnpj: string; ativo: boolean; ult_nsu: number; max_nsu: number | null; proxima_consulta: string; ultimo_cstat: string | null;
   ultima_consulta: string | null; ultimo_656: string | null; manifestar_ciencia: boolean; documentos: Record<string, number>;
+  saude?: { situacao: string; ok: boolean; mensagem: string; certificado_vence_em_dias: number | null };
+}
+
+interface TesteConexao { resultado: 'OK' | 'ATENCAO' | 'FALHA'; verificacoes: { item: string; situacao: 'OK' | 'ATENCAO' | 'FALHA'; detalhe: string }[]; testado_em: string }
+
+const SAUDE: Record<string, string> = {
+  FUNCIONANDO: 'funcionando', AGUARDANDO: 'aguardando a 1ª consulta', PARADO: 'parada', COM_PROBLEMA: 'com problema',
+  DESLIGADO: 'desligada', SEM_CERTIFICADO: 'sem certificado', CERTIFICADO_VENCIDO: 'certificado vencido',
+};
+const TOM = { OK: 'ok', ATENCAO: 'warn', FALHA: 'bad' } as const;
+
+/** D-R37: confere o certificado guardado e o aceite pela SEFAZ, sem gastar a cota de consultas. */
+function TestarConexao({ cnpj: alvo, disabled }: { cnpj: string; disabled: boolean }) {
+  const [res, setRes] = useState<TesteConexao>();
+  const { busy, error, run } = useAction();
+  return (
+    <div className="stack" style={{ marginTop: 12 }}>
+      <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+        <button type="button" className="secondary" disabled={busy || disabled}
+          onClick={async () => { const r = await run(() => portal<TesteConexao>(`/v1/cnpjs/${alvo}/certificado/testar`, { method: 'POST' })); if (r) setRes(r); }}>
+          {busy ? 'Testando…' : 'Testar conexão'}
+        </button>
+        <span className="muted small">Confere o certificado e a conexão com a SEFAZ sem fazer consulta (não gasta a cota).</span>
+      </div>
+      <Alert>{error}</Alert>
+      {res && (
+        <div aria-label="Resultado do teste de conexão" role="status">
+          <p><Badge tone={TOM[res.resultado]}>{res.resultado === 'OK' ? 'tudo certo' : res.resultado === 'ATENCAO' ? 'funciona, com atenção' : 'não está funcionando'}</Badge></p>
+          <ul className="help-list">
+            {res.verificacoes.map((v) => (
+              <li key={v.item}><Badge tone={TOM[v.situacao]}>{v.situacao === 'OK' ? 'ok' : v.situacao === 'ATENCAO' ? 'atenção' : 'falha'}</Badge> <strong>{v.item}:</strong> {v.detalhe}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
 }
 
 async function optional<T>(p: Promise<T>): Promise<T | null> {
@@ -138,12 +175,14 @@ export function Dfe() {
                 <p><strong>{cert.data.titular}</strong></p>
                 <p className="muted mono">{cert.data.thumbprint}</p>
                 <p>Vence em {dateTime(cert.data.vence_em)}</p>
+                <TestarConexao cnpj={selected} disabled={false} />
                 <ConfirmButton label="Remover certificado" title="Remover o certificado A1?" confirmLabel="Remover certificado" typeToConfirm="REMOVER"
                   impact="A captura automática de notas (DF-e) deste CNPJ para na próxima consulta. O PFX e a senha são apagados e não podem ser recuperados — para voltar, envie o arquivo de novo."
                   onConfirm={() => void run(() => portal(`/v1/cnpjs/${selected}/certificado`, { method: 'DELETE' })).then(() => cert.reload())} />
               </>
             ) : (!cert.loading && <p className="muted">Nenhum certificado enviado.</p>)}
             <form className="stack" onSubmit={upload} style={{ marginTop: 12 }}>
+              <p className="muted small">Ao enviar, trocar ou remover o certificado, o dono e os administradores recebem um aviso de segurança.</p>
               <Field label="Arquivo .pfx" hint="O PFX e a senha são guardados cifrados e nunca voltam pela API."><input type="file" accept=".pfx,.p12" onChange={(e) => setPfx(e.target.files?.[0])} /></Field>
               <Field label="Senha do certificado"><input type="password" autoComplete="off" value={senha} onChange={(e) => setSenha(e.target.value)} /></Field>
               <button type="submit" disabled={busy || !pfx || !senha}>{cert.data ? 'Substituir' : 'Enviar'}</button>
@@ -154,15 +193,20 @@ export function Dfe() {
             <Alert>{status.error}</Alert>
             {status.data ? (
               <>
+                {status.data.saude && (
+                  <Alert kind={status.data.saude.ok ? 'success' : 'warning'}>
+                    <strong>Captura {SAUDE[status.data.saude.situacao] ?? status.data.saude.situacao}.</strong> {status.data.saude.mensagem}
+                  </Alert>
+                )}
                 <div className="row">
                   <Badge tone={status.data.ativo ? 'ok' : 'neutral'}>{status.data.ativo ? 'ligada' : 'desligada'}</Badge>
-                  {status.data.ultimo_cstat && <Badge tone={status.data.ultimo_cstat === '656' ? 'bad' : 'info'}>cStat {status.data.ultimo_cstat}</Badge>}
+                  {status.data.ultimo_cstat && <Badge tone={status.data.ultimo_cstat === '656' ? 'bad' : 'info'}>{CSTAT[status.data.ultimo_cstat] ?? `retorno ${status.data.ultimo_cstat} da SEFAZ`}</Badge>}
                 </div>
                 <Table head={['', '']}>
-                  <tr><td>Último NSU</td><td className="num">{status.data.ult_nsu} / {status.data.max_nsu ?? '—'}</td></tr>
+                  <tr><td>Notas lidas na SEFAZ (NSU)</td><td className="num">{status.data.ult_nsu} de {status.data.max_nsu ?? '—'}</td></tr>
                   <tr><td>Última consulta</td><td>{dateTime(status.data.ultima_consulta)}</td></tr>
                   <tr><td>Próxima consulta</td><td>{dateTime(status.data.proxima_consulta)}</td></tr>
-                  <tr><td>Último 656</td><td>{dateTime(status.data.ultimo_656)}</td></tr>
+                  <tr><td>Último bloqueio por consumo indevido</td><td>{dateTime(status.data.ultimo_656)}</td></tr>
                 </Table>
                 <div className="row" style={{ marginTop: 8 }}>
                   {Object.entries(status.data.documentos).map(([k, v]) => <Badge key={k} tone={statusTone(k)}>{statusLabel(k)}: {v}</Badge>)}
@@ -170,7 +214,11 @@ export function Dfe() {
               </>
             ) : (!status.loading && <p className="muted">Captura ainda não configurada.</p>)}
             <div className="stack" style={{ marginTop: 12 }}>
-              <Field label="UF do interessado (código IBGE)"><input type="number" min={11} max={53} value={uf} onChange={(e) => setUf(Number(e.target.value))} /></Field>
+              <Field label="UF da empresa" hint="Estado do CNPJ que recebe as notas.">
+                <select value={uf} onChange={(e) => setUf(Number(e.target.value))}>
+                  {Object.entries(UF_CODIGO).map(([sigla, codigo]) => <option key={sigla} value={codigo}>{sigla}</option>)}
+                </select>
+              </Field>
               <label className="checkbox"><input type="checkbox" checked={ciencia} onChange={(e) => setCiencia(e.target.checked)} /> Manifestar Ciência da Operação automaticamente</label>
               <button type="button" disabled={busy || !cert.data} onClick={() => void sync()}>{status.data ? 'Salvar configuração' : 'Ligar captura'}</button>
               {!cert.data && <span className="muted">Envie o certificado antes de ligar a captura.</span>}
@@ -241,3 +289,16 @@ export function Titulares() {
     </>
   );
 }
+
+/** Siglas → código IBGE da UF (a SEFAZ pede o código; o cliente escolhe a sigla). */
+const UF_CODIGO: Record<string, number> = {
+  AC: 12, AL: 27, AM: 13, AP: 16, BA: 29, CE: 23, DF: 53, ES: 32, GO: 52, MA: 21, MG: 31, MS: 50, MT: 51, PA: 15,
+  PB: 25, PE: 26, PI: 22, PR: 41, RJ: 33, RN: 24, RO: 11, RR: 14, RS: 43, SC: 42, SE: 28, SP: 35, TO: 17,
+};
+
+/** Retornos da distribuição DF-e mais comuns, em linguagem de negócio. */
+const CSTAT: Record<string, string> = {
+  '137': 'em dia: nenhuma nota nova',
+  '138': 'notas novas encontradas',
+  '656': 'SEFAZ bloqueou por 1 h (consumo indevido)',
+};

@@ -33,7 +33,7 @@ test('landing e referência da API carregam sem erro nem violação de CSP', asy
   const errors = watchConsole(page, [SESSION_PROBE]);
   await page.goto(PUBLIC + '/');
   await expect(page.getByRole('heading', { level: 1 })).toContainText('IBS, CBS e Imposto Seletivo');
-  await page.getByRole('link', { name: 'Acessar o portal' }).first().click();
+  await page.getByRole('link', { name: 'Entrar' }).first().click();
   await expect(page.getByLabel('E-mail')).toBeVisible();
   expect(errors).toEqual([]);
 
@@ -54,9 +54,9 @@ test('cliente se cadastra, confirma o e-mail, ativa MFA e usa o portal; chave de
   await page.getByRole('button', { name: 'Simular' }).click();
   await expect(page.getByRole('cell', { name: 'CBS' })).toBeVisible({ timeout: 20_000 });
 
-  await page.getByRole('link', { name: 'API keys' }).click();
-  await page.getByLabel('Nome').fill('e2e-erp');
-  await page.getByRole('button', { name: 'Criar' }).click();
+  await page.getByRole('link', { name: 'Credenciais (API e OAuth)' }).click();
+  await page.getByLabel('Nome', { exact: true }).fill('e2e-erp');
+  await page.getByRole('button', { name: 'Criar', exact: true }).click();
   await expect(page.getByRole('dialog', { name: 'Nova API key' })).toBeVisible();
   await page.getByRole('button', { name: 'Já guardei' }).click();
   await expect(page.getByRole('cell', { name: 'e2e-erp' })).toBeVisible();
@@ -90,8 +90,8 @@ test('dono convida pessoa da equipe; convidada cria a conta pelo link e entra co
   await expect(guest.getByText('Conta criada. Entre e configure a verificação em duas etapas.')).toBeVisible();
   await login(guest, PUBLIC, guestEmail, true);
   await expect(guest.getByRole('heading', { name: 'Visão geral', level: 1 })).toBeVisible();
-  await expect(guest.getByRole('link', { name: 'Auditar XML' })).toBeVisible();
-  await expect(guest.getByRole('link', { name: 'API keys' })).toHaveCount(0);   // fiscal não gerencia chaves
+  await expect(guest.getByRole('link', { name: 'Enviar XML' })).toBeVisible();
+  await expect(guest.getByRole('link', { name: 'Credenciais (API e OAuth)' })).toHaveCount(0);   // fiscal não gerencia chaves
   await expect(guest.getByRole('link', { name: 'Equipe', exact: true })).toHaveCount(0);
 
   await owner.reload();
@@ -129,16 +129,25 @@ test('operador recebe convite, define senha, ativa MFA e opera o backoffice', as
 
 test('todas as telas do portal abrem sem erro', async ({ page, request }) => {
   const errors = watchConsole(page, [SESSION_PROBE]);
+  // Nenhuma tela pode estourar o limite de requisições da pessoa (D-R13): 429 aqui é defeito do front.
+  const throttled: string[] = [];
+  page.on('response', (r) => { if (r.status() === 429) throttled.push(new URL(r.url()).pathname); });
   await signupAndLogin(page, request);
   const telas: [string, string][] = [
-    ['Auditar XML', 'Auditar XML'], ['Lotes', 'Lotes'], ['Documentos auditados', 'Documentos auditados'], ['Classificação (NCM/NBS)', 'Classificação tributária'],
-    ['Avisos', 'Avisos'], ['Webhooks', 'Webhooks'], ['CNPJs', 'CNPJs atendidos'],
-    ['DF-e e certificado', 'DF-e e certificado A1'], ['LGPD: titulares', 'LGPD: direitos do titular'], ['Equipe', 'Equipe'], ['Plano e cobrança', 'Plano e cobrança'], ['Visão geral', 'Visão geral'],
+    ['Apuração do mês', 'Apuração do mês'], ['Simular operação', 'Simular'], ['Preço e margem', 'Preço e margem'],
+    ['Enviar XML', 'Auditar XML'], ['Lotes (ZIP)', 'Lotes'], ['Notas auditadas', 'Documentos auditados'], ['Notas de fornecedores (DF-e)', 'DF-e e certificado A1'],
+    ['Alíquotas e exceções', 'Alíquotas e exceções'], ['Classificação (NCM/NBS)', 'Classificação tributária'],
+    ['Credenciais (API e OAuth)', 'API keys'], ['Webhooks', 'Webhooks'], ['Log de chamadas', 'Log de chamadas'],
+    ['Dados e verificação', 'Empresa'], ['CNPJs', 'CNPJs atendidos'], ['LGPD: titulares', 'LGPD: direitos do titular'],
+    ['Equipe', 'Equipe'], ['Plano e cobrança', 'Plano e cobrança'], ['Avisos', 'Avisos'], ['Visão geral', 'Visão geral'],
   ];
   for (const [link, heading] of telas) {
-    await page.getByRole('link', { name: link, exact: true }).click();
+    await page.getByRole('navigation', { name: 'Portal' }).getByRole('link', { name: link, exact: true }).click();
     await expect(page.getByRole('heading', { name: heading, level: 1 })).toBeVisible();
     await expect(page.getByRole('alert')).toHaveCount(0);
+    // Ritmo de pessoa: o limite por pessoa (120/min, rajada 30, D-R13) não é para 19 telas em 6 s.
+    await page.waitForLoadState('networkidle');
+    await page.waitForTimeout(400);
   }
 
   await page.getByRole('link', { name: /Maria/ }).click();
@@ -150,6 +159,7 @@ test('todas as telas do portal abrem sem erro', async ({ page, request }) => {
   await page.getByRole('button', { name: 'Localizar' }).click();
   await expect(page.getByText('0 documento(s)')).toBeVisible();
   expect(errors).toEqual([]);
+  expect(throttled).toEqual([]);
 });
 
 test('primeira auditoria com o XML de exemplo, comparação por item, histórico e classificação', async ({ page, request }) => {
@@ -158,7 +168,7 @@ test('primeira auditoria com o XML de exemplo, comparação por item, histórico
   await expect(page.getByText('Comece por aqui')).toBeVisible();
 
   // XML de exemplo com o CNPJ da própria empresa (D-J06): audita sem o usuário ter uma nota à mão.
-  await page.getByRole('link', { name: 'Auditar XML', exact: true }).click();
+  await page.getByRole('link', { name: 'Enviar XML', exact: true }).click();
   await page.getByRole('button', { name: 'Usar XML de exemplo' }).click();
   await expect(page.getByText(/Exemplo de homologação/)).toBeVisible();
   await page.getByRole('button', { name: 'Auditar', exact: true }).click();
@@ -170,7 +180,7 @@ test('primeira auditoria com o XML de exemplo, comparação por item, histórico
   await page.keyboard.press('Escape');
 
   // Histórico (D-J01): o documento aparece e o detalhe abre.
-  await page.getByRole('link', { name: 'Documentos auditados', exact: true }).click();
+  await page.getByRole('link', { name: 'Notas auditadas', exact: true }).click();
   await expect(page.getByRole('button', { name: /Ver detalhe do documento/ }).first()).toBeVisible();
   await page.getByRole('button', { name: /Ver detalhe do documento/ }).first().click();
   await expect(page.getByRole('dialog', { name: 'Detalhe do documento' })).toBeVisible();
@@ -183,9 +193,9 @@ test('primeira auditoria com o XML de exemplo, comparação por item, histórico
   await expect(page.getByText('Sujeito ao Imposto Seletivo')).toBeVisible();
   await expect(page.getByRole('cell', { name: '000001' }).first()).toBeVisible();
 
-  // Primeiros passos: "Audite uma nota" agora está feito.
+  // Primeiros passos: "Confira uma nota" agora está feito.
   await page.getByRole('link', { name: 'Visão geral', exact: true }).click();
-  await expect(page.locator('.onboarding li.done', { hasText: 'Audite uma nota' })).toBeVisible();
+  await expect(page.locator('.onboarding li.done', { hasText: 'Confira uma nota' })).toBeVisible();
   expect(errors).toEqual([]);
 });
 

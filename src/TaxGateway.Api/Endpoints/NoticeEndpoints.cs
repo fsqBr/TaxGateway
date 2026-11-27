@@ -84,24 +84,33 @@ public static class NoticeEndpoints
                        EXISTS (SELECT 1 FROM api_keys WHERE revoked_at IS NULL),
                        EXISTS (SELECT 1 FROM tenant_webhooks WHERE is_active),
                        (SELECT count(*) FROM user_memberships) > 1 OR EXISTS (SELECT 1 FROM user_invites WHERE used_at IS NULL),
-                       (SELECT plan_code <> 'SANDBOX' FROM tenants)
+                       (SELECT plan_code <> 'SANDBOX' FROM tenants),
+                       (SELECT cnpj_verified_at IS NOT NULL FROM tenants),
+                       EXISTS (SELECT 1 FROM dfe_sync_state WHERE enabled)
                 """);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             await r.ReadAsync(ct);
-            return Enumerable.Range(0, 6).Select(i => !r.IsDBNull(i) && r.GetBoolean(i)).ToArray();
+            return Enumerable.Range(0, 8).Select(i => !r.IsDBNull(i) && r.GetBoolean(i)).ToArray();
         }, http.RequestAborted);
 
         static JsonObject Step(string id, string title, string text, string link, bool done) =>
             new() { ["id"] = id, ["titulo"] = title, ["descricao"] = text, ["link"] = link, ["feito"] = done };
-        var list = new JsonArray
+        // Só os passos que o papel de quem está vendo consegue fazer (D-R25): o financeiro não vê "crie uma chave de API".
+        var scopes = caller.Identity.Scopes;
+        bool Can(string s) => scopes.Contains(s, StringComparer.Ordinal);
+        var all = new (string Scope, JsonObject Step, bool Done)[]
         {
-            Step("simular", "Simule um cálculo", "Veja CBS, IBS e IS de um item com o motor oficial da RFB.", "/portal/simular", steps[0]),
-            Step("auditar", "Audite uma nota", "Envie o XML de uma NF-e autorizada e compare o declarado com o recalculado.", "/portal/auditoria", steps[1]),
-            Step("api_key", "Crie uma chave de API", "Para o seu ERP ou e-commerce chamar o TaxGateway.", "/portal/api-keys", steps[2]),
-            Step("webhook", "Receba resultados por webhook", "Lotes e DF-e avisam seu sistema quando terminam.", "/portal/webhooks", steps[3]),
-            Step("equipe", "Convide sua equipe", "Fiscal, desenvolvimento e financeiro, cada um com o seu papel.", "/portal/equipe", steps[4]),
-            Step("plano", "Escolha um plano", "O Sandbox tem franquia pequena e sem excedente.", "/portal/cobranca", steps[5]),
+            (Scopes.SimulacaoWrite, Step("simular", "Simule um cálculo", "Veja CBS, IBS e IS de um item com o motor oficial da Receita.", "/portal/simular", steps[0]), steps[0]),
+            (Scopes.AuditoriaWrite, Step("auditar", "Confira uma nota", "Envie o XML de uma NF-e autorizada e compare o declarado com o recalculado.", "/portal/auditoria", steps[1]), steps[1]),
+            (Scopes.CnpjsManage, Step("verificar", "Verifique a empresa", "Com o certificado e-CNPJ ou o e-mail do cadastro da Receita. Libera plano pago e a captura de notas.", "/portal/empresa", steps[6]), steps[6]),
+            (Scopes.DfeManage, Step("dfe", "Capture as notas dos fornecedores", "Envie o certificado A1 e ligue a captura automática (DF-e).", "/portal/dfe", steps[7]), steps[7]),
+            (Scopes.KeysManage, Step("api_key", "Crie uma chave de API", "Para o seu ERP ou e-commerce chamar o TaxGateway.", "/portal/api-keys", steps[2]), steps[2]),
+            (Scopes.WebhooksManage, Step("webhook", "Receba resultados por webhook", "Lotes e DF-e avisam seu sistema quando terminam.", "/portal/webhooks", steps[3]), steps[3]),
+            (Scopes.MembrosManage, Step("equipe", "Convide sua equipe", "Fiscal, desenvolvimento e financeiro, cada um com o seu papel.", "/portal/equipe", steps[4]), steps[4]),
+            (Scopes.BillingManage, Step("plano", "Escolha um plano", "O Sandbox tem franquia pequena e sem excedente.", "/portal/cobranca", steps[5]), steps[5]),
         };
-        return Results.Ok(new JsonObject { ["passos"] = list, ["concluidos"] = steps.Count(x => x), ["total"] = steps.Length });
+        var visible = all.Where(x => Can(x.Scope) || (x.Scope == Scopes.CnpjsManage && Can(Scopes.BillingManage))).ToList();
+        var list = new JsonArray([.. visible.Select(x => (JsonNode)x.Step)]);
+        return Results.Ok(new JsonObject { ["passos"] = list, ["concluidos"] = visible.Count(x => x.Done), ["total"] = visible.Count });
     }
 }

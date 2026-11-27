@@ -5,6 +5,7 @@ import BackofficeApp from './backoffice/BackofficeApp';
 import HelpCenter from './help/HelpCenter';
 import { LegalPage } from './pages/Legal';
 import PlanosPage from './pages/Planos';
+import AliquotasPage from './pages/Aliquotas';
 import { RequireSession, SessionProvider } from './auth/session';
 import { ConfirmEmailPage, ForgotPasswordPage, InvitePage, LoginPage, MfaPage, ResetPasswordPage, SignupPage } from './auth/AuthPages';
 import type { Realm } from './lib/api';
@@ -40,6 +41,7 @@ export default function App() {
           <Route path="/ajuda" element={<HelpCenter />} />
           <Route path="/ajuda/:slug" element={<HelpCenter />} />
           <Route path="/planos" element={<PlanosPage />} />
+          <Route path="/aliquotas" element={<AliquotasPage />} />
           <Route path="/termos" element={<LegalPage doc="termos" />} />
           <Route path="/privacidade" element={<LegalPage doc="privacidade" />} />
           <Route path="/cadastro" element={<SessionProvider realm="portal"><SignupPage /></SessionProvider>} />

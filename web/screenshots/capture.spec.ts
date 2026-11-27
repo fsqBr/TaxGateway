@@ -99,7 +99,7 @@ test('capturas do portal com dados de demonstração', async ({ page, request })
   await expect(page.getByText('Consumo dos últimos meses')).toBeVisible();
   await shot(page, 'visao-geral');
 
-  await page.getByRole('link', { name: 'Simular', exact: true }).click();
+  await page.getByRole('link', { name: 'Simular operação', exact: true }).click();
   await page.getByRole('button', { name: 'Simular', exact: true }).click();
   await expect(page.getByRole('cell', { name: 'CBS' })).toBeVisible({ timeout: 30_000 });
   await shot(page, 'simular');
@@ -111,7 +111,8 @@ test('capturas do portal com dados de demonstração', async ({ page, request })
   await shot(page, 'classificacao');
 
   // Auditoria de ENTRADA de uma nota com redução de alíquota que depende de enquadramento → indício R021.
-  await page.getByRole('link', { name: 'Auditar XML', exact: true }).click();
+  await page.getByRole('link', { name: 'Enviar XML', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Auditar XML', level: 1 })).toBeVisible();   // a Classificação também tem campo de arquivo
   await page.locator('input[type=file]').setInputFiles(resolve(CORPUS, 'A-200006-arroz-RJ.xml'));
   await page.getByLabel('Direção').selectOption('INBOUND');
   await page.getByRole('button', { name: 'Auditar', exact: true }).click();
@@ -122,21 +123,23 @@ test('capturas do portal com dados de demonstração', async ({ page, request })
   await shot(page, 'documento-detalhe');
   await page.keyboard.press('Escape');
 
-  await page.getByRole('link', { name: 'Documentos auditados', exact: true }).click();
+  await page.getByRole('link', { name: 'Notas auditadas', exact: true }).click();
   await expect(page.getByRole('button', { name: /Ver detalhe do documento/ }).first()).toBeVisible();
   await shot(page, 'documentos');
 
   for (const [link, heading, name] of [
-    ['Lotes', 'Lotes', 'lotes'], ['API keys', 'API keys', 'api-keys'], ['Webhooks', 'Webhooks', 'webhooks'],
+    ['Lotes (ZIP)', 'Lotes', 'lotes'], ['Credenciais (API e OAuth)', 'API keys', 'api-keys'], ['Webhooks', 'Webhooks', 'webhooks'],
+    ['Apuração do mês', 'Apuração do mês', 'apuracao'], ['Alíquotas e exceções', 'Alíquotas e exceções', 'aliquotas'],
+    ['Dados e verificação', 'Empresa', 'empresa'], ['Log de chamadas', 'Log de chamadas', 'log-chamadas'],
     ['CNPJs', 'CNPJs atendidos', 'cnpjs'], ['Avisos', 'Avisos', 'avisos'], ['Plano e cobrança', 'Plano e cobrança', 'cobranca'],
   ] as const) {
     // O sino muda o rótulo com os não lidos ("Avisos: 2 não lido(s)").
-    await (link === 'Avisos' ? page.getByRole('link', { name: /^Avisos/ }).first() : page.getByRole('link', { name: link, exact: true })).click();
+    await page.getByRole('navigation', { name: 'Portal' }).getByRole('link', { name: link, exact: true }).click();
     await expect(page.getByRole('heading', { name: heading, level: 1 })).toBeVisible();
     await shot(page, name);
   }
 
-  await page.getByRole('link', { name: 'DF-e e certificado', exact: true }).click();
+  await page.getByRole('link', { name: 'Notas de fornecedores (DF-e)', exact: true }).click();
   await page.getByLabel('CNPJ').fill(EMITENTE);
   await page.getByRole('button', { name: 'Abrir' }).click();
   await expect(page.getByText(/Vence em/).first()).toBeVisible();
@@ -147,4 +150,15 @@ test('capturas do portal com dados de demonstração', async ({ page, request })
   await page.getByRole('button', { name: 'Localizar' }).click();
   await expect(page.getByText('0 documento(s)')).toBeVisible();
   await shot(page, 'titulares');
+
+  // Site público: matriz de comparação dos planos (D-R34) e linha do tempo das atualizações fiscais (D-R30).
+  await page.goto(`${UI}/planos`);
+  // O cabeçalho fixo cobriria a tabela (CSSOM: permitido pela CSP, ao contrário de <style> inline).
+  await page.evaluate(() => { const h = document.querySelector<HTMLElement>('.site-header'); if (h) h.style.position = 'static'; });
+  await page.locator('#comparar').scrollIntoViewIfNeeded();
+  await expect(page.getByRole('region', { name: 'Comparação dos planos' })).toBeVisible();
+  await page.locator('#comparar').screenshot({ path: resolve(OUT, 'planos-comparar.jpg'), type: 'jpeg', quality: 84, animations: 'disabled' });
+  await page.goto(`${UI}/aliquotas`);
+  await expect(page.getByRole('list', { name: 'Atualizações fiscais' })).toBeVisible();
+  await page.locator('#atualizacoes').screenshot({ path: resolve(OUT, 'atualizacoes-fiscais.jpg'), type: 'jpeg', quality: 84, animations: 'disabled' });
 });

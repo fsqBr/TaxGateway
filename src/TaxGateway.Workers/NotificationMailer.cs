@@ -40,6 +40,14 @@ public sealed partial class NotificationMailer(NpgsqlDataSource workerDb, IEmail
             await fan.ExecuteScalarAsync(ct).ConfigureAwait(false);
         }
 
+        // D-R30: no dia em que uma alíquota publicada antes começa a valer, novo aviso às contas afetadas.
+        // D-R30/D-R32/D-R37: alíquota que passa a valer hoje, fatura vencendo em até 3 dias, resumo do mês (dias 1 a 3) e captura de DF-e parada.
+        foreach (var job in (string[])["app.notify_rates_effective_today()", "app.notify_invoices_due()", "app.notify_monthly_summary()", "app.notify_dfe_stalled()"])
+        {
+            await using var cmd = workerDb.CreateCommand("SELECT " + job);
+            await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
+        }
+
         var pending = new List<(Guid Id, string Tenant, string Title, string Body, string? Link, string[] To)>();
         await using (var cmd = workerDb.CreateCommand("SELECT id, tenant_name, title, body, link, recipients FROM app.pending_notification_emails(100)"))
         await using (var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false))

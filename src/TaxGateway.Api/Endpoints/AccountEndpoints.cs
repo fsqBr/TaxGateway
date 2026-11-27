@@ -43,6 +43,15 @@ public static class AccountEndpoints
         c.MapDelete("/membros/convites", RevokeInviteAsync);
         c.MapPatch("/membros/{userId:guid}", ChangeRoleAsync);
         c.MapDelete("/membros/{userId:guid}", RemoveMemberAsync);
+        // D-R33: avisos informativos que a pessoa não quer por e-mail (os críticos não podem ser desligados).
+        c.MapGet("/preferencias-email", async (HttpContext h, AccountService a, SessionCookies k) =>
+            Results.Ok(EmailPrefs(await a.GetEmailOptOutAsync(await Require(h, a, k, "customer"), h.RequestAborted))));
+        c.MapPut("/preferencias-email", async (HttpContext h, AccountService a, SessionCookies k) =>
+        {
+            var body = await Body(h);
+            var off = body["desligados"] is JsonArray arr ? arr.Select(x => x?.GetValue<string>() ?? "").ToArray() : [];
+            return Results.Ok(EmailPrefs(await a.SetEmailOptOutAsync(await Require(h, a, k, "customer"), off, h.RequestAborted)));
+        });
 
         if (includeOperators)
         {
@@ -240,10 +249,16 @@ public static class AccountEndpoints
 
     private static async Task<IResult> RemoveMemberAsync(HttpContext h, Guid userId, AccountService a, SessionCookies k)
     {
-        var (s, tenant, _, _) = await RequireAdmin(h, a, k);
-        await a.RemoveMemberAsync(tenant, s, userId, Ip(h), h.RequestAborted);
+        var (s, tenant, role, _) = await RequireAdmin(h, a, k);
+        await a.RemoveMemberAsync(tenant, s, userId, Ip(h), h.RequestAborted, role);
         return Results.NoContent();
     }
+
+    private static JsonObject EmailPrefs(IReadOnlyCollection<string> off) => new()
+    {
+        ["desligados"] = new JsonArray([.. off.Select(x => (JsonNode)x)]),
+        ["opcionais"] = new JsonArray([.. AccountService.OptionalNotices.Select(x => (JsonNode)new JsonObject { ["tipo"] = x.Key, ["descricao"] = x.Value })]),
+    };
 
     // ---------------------------------------------------------------------------------------------------- apoio
 

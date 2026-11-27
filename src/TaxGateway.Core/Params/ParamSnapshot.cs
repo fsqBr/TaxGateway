@@ -3,7 +3,7 @@ namespace TaxGateway.Core.Params;
 /// <summary>Limites efetivos de um tenant: plano + <c>limits_override</c> (SDD §5.1).</summary>
 public sealed record PlanLimits(string PlanCode, int Rpm, int Burst, int Concurrency, int BatchMaxDocs = 500, long BatchMaxBytes = 15 * 1024 * 1024, string QueuePriority = "normal",
     bool BillSchemaErrors = true, int? MaxUsers = null, long IncludedDocs = 0, long IncludedSimulations = 0, bool HardQuota = false, bool DfeEnabled = true,
-    long OverageDocMillicents = 0, long OverageSimMillicents = 0)
+    long OverageDocMillicents = 0, long OverageSimMillicents = 0, int? PerCnpjRpm = null)
 {
     /// <summary>0 realtime · 1 high · 2 normal · 3 low (fila de lotes, §5.1).</summary>
     public short PriorityRank => QueuePriority.ToLowerInvariant() switch { "realtime" => 0, "high" => 1, "low" => 3, _ => 2 };

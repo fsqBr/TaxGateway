@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { Logo } from '../components/Logo';
+import { SiteFooter, SiteHeader } from './SiteChrome';
 
 // Termos de Uso e Política de Privacidade (UX A5, D-U10). VERSÃO PRELIMINAR: o texto é uma base honesta do que o
 // sistema faz (verificável no código e em docs/lgpd/), mas precisa de revisão jurídica antes do lançamento comercial.
@@ -37,7 +37,7 @@ export function LegalPage({ doc }: { doc: keyof typeof DOCS }) {
   useEffect(() => { document.title = `${d.title} · TaxGateway`; }, [d.title]);
   return (
     <div className="site help">
-      <header className="site-header"><div className="inner"><Link to="/" aria-label="Início"><Logo size={30} /></Link><nav className="site-nav"><Link to="/ajuda">Ajuda</Link><Link className="button" to="/portal">Entrar</Link></nav></div></header>
+      <SiteHeader />
       <main id="conteudo" className="help-layout" style={{ gridTemplateColumns: '1fr' }}>
         <article className="help-article">
           <div className="eyebrow">Documento legal</div>
@@ -49,6 +49,7 @@ export function LegalPage({ doc }: { doc: keyof typeof DOCS }) {
           <p className="muted small">Veja também: <Link to={doc === 'termos' ? '/privacidade' : '/termos'}>{doc === 'termos' ? 'Política de Privacidade' : 'Termos de Uso'}</Link>.</p>
         </article>
       </main>
+      <SiteFooter />
     </div>
   );
 }

@@ -7,6 +7,59 @@ Todas as mudanças relevantes para quem usa o TaxGateway. A versão em uso apare
 > Este arquivo é a fonte do aviso de novidades exibido no portal e da página `/ajuda/novidades`. Ao lançar uma versão:
 > atualize `VERSION`, `web/package.json` e o `Chart.yaml`, e acrescente a seção aqui (o CI confere que as versões batem).
 
+## [0.14.0] - 2026-11-27
+
+### Novidades
+- **Alíquotas sincronizadas com a Receita Federal**: o TaxGateway confere a base oficial da calculadora todos os dias e aplica sozinho o que a Receita publicar, respeitando a data em que cada alíquota passa a valer. Quem é afetado recebe aviso quando a mudança é publicada e de novo no dia em que ela começa a valer.
+- **Atualizações fiscais**: linha do tempo das alíquotas publicadas e das versões do motor oficial, no site (/aliquotas) e no portal (Alíquotas e exceções).
+- **Aviso de motor oficial atualizado**, dizendo se o cálculo mudou nos casos de referência.
+- **E-mails do ciclo de vida**: boas-vindas, assinatura ativa, troca de plano, cancelamento, fatura emitida, fatura perto do vencimento, pagamento recebido, renovação próxima e resumo do mês.
+- **Segurança**: aviso quando uma chave de API ou um cliente OAuth é criado e quando alguém entra na sua conta por um navegador novo.
+- **Certificado A1 mais seguro e fácil de acompanhar**: aviso de segurança quando o certificado é enviado, trocado ou removido; botão **Testar conexão** (confere a senha, a validade e se a SEFAZ aceita o certificado, sem gastar consultas); situação da captura em português ("funcionando", "parada"...) e aviso automático se a captura parar.
+- **Preferências de e-mail** em Minha conta: desligue os avisos informativos (os de cobrança, acesso e segurança sempre chegam).
+- **Comparação dos planos** lado a lado, no site e em Plano e cobrança, e um resumo dos planos na página inicial.
+
+### Correções
+- A tela de Uso não mostra mais "Muitas requisições" ao carregar o histórico de 6 meses.
+
+### Mudanças na API
+- Nova rota pública `GET /v1/publico/atualizacoes-fiscais` (anônima).
+- Nova rota `POST /v1/cnpjs/{cnpj}/certificado/testar`; `GET /v1/cnpjs/{cnpj}/dfe/status` traz `saude` (situação e mensagem).
+- Novos tipos em `GET /v1/avisos`: `MOTOR_ATUALIZADO`, `ASSINATURA_ATIVA`, `PLANO_ALTERADO`, `ASSINATURA_CANCELADA`, `FATURA_EMITIDA`, `FATURA_VENCENDO`, `PAGAMENTO_RECEBIDO`, `RENOVACAO_PROXIMA`, `RESUMO_MENSAL`, `SEGURANCA` e `DFE_PARADO`.
+- Linhas do catálogo vindas da Receita aparecem com fonte `BUNDLE_RFB` e ato "Base oficial da calculadora da Receita Federal (bundle …)".
+
+## [0.13.0] - 2026-11-27
+
+### Novidades
+- **Apuração do mês**: débitos das saídas, créditos das entradas e saldo estimado de IBS/CBS a partir das notas auditadas, por município e por classificação; fornecedores ordenados pelo crédito em risco; exportação CSV para o contador.
+- **Alíquotas e exceções**: consulta das alíquotas de qualquer município numa data, com origem e ato legal (também no site, em /aliquotas); exceções do contribuinte (liminar, regime especial, benefício) com documento e aprovação de outra pessoa, mostradas ao lado do cálculo oficial.
+- **Auditoria mais transparente**: mostra a alíquota e o ato legal usados em cada tributo, avisa quando a alíquota é provisória e confere o Imposto Seletivo pelo produto.
+- **Reprocessamento automático** das auditorias afetadas quando uma alíquota oficial muda com efeito retroativo, sem custo.
+- Simulação com o município escolhido pelo nome, data de hoje e comparação com 2027; preço e margem com a reforma; classificação de produtos em massa por CSV; dossiê da nota para fiscalização.
+- **Para quem integra**: clientes OAuth criados no portal e log das chamadas da API (30 dias).
+- Portal reorganizado por tarefa (Apurar, Conferir notas, Consultas, Integrar, Empresa, Conta); verificação da empresa em "Empresa".
+
+### Melhorias
+- Cada limite do plano vale em todos os caminhos: lotes e captura de DF-e respeitam a franquia, o teto e o pagamento em dia.
+- Limites de requisição: as pessoas no portal têm limite próprio (o ERP não trava o portal); lote conta como 10 requisições; no OEM, cada CNPJ atendido tem o seu limite.
+- Avisos de mudança de alíquota só para quem tem notas no estado ou município alterado.
+
+### Correções
+- Suspensão de conta e revogação de cliente OAuth passam a valer a partir do banco (não só do cache).
+- Eventos da Stripe com falha temporária são tentados de novo nos ciclos seguintes (antes eram descartados de uma vez).
+- Erros do provedor de pagamento mostram uma mensagem clara em vez de "erro interno"; JSON malformado responde 400.
+- Simulações não são mais descartadas em silêncio sob carga muito alta.
+- Portal: o aviso "sua sessão terminou" aparece; a verificação em duas etapas não entra mais em laço; downloads com erro mostram a mensagem.
+
+### Mudanças na API
+- Captura de DF-e só nos planos que a incluem (Profissional em diante): `403 ERR_PLANO_SEM_DFE`.
+- Lote que não cabe na franquia/teto é recusado no envio: `402` com quantos documentos restam.
+- Sandbox: 1 CNPJ (`402 ERR_LIMITE_CNPJS` ao cadastrar outro).
+- `POST /v1/calculo/simular` traz `oficial` (false quando a alíquota vem do cliente) e `cenario_ajustado` (exceções); avisos `ALIQUOTA_INFORMADA_PELO_CLIENTE` e `EXCECAO_DO_CONTRIBUINTE`.
+- `POST /v1/auditoria/xml` traz `aliquotas_aplicadas`; regra nova **R014** (IS declarado ≠ catálogo); avisos `ALIQUOTA_PROVISORIA`, `IS_NAO_CONFERIDO` e `EXCECAO_DO_CONTRIBUINTE`.
+- Novas rotas: `/v1/apuracao`, `/v1/apuracao/fornecedores`, `/v1/apuracao/exportar`, `/v1/oauth-clients`, `/v1/logs`, `/v1/publico/municipios`, `/v1/publico/aliquotas`, `/v1/publico/aliquotas/tabela`.
+- `RateLimit-Policy` informa a rajada (`"burst"`); novos números por plano (Sandbox 60/min, Essencial 300, Profissional 1.200, Escritório 2.000, OEM 3.000).
+
 ## [0.12.0] - 2026-11-26
 
 ### Novidades

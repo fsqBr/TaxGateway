@@ -550,9 +550,9 @@ public sealed partial class DfeWorker(DfeSyncService sync, CertificateExpiryServ
                     lastExpiry = DateTimeOffset.UtcNow;
                 }
             }
-            catch (Exception ex) when (ex is NpgsqlException or InvalidOperationException)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                LogFailed(log, ex);
+                LogFailed(log, ex);   // KMS/S3/cripto/motor: registra e segue no próximo ciclo (antes parava o host de workers)
             }
         }
         while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false));

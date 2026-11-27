@@ -15,7 +15,8 @@ public sealed record RateRow(
     DateOnly? ValidTo,                  // exclusivo
     string AtoLegal,
     string Fonte,
-    bool Provisoria);
+    bool Provisoria,
+    string? Produto = null);            // só IS (D-R17): "NCM:<prefixo>" ou "CCLASS:<cClassTrib>"
 
 /// <summary>Alíquota resolvida para (tributo, ente, data), com rastreabilidade (SDD §8.5).</summary>
 public sealed record ResolvedRate(decimal Aliquota, RateRow Referencia, RateRow? Propria)
@@ -31,13 +32,13 @@ public sealed record ResolvedRate(decimal Aliquota, RateRow Referencia, RateRow?
 /// </summary>
 public sealed class RateCatalog
 {
-    private readonly Dictionary<(Tributo, string), RateRow[]> _byKey;
+    private readonly Dictionary<(Tributo, string, string), RateRow[]> _byKey;
 
     public RateCatalog(IEnumerable<RateRow> rows)
     {
         ArgumentNullException.ThrowIfNull(rows);
         _byKey = rows
-            .GroupBy(r => (r.Tributo, r.EnteCodigo ?? ""))
+            .GroupBy(r => (r.Tributo, r.EnteCodigo ?? "", r.Produto ?? ""))
             .ToDictionary(g => g.Key, g => ValidateNoOverlap(g.OrderBy(r => r.ValidFrom).ToArray()));
         Count = _byKey.Values.Sum(v => v.Length);
     }
@@ -53,7 +54,7 @@ public sealed class RateCatalog
     /// </summary>
     public ResolvedRate? Resolve(Tributo tributo, int municipioIbge, DateOnly data)
     {
-        var referencia = Find(tributo, "", data);
+        var referencia = Find(tributo, "", "", data);
         if (referencia is null)
         {
             return null;
@@ -65,7 +66,7 @@ public sealed class RateCatalog
             Tributo.IbsMun => municipioIbge.ToString("D7", System.Globalization.CultureInfo.InvariantCulture),
             _ => null,
         };
-        var propria = ente is null ? null : Find(tributo, ente, data);
+        var propria = ente is null ? null : Find(tributo, ente, "", data);
         if (propria is null)
         {
             return new ResolvedRate(referencia.Aliquota, referencia, null);
@@ -81,9 +82,65 @@ public sealed class RateCatalog
         return new ResolvedRate(valor, referencia, propria);
     }
 
-    private RateRow? Find(Tributo tributo, string ente, DateOnly data)
+    /// <summary>
+    /// Imposto Seletivo do produto na data (D-R17): primeiro pelo cClassTrib exato, depois pelo prefixo de NCM mais
+    /// longo (8 a 2 dígitos). null = o catálogo não tem IS para o produto (a auditoria avisa que não conferiu).
+    /// </summary>
+    public RateRow? ResolveIs(string? ncm, string? cClassTrib, DateOnly data)
     {
-        if (!_byKey.TryGetValue((tributo, ente), out var rows))
+        if (!string.IsNullOrEmpty(cClassTrib) && Find(Tributo.Is, "", $"CCLASS:{cClassTrib}", data) is { } byClass)
+        {
+            return byClass;
+        }
+
+        var digits = new string((ncm ?? "").Where(char.IsAsciiDigit).ToArray());
+        for (var len = Math.Min(8, digits.Length); len >= 2; len--)
+        {
+            if (Find(Tributo.Is, "", $"NCM:{digits[..len]}", data) is { } byNcm)
+            {
+                return byNcm;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// D-R22: até quando a referência nacional do tributo está coberta sem buraco a partir de <paramref name="from"/>
+    /// (data exclusiva do fim). null = sem alíquota já em <paramref name="from"/>; <see cref="DateOnly.MaxValue"/> = sem fim.
+    /// </summary>
+    public DateOnly? CoveredUntil(Tributo tributo, DateOnly from)
+    {
+        var day = from;
+        for (var guard = 0; guard < 1000; guard++)
+        {
+            var row = Find(tributo, "", "", day);
+            if (row is null)
+            {
+                return day == from ? null : day;
+            }
+
+            if (row.ValidTo is not { } to)
+            {
+                return DateOnly.MaxValue;
+            }
+
+            day = to;
+        }
+
+        return day;
+    }
+
+    /// <summary>Linhas vigentes na data, para a consulta pública de alíquotas (D-R21).</summary>
+    public IEnumerable<RateRow> ActiveOn(DateOnly data) =>
+        _byKey.Values.Select(rows => rows.LastOrDefault(r => r.ValidFrom <= data && (r.ValidTo is null || data < r.ValidTo))).OfType<RateRow>();
+
+    /// <summary>Todas as linhas (histórico vigente e futuro), para a tabela pública.</summary>
+    public IEnumerable<RateRow> All => _byKey.Values.SelectMany(v => v);
+
+    private RateRow? Find(Tributo tributo, string ente, string produto, DateOnly data)
+    {
+        if (!_byKey.TryGetValue((tributo, ente, produto), out var rows))
         {
             return null;
         }

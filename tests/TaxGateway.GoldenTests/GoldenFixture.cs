@@ -153,8 +153,13 @@ public sealed class GoldenFixture : IAsyncLifetime
         });
         var operatorHash = Convert.ToHexStringLower(System.Security.Cryptography.HMACSHA256.HashData(
             Convert.FromBase64String(Pepper), System.Text.Encoding.UTF8.GetBytes(OperatorKey)));
+        // SEFAZ simulada (Fase 9): a API (teste de conexão do A1) e os workers apontam para ela.
+        Sefaz = new SefazSimulator(WebhookTls, Clock);
         var settings = new Dictionary<string, string?>
         {
+            ["Dfe:DistUrl"] = Sefaz.DistUrl,
+            ["Dfe:EventoUrl"] = Sefaz.EventoUrl,
+            ["Dfe:TestTrustedServerThumbprint"] = WebhookTls.Thumbprint,
             ["ConnectionStrings:App"] = AppConnection,
             ["ConnectionStrings:Admin"] = For("tg_admin"),
             ["ConnectionStrings:Valkey"] = _valkey.GetConnectionString(),
@@ -218,13 +223,10 @@ public sealed class GoldenFixture : IAsyncLifetime
         // Workers em processo (relay do outbox, webhooks, lotes), com os roles tg_worker e tg_relay.
         // SEFAZ simulada (Fase 9): os workers apontam para ela; o laço automático fica desligado e os testes chamam
         // DfeSyncService.RunOnceAsync com o relógio controlado.
-        Sefaz = new SefazSimulator(WebhookTls, Clock);
         var workerSettings = new Dictionary<string, string?>(settings)
         {
-            ["Dfe:DistUrl"] = Sefaz.DistUrl,
-            ["Dfe:EventoUrl"] = Sefaz.EventoUrl,
-            ["Dfe:TestTrustedServerThumbprint"] = WebhookTls.Thumbprint,
             ["Dfe:WorkerEnabled"] = "false",
+            ["Workers:RateSync"] = "false",   // D-R30: os testes chamam o RateSyncService com fonte controlada
             ["ConnectionStrings:Worker"] = For("tg_worker"),
             ["ConnectionStrings:Relay"] = For("tg_relay"),
         };
@@ -290,11 +292,11 @@ public sealed class GoldenFixture : IAsyncLifetime
         });
 
     /// <summary>Cria tenant OEM e devolve (tenant_id, api_key).</summary>
-    public async Task<(Guid Tenant, string ApiKey)> CreateTenantWithIdAsync(string name, string cnpj, bool autoProvision = true)
+    public async Task<(Guid Tenant, string ApiKey)> CreateTenantWithIdAsync(string name, string cnpj, bool autoProvision = true, int? retention = null)
     {
         using var create = new HttpRequestMessage(HttpMethod.Post, "/admin/v1/tenants")
         {
-            Content = JsonContent.Create(new JsonObject { ["nome"] = name, ["cnpj_raiz"] = cnpj, ["plano"] = "OEM", ["auto_provisionar_cnpj"] = autoProvision }),
+            Content = JsonContent.Create(new JsonObject { ["nome"] = name, ["cnpj_raiz"] = cnpj, ["plano"] = "OEM", ["auto_provisionar_cnpj"] = autoProvision, ["retencao_xml_dias"] = retention }),
         };
         create.Headers.Add("X-Admin-Key", OperatorKey);
         var resp = await Api.SendAsync(create);

@@ -179,7 +179,16 @@ public interface ISefazDfeClient
     Task<DistResult> DistNsuAsync(X509Certificate2 cert, int cUfAutor, string cnpj, long ultNsu, CancellationToken ct);
 
     Task<EventoResult> CienciaAsync(X509Certificate2 cert, string cnpj, string chave, DateTimeOffset eventTime, CancellationToken ct);
+
+    /// <summary>
+    /// D-R37: abre a conexão segura (mTLS) com o Ambiente Nacional usando o A1 e pede o WSDL — prova que a SEFAZ aceita o
+    /// certificado SEM fazer consulta de distribuição (não gasta a cota de 20/h nem arrisca o bloqueio 656).
+    /// </summary>
+    Task<SefazPing> PingAsync(X509Certificate2 cert, CancellationToken ct);
 }
+
+/// <summary>Resultado do teste de conexão: Code = OK | CERT_RECUSADO | SEFAZ_ERRO | SEFAZ_INDISPONIVEL.</summary>
+public sealed record SefazPing(bool Ok, string Code, string Message);
 
 /// <summary>
 /// Cliente mTLS do Ambiente Nacional: um handler por chamada com o A1 do tenant como certificado cliente (o certificado
@@ -203,20 +212,52 @@ public sealed class SefazDfeClient(IOptions<DfeOptions> options) : ISefazDfeClie
         return DfeProtocol.ParseEvento(body);
     }
 
-    private async Task<string> PostAsync(X509Certificate2 cert, Uri url, string soap, string action, CancellationToken ct)
+    public async Task<SefazPing> PingAsync(X509Certificate2 cert, CancellationToken ct)
     {
         var o = options.Value;
-        using var handler = new SocketsHttpHandler
+        using var handler = Handler(cert);
+        using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(o.TimeoutSeconds) };
+        try
+        {
+            using var resp = await http.GetAsync(new Uri(o.DistUrl + "?wsdl"), ct).ConfigureAwait(false);
+            return resp.StatusCode switch
+            {
+                _ when resp.IsSuccessStatusCode => new SefazPing(true, "OK", "A SEFAZ aceitou o certificado na conexão segura."),
+                System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden =>
+                    new SefazPing(false, "CERT_RECUSADO", $"A SEFAZ recusou o certificado (HTTP {(int)resp.StatusCode})."),
+                _ => new SefazPing(false, "SEFAZ_ERRO", $"A SEFAZ respondeu HTTP {(int)resp.StatusCode}; tente de novo em alguns minutos."),
+            };
+        }
+        catch (HttpRequestException ex) when (ex.InnerException is System.Security.Authentication.AuthenticationException || ex.HttpRequestError == HttpRequestError.SecureConnectionError)
+        {
+            return new SefazPing(false, "CERT_RECUSADO", "A conexão segura com a SEFAZ foi recusada: o certificado não foi aceito.");
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            return new SefazPing(false, "SEFAZ_INDISPONIVEL", "Não foi possível falar com a SEFAZ agora (fora do ar ou sem rede); tente de novo em alguns minutos.");
+        }
+    }
+
+    private SocketsHttpHandler Handler(X509Certificate2 cert)
+    {
+        var handler = new SocketsHttpHandler
         {
             SslOptions = new SslClientAuthenticationOptions { ClientCertificates = [cert] },
             PooledConnectionLifetime = TimeSpan.FromMinutes(1),
         };
-        if (o.TestTrustedServerThumbprint is { Length: > 0 } pin)
+        if (options.Value.TestTrustedServerThumbprint is { Length: > 0 } pin)
         {
             handler.SslOptions.RemoteCertificateValidationCallback = (_, c, _, errors) =>
                 errors == SslPolicyErrors.None || (c is not null && string.Equals(c.GetCertHashString(), pin, StringComparison.OrdinalIgnoreCase));
         }
 
+        return handler;
+    }
+
+    private async Task<string> PostAsync(X509Certificate2 cert, Uri url, string soap, string action, CancellationToken ct)
+    {
+        var o = options.Value;
+        using var handler = Handler(cert);
         using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(o.TimeoutSeconds) };
         using var content = new StringContent(soap, Encoding.UTF8);
         content.Headers.ContentType = MediaTypeHeaderValue.Parse($"application/soap+xml; charset=utf-8; action=\"{action}\"");

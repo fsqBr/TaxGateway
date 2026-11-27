@@ -26,6 +26,9 @@ public sealed class StripeOptions
     public string DocumentsMeterEvent { get; set; } = "taxgateway_documentos";
     public string CnpjsMeterEvent { get; set; } = "taxgateway_cnpjs";
 
+    /// <summary>D-R15: simulações excedentes (antes ficavam fora da assinatura).</summary>
+    public string SimulationsMeterEvent { get; set; } = "taxgateway_simulacoes";
+
     public bool Enabled => SecretKey.Length > 0;
 }
 

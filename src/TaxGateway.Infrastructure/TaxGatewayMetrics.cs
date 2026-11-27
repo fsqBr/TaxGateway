@@ -31,6 +31,27 @@ public static class TaxGatewayMetrics
     /// <summary>Idade (s) da LCR mais antiga no cache deste processo; o alerta dispara acima de 36 h (D-P23).</summary>
     public static Func<double?>? CrlMaxAge { get; set; }
 
+    /// <summary>D-R22: dias de cobertura da alíquota de referência por tributo (a partir de hoje); fonte = snapshot.</summary>
+    public static Func<IEnumerable<(string Tributo, double Dias)>>? RateCoverageDays { get; set; }
+
+    /// <summary>Medidor observável da cobertura do catálogo de alíquotas (alerta abaixo de 90 dias).</summary>
+    public static readonly ObservableGauge<double> RateCoverageGauge = Meter.CreateObservableGauge(
+        "taxgateway_aliquota_cobertura_dias",
+        () => RateCoverageDays?.Invoke().Select(x => new Measurement<double>(x.Dias, new KeyValuePair<string, object?>("tributo", x.Tributo)))
+              ?? Array.Empty<Measurement<double>>());
+
+    /// <summary>D-R22: divergências da última conferência catálogo × motor oficial (0 = de acordo).</summary>
+    public static int? CatalogEngineDivergences { get; set; }
+
+    public static readonly ObservableGauge<int> CatalogEngineGauge = Meter.CreateObservableGauge(
+        "taxgateway_catalogo_divergente_motor", () => CatalogEngineDivergences is int v ? [new Measurement<int>(v)] : Array.Empty<Measurement<int>>());
+
+    /// <summary>D-R30: alíquotas aplicadas pela última sincronização com a base oficial da Receita.</summary>
+    public static int? RateSyncChanges { get; set; }
+
+    public static readonly ObservableGauge<int> RateSyncGauge = Meter.CreateObservableGauge(
+        "taxgateway_sincronizacao_receita_mudancas", () => RateSyncChanges is int v ? [new Measurement<int>(v)] : Array.Empty<Measurement<int>>());
+
     /// <summary>Medidor observável da idade da LCR.</summary>
     public static readonly ObservableGauge<double> CrlAgeGauge = Meter.CreateObservableGauge(
         "taxgateway_crl_max_age_seconds", () => CrlMaxAge?.Invoke() is double v ? [new Measurement<double>(v)] : Array.Empty<Measurement<double>>());

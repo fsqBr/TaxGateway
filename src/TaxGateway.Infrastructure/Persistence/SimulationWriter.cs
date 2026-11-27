@@ -40,7 +40,7 @@ public sealed partial class SimulationWriter(ITenantDb db, ILogger<SimulationWri
     private static readonly Counter<long> Dropped = Meter.CreateCounter<long>("taxgateway_simulation_persist_dropped_total");
 
     private readonly Channel<SimulationRecord> _channel = Channel.CreateBounded<SimulationRecord>(
-        new BoundedChannelOptions(100_000) { SingleReader = true, FullMode = BoundedChannelFullMode.DropWrite });
+        new BoundedChannelOptions(100_000) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });   // Wait + TryWrite = false quando cheia (DropWrite devolvia true e descartava em silêncio)
 
     /// <summary>D-P19: teto também em BYTES na fila (128 MB) — 100 mil registros de 500 itens não cabem num pod de 1 GiB.</summary>
     public const long MaxQueuedBytes = 128L * 1024 * 1024;

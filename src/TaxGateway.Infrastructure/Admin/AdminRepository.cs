@@ -19,7 +19,7 @@ public sealed record NewTenant(string Name, string RootCnpj, string PlanCode, bo
 
 public sealed record RateChangeRow(
     string Tributo, string Tipo, string Esfera, string? EnteCodigo, string? FormaAplicacao, decimal Aliquota,
-    DateOnly ValidFrom, DateOnly? ValidTo, string AtoLegal, string Fonte, bool Provisoria);
+    DateOnly ValidFrom, DateOnly? ValidTo, string AtoLegal, string Fonte, bool Provisoria, string? Produto = null);
 
 public sealed record ParamChange(
     Guid Id, string Domain, string Status, string ProposedBy, string? ApprovedBy, string Justification,
@@ -158,8 +158,8 @@ public sealed class AdminRepository(AdminDataSource admin)
         {
             var ins = new NpgsqlBatchCommand("""
                 INSERT INTO rate_catalog (id, tributo, tipo, esfera, ente_codigo, forma_aplicacao, aliquota, valid_from, valid_to,
-                                          ato_legal, fonte, provisoria, change_id)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                                          ato_legal, fonte, provisoria, change_id, produto)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                 """);
             ins.Parameters.Add(new() { Value = Guid.CreateVersion7() });
             ins.Parameters.Add(new() { Value = row.Tributo });
@@ -174,6 +174,7 @@ public sealed class AdminRepository(AdminDataSource admin)
             ins.Parameters.Add(new() { Value = row.Fonte });
             ins.Parameters.Add(new() { Value = row.Provisoria });
             ins.Parameters.Add(new() { Value = changeId });
+            ins.Parameters.Add(new() { Value = (object?)row.Produto ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Text });
             batch.BatchCommands.Add(ins);
         }
 
@@ -213,14 +214,65 @@ public sealed class AdminRepository(AdminDataSource admin)
     }
 
     /// <summary>Linhas ativas do catálogo (para o operador escolher o que superar).</summary>
+    /// <summary>D-R18: recusa uma proposta pendente (o proponente pode retirar a própria). false se não está PROPOSED.</summary>
+    public async Task<bool> RejectChangeAsync(Guid changeId, string operatorName, string reason, CancellationToken ct)
+    {
+        await using var cmd = Db.CreateCommand("""
+            UPDATE param_changes SET status = 'REJECTED', rejected_by = $2, rejected_at = now(), rejection_reason = $3
+             WHERE id = $1 AND status = 'PROPOSED'
+            """);
+        cmd.Parameters.Add(new() { Value = changeId });
+        cmd.Parameters.Add(new() { Value = operatorName });
+        cmd.Parameters.Add(new() { Value = reason });
+        return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false) == 1;
+    }
+
+    /// <summary>Códigos de ente que existem no IBGE (UFs de 2 dígitos e municípios de 7), entre os informados.</summary>
+    public async Task<HashSet<string>> ExistingEntesAsync(IReadOnlyCollection<string> codes, CancellationToken ct)
+    {
+        await using var cmd = Db.CreateCommand("""
+            SELECT lpad(codigo::text, 2, '0') FROM ufs WHERE lpad(codigo::text, 2, '0') = ANY($1)
+            UNION ALL SELECT codigo::text FROM municipios WHERE codigo::text = ANY($1)
+            """);
+        cmd.Parameters.Add(new() { Value = codes.ToArray() });
+        await using var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        while (await r.ReadAsync(ct).ConfigureAwait(false))
+        {
+            set.Add(r.GetString(0));
+        }
+
+        return set;
+    }
+
+    /// <summary>Linhas vigentes com a mesma chave (tributo, tipo, ente, produto) e vigência sobreposta — a prévia mostra o que mudaria.</summary>
+    public async Task<string> OverlappingRatesJsonAsync(RateChangeRow row, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+        await using var cmd = Db.CreateCommand("""
+            SELECT coalesce(json_agg(json_build_object('id', id, 'aliquota', aliquota, 'valid_from', valid_from, 'valid_to', valid_to,
+                                                       'ato_legal', ato_legal, 'provisoria', provisoria) ORDER BY valid_from), '[]')::text
+              FROM rate_catalog
+             WHERE superseded_at IS NULL AND tributo = $1 AND tipo = $2 AND coalesce(ente_codigo, '') = $3 AND coalesce(produto, '') = $4
+               AND daterange(valid_from, valid_to) && daterange($5, $6)
+            """);
+        cmd.Parameters.Add(new() { Value = row.Tributo });
+        cmd.Parameters.Add(new() { Value = row.Tipo });
+        cmd.Parameters.Add(new() { Value = row.EnteCodigo ?? "" });
+        cmd.Parameters.Add(new() { Value = row.Produto ?? "" });
+        cmd.Parameters.Add(new() { Value = row.ValidFrom });
+        cmd.Parameters.Add(new() { Value = (object?)row.ValidTo ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Date });
+        return (string)(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false))!;
+    }
+
     public async Task<string> ListActiveRatesJsonAsync(CancellationToken ct)
     {
         await using var cmd = Db.CreateCommand("""
             SELECT coalesce(json_agg(json_build_object(
                      'id', id, 'tributo', tributo, 'tipo', tipo, 'esfera', esfera, 'ente_codigo', ente_codigo,
                      'forma_aplicacao', forma_aplicacao, 'aliquota', aliquota, 'valid_from', valid_from, 'valid_to', valid_to,
-                     'ato_legal', ato_legal, 'fonte', fonte, 'provisoria', provisoria, 'change_id', change_id)
-                   ORDER BY tributo, ente_codigo NULLS FIRST, valid_from), '[]')::text
+                     'ato_legal', ato_legal, 'fonte', fonte, 'provisoria', provisoria, 'change_id', change_id, 'produto', produto)
+                   ORDER BY tributo, ente_codigo NULLS FIRST, produto NULLS FIRST, valid_from), '[]')::text
               FROM rate_catalog WHERE superseded_at IS NULL
             """);
         return (string)(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false))!;

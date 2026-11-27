@@ -79,7 +79,17 @@ def diff_response(a: tuple[int, dict], b: tuple[int, dict]) -> list[str]:
     return out
 
 
-def run(base: str, candidate: str, corpus: str) -> tuple[str, int]:
+def summary(bundle: str, total: int, changed: list) -> dict:
+    """Resumo para o aviso às contas (D-R31): lido pelo RateSyncWorker em fiscal-bundles/<bundle>.json."""
+    return {
+        "bundle": bundle,
+        "casos": total,
+        "com_diferenca": len(changed),
+        "destaques": [desc or cid for cid, desc, _ in changed[:5]],
+    }
+
+
+def run(base: str, candidate: str, corpus: str, summary_out: dict | None = None) -> tuple[str, int]:
     files = sorted(glob.glob(os.path.join(corpus, "*.json")))
     changed = []
     for f in files:
@@ -88,6 +98,8 @@ def run(base: str, candidate: str, corpus: str) -> tuple[str, int]:
         d = diff_response(post(base, case["engine_request"]), post(candidate, case["engine_request"]))
         if d:
             changed.append((case["id"], case.get("descricao", ""), d))
+    if summary_out is not None:
+        summary_out.update(summary(summary_out.get("bundle", ""), len(files), changed))
     lines = [
         "# Relatório de regressão fiscal",
         "",
@@ -123,6 +135,8 @@ def self_test() -> int:
     d = diff_response(ok, rejected)
     assert any("estado CALCULADO → INCONSISTENCIA_ENTRADA" in x for x in d) and any("REG-005" in x for x in d), d
     assert diff_response((422, {"errors": [{"code": "X"}]}), (200, {})) == ["HTTP 422 → 200"]
+    s = summary("2026.12.1", 158, [("c1", "Venda interestadual", ["x"]), ("c2", "", ["y"])])
+    assert s == {"bundle": "2026.12.1", "casos": 158, "com_diferenca": 2, "destaques": ["Venda interestadual", "c2"]}, s
     print("self-test ok")
     return 0
 
@@ -133,12 +147,20 @@ def main() -> int:
     ap.add_argument("--candidate")
     ap.add_argument("--corpus", default=os.path.join(os.path.dirname(__file__), "..", "..", "tests", "golden", "corpus", "v0"))
     ap.add_argument("--out")
+    ap.add_argument("--summary-json", help="grava o resumo (casos, com_diferenca, destaques) para o aviso às contas")
+    ap.add_argument("--bundle", default="", help="bundle candidato, gravado no resumo")
     ap.add_argument("--fail-on-diff", action="store_true")
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args()
     if a.self_test:
         return self_test()
-    report, changed = run(a.base, a.candidate, a.corpus)
+    resumo = {"bundle": a.bundle}
+    report, changed = run(a.base, a.candidate, a.corpus, resumo)
+    if a.summary_json:
+        os.makedirs(os.path.dirname(a.summary_json) or ".", exist_ok=True)
+        with open(a.summary_json, "w", encoding="utf-8") as f:
+            json.dump(resumo, f, ensure_ascii=False, indent=2)
+            f.write("\n")
     if a.out:
         with open(a.out, "w", encoding="utf-8") as f:
             f.write(report)

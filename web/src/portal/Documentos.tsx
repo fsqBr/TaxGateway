@@ -1,5 +1,8 @@
+import { AvisoList } from '../components/AvisoList';
+import { AliquotasAplicadas, type AliquotaAplicada } from './Operacao';
 import { useState, type FormEvent } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
+import { useSession } from '../auth/session';
 import { Download, Eye } from 'lucide-react';
 import { Alert, Badge, Card, Field, Loading, PageHeader, StatusBadge, Table, useAction, useLoad } from '../components/ui';
 import { CnpjInput, Drawer } from '../components/inputs';
@@ -62,6 +65,7 @@ interface Detalhe {
     resumo_financeiro: { tributo_declarado: { cbs: number; ibs: number; is: number }; tributo_recalculado?: { cbs: number; ibs: number; is: number }; diferenca: number; credito_potencial?: number; credito_status?: string };
     ocorrencias: Ocorrencia[];
     avisos: { codigo: string; mensagem: string }[];
+    aliquotas_aplicadas?: AliquotaAplicada[];
     aviso_legal: string;
   } | null;
 }
@@ -182,8 +186,45 @@ export function DocumentoDrawer({ id, onClose }: { id: string; onClose: () => vo
     <Drawer title="Detalhe do documento" onClose={onClose} wide>
       {d.loading && <Loading />}
       <Alert>{d.error}</Alert>
+      {d.data && <p><Link to={`/portal/documentos/${id}/dossie`} target="_blank" rel="noreferrer">Dossiê para fiscalização (imprimir ou salvar em PDF)</Link></p>}
       {d.data && <DocumentoDetalhe data={d.data} />}
     </Drawer>
+  );
+}
+
+/**
+ * Dossiê da nota (D-R26): tudo o que sustenta o resultado diante de uma fiscalização — chave, versões do motor, das
+ * regras e dos parâmetros, alíquotas e atos legais usados, ocorrências com fundamento — numa página para imprimir.
+ */
+export function Dossie() {
+  const { id = '' } = useParams();
+  const { sessao } = useSession();
+  const d = useLoad(() => portal<Detalhe>(`/v1/auditoria/documentos/${id}`), [id]);
+  const a = d.data?.auditoria;
+  const empresa = sessao?.empresas?.find((e) => e.tenant_id === sessao.empresa_ativa);
+  return (
+    <div className="dossie">
+      <PageHeader title="Dossiê da auditoria" description={empresa ? `${empresa.nome} · gerado em ${dateTime(new Date().toISOString())}` : undefined}>
+        <button type="button" className="no-print" onClick={() => window.print()}>Imprimir / salvar PDF</button>
+      </PageHeader>
+      {d.loading && <Loading />}
+      <Alert>{d.error}</Alert>
+      {d.data && (
+        <>
+          <dl className="kv">
+            <div><dt>Chave de acesso</dt><dd className="mono">{d.data.documento.chave_acesso ?? '—'}</dd></div>
+            <div><dt>Situação</dt><dd>{a?.status ?? d.data.documento.status}</dd></div>
+            <div><dt>Emissão</dt><dd>{dateTime(d.data.data_emissao)}</dd></div>
+            <div><dt>Auditada em</dt><dd>{dateTime(d.data.documento.criado_em)}</dd></div>
+            <div><dt>Motor oficial (bundle)</dt><dd className="mono">{a?.rfb_engine_version?.bundle ?? '—'}</dd></div>
+            <div><dt>Versão das regras</dt><dd className="mono">{a?.regras_versao ?? '—'}</dd></div>
+            <div><dt>Parâmetros (snapshot)</dt><dd className="mono">{a?.param_snapshot_id ?? '—'}</dd></div>
+          </dl>
+          <DocumentoDetalhe data={d.data} />
+          {a && <p className="muted small">{a.aviso_legal}</p>}
+        </>
+      )}
+    </div>
   );
 }
 
@@ -242,7 +283,8 @@ export function DocumentoDetalhe({ data }: { data: Detalhe }) {
           </section>
         );
       })}
-      {a && a.avisos.length > 0 && <Alert kind="info">{a.avisos.map((x) => <div key={x.codigo}><code>{x.codigo}</code> {x.mensagem}</div>)}</Alert>}
+      {a && <AvisoList kind="info" avisos={a.avisos} />}
+      {a && <><h3>Alíquotas usadas</h3><AliquotasAplicadas itens={a.aliquotas_aplicadas} /></>}
       {a && <p className="muted small">Regras {a.regras_versao} · bundle {a.rfb_engine_version?.bundle ?? '—'} · parâmetros nº {a.param_snapshot_id}. {a.aviso_legal}</p>}
     </div>
   );

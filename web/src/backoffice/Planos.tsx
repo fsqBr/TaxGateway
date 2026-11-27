@@ -6,7 +6,7 @@ import { dateTime, integer, money } from '../lib/format';
 interface Plano {
   code: string; name: string; description: string; features: string[]; price_cents: number; included_docs: number; included_simulations: number;
   included_cnpjs: number | null; max_users: number | null; overage_doc_millicents: number; overage_sim_millicents: number; cnpj_price_cents: number;
-  rpm: number; burst: number; concurrency: number; batch_max_docs: number; batch_max_bytes: number; queue_priority: string; bill_schema_errors: boolean;
+  rpm: number; burst: number; per_cnpj_rpm?: number | null; concurrency: number; batch_max_docs: number; batch_max_bytes: number; queue_priority: string; bill_schema_errors: boolean;
   hard_quota: boolean; dfe_enabled: boolean; is_public: boolean; self_service: boolean; active: boolean; sort_order: number;
   updated_at: string; updated_by: string | null; stripe_product_id: string | null; stripe_price_id: string | null; stripe_synced_at: string | null;
 }
@@ -22,7 +22,7 @@ function toForm(p?: Plano): Form {
     price: p ? reais(p.price_cents) : '0', included_docs: String(p?.included_docs ?? 0), included_simulations: String(p?.included_simulations ?? 0),
     included_cnpjs: p?.included_cnpjs == null ? '' : String(p.included_cnpjs), max_users: p?.max_users == null ? '' : String(p.max_users),
     overage_doc: p ? (p.overage_doc_millicents / 100_000).toFixed(4) : '0', cnpj_price: p ? reais(p.cnpj_price_cents) : '0',
-    rpm: String(p?.rpm ?? 120), burst: String(p?.burst ?? 30), concurrency: String(p?.concurrency ?? 6), batch_max_docs: String(p?.batch_max_docs ?? 1000),
+    rpm: String(p?.rpm ?? 120), burst: String(p?.burst ?? 30), per_cnpj_rpm: String(p?.per_cnpj_rpm ?? 0), concurrency: String(p?.concurrency ?? 6), batch_max_docs: String(p?.batch_max_docs ?? 1000),
     queue_priority: p?.queue_priority ?? 'normal', sort_order: String(p?.sort_order ?? 100),
     hard_quota: p?.hard_quota ?? false, dfe_enabled: p?.dfe_enabled ?? true, is_public: p?.is_public ?? false, self_service: p?.self_service ?? false,
     active: p?.active ?? true, bill_schema_errors: p?.bill_schema_errors ?? true,
@@ -54,7 +54,7 @@ export function Planos() {
       price_cents: toCents(String(form.price)), included_docs: n('included_docs'), included_simulations: n('included_simulations'),
       included_cnpjs: opt('included_cnpjs'), max_users: opt('max_users'),
       overage_doc_millicents: Math.round(Number(String(form.overage_doc).replace(',', '.')) * 100_000), cnpj_price_cents: toCents(String(form.cnpj_price)),
-      rpm: n('rpm'), burst: n('burst'), concurrency: n('concurrency'), batch_max_docs: n('batch_max_docs'), queue_priority: form.queue_priority,
+      rpm: n('rpm'), burst: n('burst'), per_cnpj_rpm: n('per_cnpj_rpm'), concurrency: n('concurrency'), batch_max_docs: n('batch_max_docs'), queue_priority: form.queue_priority,
       sort_order: n('sort_order'), hard_quota: form.hard_quota, dfe_enabled: form.dfe_enabled, is_public: form.is_public, self_service: form.self_service,
       active: form.active, bill_schema_errors: form.bill_schema_errors,
     };
@@ -100,6 +100,7 @@ export function Planos() {
             <Field label="Usuários" hint="Vazio = ilimitado"><input type="number" min={1} value={String(form.max_users)} onChange={set('max_users')} /></Field>
             <Field label="Requisições/min"><input type="number" min={1} value={String(form.rpm)} onChange={set('rpm')} /></Field>
             <Field label="Rajada"><input type="number" min={1} value={String(form.burst)} onChange={set('burst')} /></Field>
+            <Field label="Sub-limite por CNPJ atendido (req/min)" hint="Teto de cada CNPJ atendido (OEM) dentro do limite do cliente. 0 = sem sub-limite."><input type="number" min={0} step={1} value={String(form.per_cnpj_rpm)} onChange={set('per_cnpj_rpm')} /></Field>
             <Field label="Simultâneas"><input type="number" min={1} value={String(form.concurrency)} onChange={set('concurrency')} /></Field>
             <Field label="Documentos por lote"><input type="number" min={1} value={String(form.batch_max_docs)} onChange={set('batch_max_docs')} /></Field>
             <Field label="Prioridade na fila">

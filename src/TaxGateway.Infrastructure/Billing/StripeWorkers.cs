@@ -43,16 +43,20 @@ public sealed partial class StripeEventProcessor(BillingDataSource db, StackExch
     public async Task<int> RunOnceAsync(CancellationToken ct)
     {
         var n = 0;
+        // Evento que falhou neste ciclo só volta no PRÓXIMO (antes o laço o pegava de novo na hora e gastava as 10
+        // tentativas em milissegundos: um erro passageiro descartava o evento de vez).
+        var failed = new List<string>();
         while (true)
         {
             await using var conn = await db.DataSource.OpenConnectionAsync(ct).ConfigureAwait(false);
             await using var tx = await conn.BeginTransactionAsync(ct).ConfigureAwait(false);
             string id, type;
             JsonObject payload;
-            await using (var pick = new NpgsqlCommand("""
+            await using var pick = new NpgsqlCommand("""
                 SELECT id, type, payload::text FROM stripe_events
-                 WHERE processed_at IS NULL AND attempts < 10 ORDER BY received_at LIMIT 1 FOR UPDATE SKIP LOCKED
-                """, conn, tx))
+                 WHERE processed_at IS NULL AND attempts < 10 AND NOT (id = ANY($1)) ORDER BY received_at LIMIT 1 FOR UPDATE SKIP LOCKED
+                """, conn, tx);
+            pick.Parameters.Add(new() { Value = failed.ToArray() });
             await using (var r = await pick.ExecuteReaderAsync(ct).ConfigureAwait(false))
             {
                 if (!await r.ReadAsync(ct).ConfigureAwait(false))
@@ -101,6 +105,7 @@ public sealed partial class StripeEventProcessor(BillingDataSource db, StackExch
                 fail.Parameters.Add(new() { Value = id });
                 fail.Parameters.Add(new() { Value = StripeText.Truncate(ex.Message, 500) });
                 await fail.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                failed.Add(id);
                 LogEventFailed(log, ex, id, type);
                 TaxGatewayMetrics.StripeEvents.Add(1, new KeyValuePair<string, object?>("tipo", type), new KeyValuePair<string, object?>("resultado", "erro"));
             }
@@ -145,6 +150,44 @@ public sealed partial class StripeEventProcessor(BillingDataSource db, StackExch
             }
 
             changed.AddRange(restored);
+
+            // D-R32: recibo de pagamento (a regularização já avisou quem estava em atraso).
+            if ((o["amount_paid"]?.GetValue<long>() ?? 0) > 0)
+            {
+                foreach (var tenant in await TenantsOfAsync(conn, tx, Str(o, "customer"), ct).ConfigureAwait(false))
+                {
+                    if (!restored.Contains(tenant))
+                    {
+                        await NoticeAsync(conn, tx, tenant, "PAGAMENTO_RECEBIDO", "info", "Pagamento recebido",
+                            $"Recebemos o pagamento de {Money(o["amount_paid"]!.GetValue<long>())} da fatura {Str(o, "number") ?? Str(o, "id")}. Obrigado!",
+                            "/portal/cobranca", "{owner,admin,finance}", "recebido:" + Str(o, "id"), ct).ConfigureAwait(false);
+                    }
+                }
+            }
+        }
+        else if (type == "invoice.finalized" && (o["amount_due"]?.GetValue<long>() ?? 0) > 0)
+        {
+            // D-R32: fatura emitida, com valor e vencimento.
+            var due = DueAt(o);
+            foreach (var tenant in await TenantsOfAsync(conn, tx, Str(o, "customer"), ct).ConfigureAwait(false))
+            {
+                await NoticeAsync(conn, tx, tenant, "FATURA_EMITIDA", "info", "Fatura emitida",
+                    $"A fatura {Str(o, "number") ?? Str(o, "id")} de {Money(o["amount_due"]!.GetValue<long>())} foi emitida" +
+                    (due is { } d ? $" e vence em {Br(d)}." : ".") + " O link de pagamento e o PDF estão em Cobrança.",
+                    "/portal/cobranca", "{owner,admin,finance}", "fatura:" + Str(o, "id"), ct).ConfigureAwait(false);
+            }
+        }
+        else if (type == "invoice.upcoming")
+        {
+            // D-R32: renovação próxima (a Stripe avisa alguns dias antes; a prévia não tem id, o fim do período identifica).
+            var when = o["next_payment_attempt"]?.GetValue<long?>() ?? o["period_end"]?.GetValue<long?>();
+            foreach (var tenant in await TenantsOfAsync(conn, tx, Str(o, "customer"), ct).ConfigureAwait(false))
+            {
+                await NoticeAsync(conn, tx, tenant, "RENOVACAO_PROXIMA", "info", "Sua assinatura renova em breve",
+                    "A próxima fatura" + (when is { } w ? $" será gerada em {Br(DateTimeOffset.FromUnixTimeSeconds(w))}" : " será gerada em breve") +
+                    $", com valor estimado de {Money(o["amount_due"]?.GetValue<long>() ?? 0)} (mensalidade + excedente medido até agora).",
+                    "/portal/cobranca", "{owner,admin,finance}", "renovacao:" + (when?.ToString(CultureInfo.InvariantCulture) ?? Str(o, "subscription") ?? "x"), ct).ConfigureAwait(false);
+            }
         }
 
         switch (type)
@@ -161,6 +204,10 @@ public sealed partial class StripeEventProcessor(BillingDataSource db, StackExch
                                subscription_event_at = greatest(coalesce(subscription_event_at, 0), $6)
                          WHERE id = $1 AND coalesce(subscription_event_at, 0) <= $6 RETURNING id
                         """, ct, t, Str(o, "customer"), Str(o, "subscription"), o["metadata"]?["plan_code"]?.GetValue<string>(), paid, created).ConfigureAwait(false));
+                    if (paid && changed.Contains(t))
+                    {
+                        await SubscriptionActiveAsync(conn, tx, t, Str(o, "subscription"), ct).ConfigureAwait(false);
+                    }
                 }
 
                 break;
@@ -173,6 +220,7 @@ public sealed partial class StripeEventProcessor(BillingDataSource db, StackExch
                     var priceIds = o["items"]?["data"]?.AsArray().Select(i => i?["price"]?["id"]?.GetValue<string>()).Where(x => x is not null).ToArray() ?? [];
                     long? periodEnd = o["current_period_end"]?.GetValue<long>()
                         ?? o["items"]?["data"]?.AsArray().Select(i => i?["current_period_end"]?.GetValue<long>()).FirstOrDefault(x => x is not null);
+                    var before = await PlansOfAsync(conn, tx, Str(o, "customer"), ct).ConfigureAwait(false);
                     // Ativa/em teste: aplica o plano da assinatura. Cancelada: volta ao Sandbox. Inadimplente: mantém o plano e
                     // registra o status (o aviso e a eventual suspensão seguem a régua de cobrança da Stripe).
                     // D-R02: só a assinatura CORRENTE do tenant (ou a primeira, se ainda não há) e nunca um evento mais velho
@@ -193,19 +241,44 @@ public sealed partial class StripeEventProcessor(BillingDataSource db, StackExch
                        AND coalesce(subscription_event_at, 0) <= $8
                     RETURNING id
                     """, ct, Str(o, "customer"), Str(o, "id"), status, plan, deleted, periodEnd, FallbackPlan, created, priceIds).ConfigureAwait(false));
+
+                    // D-R32: o que mudou para o cliente vira aviso (e e-mail) — ativação, troca de plano, cancelamento.
+                    var after = await PlansOfAsync(conn, tx, Str(o, "customer"), ct).ConfigureAwait(false);
+                    foreach (var (tenant, now) in after.Where(a => changed.Contains(a.Key)))
+                    {
+                        var was = before.GetValueOrDefault(tenant);
+                        if (deleted)
+                        {
+                            await NoticeAsync(conn, tx, tenant, "ASSINATURA_CANCELADA", "aviso", "Assinatura cancelada",
+                                $"A assinatura foi encerrada e a conta voltou ao plano {now.Name}. Os dados e o histórico continuam disponíveis; " +
+                                "para voltar a um plano pago, escolha o plano em Cobrança.",
+                                "/portal/cobranca", "{owner,admin,finance}", "cancelada:" + Str(o, "id"), ct).ConfigureAwait(false);
+                        }
+                        else if (now.Status is "active" or "trialing" && was.Status is not ("active" or "trialing"))
+                        {
+                            await SubscriptionActiveAsync(conn, tx, tenant, Str(o, "id"), ct).ConfigureAwait(false);
+                        }
+                        else if (was.Plan is not null && was.Plan != now.Plan && now.Status is "active" or "trialing")
+                        {
+                            await NoticeAsync(conn, tx, tenant, "PLANO_ALTERADO", "info", $"Plano alterado para {now.Name}",
+                                $"A conta passou do plano {was.Name} para o {now.Name}. Os novos limites já valem; a diferença aparece na próxima fatura.",
+                                "/portal/cobranca", "{owner,admin,finance}", $"plano:{Str(o, "id")}:{now.Plan}:{created}", ct).ConfigureAwait(false);
+                        }
+                    }
+
                     break;
                 }
 
             case "invoice.created" or "invoice.finalized" or "invoice.paid" or "invoice.payment_failed" or "invoice.voided" or "invoice.marked_uncollectible" or "invoice.updated":
                 await ExecAsync(conn, tx, """
-                    INSERT INTO invoices (id, tenant_id, number, status, currency, amount_due_cents, amount_paid_cents, hosted_invoice_url, invoice_pdf, period_start, period_end)
-                    SELECT $1, t.id, $3, $4, $5, $6, $7, $8, $9, to_timestamp($10), to_timestamp($11) FROM tenants t WHERE t.billing_customer_ref = $2
+                    INSERT INTO invoices (id, tenant_id, number, status, currency, amount_due_cents, amount_paid_cents, hosted_invoice_url, invoice_pdf, period_start, period_end, due_at)
+                    SELECT $1, t.id, $3, $4, $5, $6, $7, $8, $9, to_timestamp($10), to_timestamp($11), $12::timestamptz FROM tenants t WHERE t.billing_customer_ref = $2
                     ON CONFLICT (id) DO UPDATE SET number = EXCLUDED.number, status = EXCLUDED.status, amount_due_cents = EXCLUDED.amount_due_cents,
                         amount_paid_cents = EXCLUDED.amount_paid_cents, hosted_invoice_url = EXCLUDED.hosted_invoice_url, invoice_pdf = EXCLUDED.invoice_pdf,
-                        updated_at = now()
+                        due_at = coalesce(EXCLUDED.due_at, invoices.due_at), updated_at = now()
                     """, ct, Str(o, "id"), Str(o, "customer"), Str(o, "number"), Str(o, "status") ?? "draft", Str(o, "currency") ?? "brl",
                     o["amount_due"]?.GetValue<long>() ?? 0, o["amount_paid"]?.GetValue<long>() ?? 0, Str(o, "hosted_invoice_url"), Str(o, "invoice_pdf"),
-                    (double)(o["period_start"]?.GetValue<long>() ?? 0), (double)(o["period_end"]?.GetValue<long>() ?? 0)).ConfigureAwait(false);
+                    (double)(o["period_start"]?.GetValue<long>() ?? 0), (double)(o["period_end"]?.GetValue<long>() ?? 0), DueAt(o)).ConfigureAwait(false);
                 break;
         }
 
@@ -213,6 +286,69 @@ public sealed partial class StripeEventProcessor(BillingDataSource db, StackExch
     }
 
     private static string? Str(JsonObject o, string key) => o[key] is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
+
+    /// <summary>Vencimento: due_date (boleto/fatura enviada) ou a próxima tentativa de cobrança automática.</summary>
+    private static DateTimeOffset? DueAt(JsonObject o) =>
+        (o["due_date"] as JsonValue)?.TryGetValue<long>(out var d) == true ? DateTimeOffset.FromUnixTimeSeconds(d)
+        : (o["next_payment_attempt"] as JsonValue)?.TryGetValue<long>(out var n) == true ? DateTimeOffset.FromUnixTimeSeconds(n) : null;
+
+    /// <summary>R$ 1.234,56 sem depender de cultura (globalização invariante).</summary>
+    public static string Money(long cents)
+    {
+        var v = (cents / 100m).ToString("#,0.00", CultureInfo.InvariantCulture);
+        return "R$ " + v.Replace(",", "_", StringComparison.Ordinal).Replace(".", ",", StringComparison.Ordinal).Replace("_", ".", StringComparison.Ordinal);
+    }
+
+    private static string Br(DateTimeOffset d) => d.ToOffset(TimeSpan.FromHours(-3)).ToString("dd/MM/yyyy", CultureInfo.InvariantCulture);
+
+    private static async Task<List<Guid>> TenantsOfAsync(NpgsqlConnection conn, NpgsqlTransaction tx, string? customer, CancellationToken ct) =>
+        customer is null ? [] : await ExecAsync(conn, tx, "SELECT id FROM tenants WHERE billing_customer_ref = $1", ct, customer).ConfigureAwait(false);
+
+    private static async Task<Dictionary<Guid, (string? Plan, string Name, string? Status)>> PlansOfAsync(NpgsqlConnection conn, NpgsqlTransaction tx, string? customer, CancellationToken ct)
+    {
+        var map = new Dictionary<Guid, (string? Plan, string Name, string? Status)>();
+        await using var cmd = new NpgsqlCommand("""
+            SELECT t.id, t.plan_code, coalesce(p.name, t.plan_code), t.subscription_status
+              FROM tenants t LEFT JOIN plans p ON p.code = t.plan_code WHERE t.billing_customer_ref = $1
+            """, conn, tx);
+        cmd.Parameters.Add(new() { Value = (object?)customer ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Text });
+        await using var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await r.ReadAsync(ct).ConfigureAwait(false))
+        {
+            map[r.GetGuid(0)] = (r.GetString(1), r.GetString(2), r.IsDBNull(3) ? null : r.GetString(3));
+        }
+
+        return map;
+    }
+
+    private static async Task SubscriptionActiveAsync(NpgsqlConnection conn, NpgsqlTransaction tx, Guid tenant, string? subscription, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand("SELECT coalesce(p.name, t.plan_code) FROM tenants t LEFT JOIN plans p ON p.code = t.plan_code WHERE t.id = $1", conn, tx);
+        cmd.Parameters.Add(new() { Value = tenant });
+        var name = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false) as string ?? "pago";
+        await NoticeAsync(conn, tx, tenant, "ASSINATURA_ATIVA", "info", $"Assinatura ativa: plano {name}",
+            $"Pagamento confirmado e plano {name} ativo. Os limites do plano já valem para a API e o portal; as faturas ficam em Cobrança.",
+            "/portal/cobranca", "{owner,admin,finance}", "assinatura:" + (subscription ?? tenant.ToString()), ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Aviso ao cliente (portal + e-mail), uma vez por fato (dedupe).</summary>
+    private static async Task NoticeAsync(NpgsqlConnection conn, NpgsqlTransaction tx, Guid tenant, string kind, string severity, string title, string body,
+        string link, string audience, string dedupe, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand("""
+            INSERT INTO tenant_notifications (tenant_id, kind, severity, title, body, link, audience, dedupe_key)
+            VALUES ($1, $2, $3, $4, $5, $6, $7::text[], $8) ON CONFLICT (tenant_id, dedupe_key) DO NOTHING
+            """, conn, tx);
+        cmd.Parameters.Add(new() { Value = tenant });
+        cmd.Parameters.Add(new() { Value = kind });
+        cmd.Parameters.Add(new() { Value = severity });
+        cmd.Parameters.Add(new() { Value = title.Length > 160 ? title[..160] : title });
+        cmd.Parameters.Add(new() { Value = body.Length > 2000 ? body[..2000] : body });
+        cmd.Parameters.Add(new() { Value = link });
+        cmd.Parameters.Add(new() { Value = audience });
+        cmd.Parameters.Add(new() { Value = dedupe });
+        await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+    }
 
     private static async Task<List<Guid>> ExecAsync(NpgsqlConnection conn, NpgsqlTransaction tx, string sql, CancellationToken ct, params object?[] args)
     {
@@ -282,10 +418,12 @@ public sealed partial class StripeCatalogSync(BillingDataSource db, StripeClient
         var o = options.Value;
         var docsMeter = await stripe.EnsureMeterAsync(o.DocumentsMeterEvent, "Documentos auditados", "sum", ct).ConfigureAwait(false);
         var cnpjMeter = await stripe.EnsureMeterAsync(o.CnpjsMeterEvent, "CNPJs ativos", "last", ct).ConfigureAwait(false);
-        var pending = new List<(string Code, string Name, string Desc, long Price, long IncDocs, long DocMilli, int IncCnpjs, long CnpjCents, string? Product, DateTimeOffset Updated)>();
+        var simMeter = await stripe.EnsureMeterAsync(o.SimulationsMeterEvent, "Simulações", "sum", ct).ConfigureAwait(false);
+        var pending = new List<(string Code, string Name, string Desc, long Price, long IncDocs, long DocMilli, int IncCnpjs, long CnpjCents, string? Product, DateTimeOffset Updated,
+            long IncSims, long SimMilli)>();
         await using (var cmd = db.DataSource.CreateCommand("""
             SELECT code, name, description, price_cents, included_docs, overage_doc_millicents, coalesce(included_cnpjs, 0), cnpj_price_cents,
-                   stripe_product_id, updated_at
+                   stripe_product_id, updated_at, included_simulations, overage_sim_millicents
               FROM plans WHERE price_cents > 0 AND (stripe_synced_at IS NULL OR stripe_synced_at < updated_at)
             """))
         await using (var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false))
@@ -293,7 +431,7 @@ public sealed partial class StripeCatalogSync(BillingDataSource db, StripeClient
             while (await r.ReadAsync(ct).ConfigureAwait(false))
             {
                 pending.Add((r.GetString(0), r.GetString(1), r.GetString(2), r.GetInt64(3), r.GetInt64(4), r.GetInt64(5), r.GetInt32(6), r.GetInt64(7),
-                    r.IsDBNull(8) ? null : r.GetString(8), r.GetFieldValue<DateTimeOffset>(9)));
+                    r.IsDBNull(8) ? null : r.GetString(8), r.GetFieldValue<DateTimeOffset>(9), r.GetInt64(10), r.GetInt64(11)));
             }
         }
 
@@ -306,8 +444,12 @@ public sealed partial class StripeCatalogSync(BillingDataSource db, StripeClient
             string? cnpjPrice = p.CnpjCents > 0
                 ? await stripe.CreateMeteredPriceAsync(product, p.Code, "cnpjs", cnpjMeter, p.IncCnpjs, p.CnpjCents * 1000, version, ct).ConfigureAwait(false)
                 : null;
+            string? simPrice = p.SimMilli > 0
+                ? await stripe.CreateMeteredPriceAsync(product, p.Code, "simulacoes", simMeter, p.IncSims, p.SimMilli, version, ct).ConfigureAwait(false)
+                : null;
             await using var upd = db.DataSource.CreateCommand("""
-                UPDATE plans SET stripe_product_id = $2, stripe_price_id = $3, stripe_metered_price_id = $4, stripe_cnpj_price_id = $5, stripe_synced_at = now()
+                UPDATE plans SET stripe_product_id = $2, stripe_price_id = $3, stripe_metered_price_id = $4, stripe_cnpj_price_id = $5,
+                       stripe_sim_price_id = $6, stripe_synced_at = now()
                  WHERE code = $1
                 """);
             upd.Parameters.Add(new() { Value = p.Code });
@@ -315,6 +457,7 @@ public sealed partial class StripeCatalogSync(BillingDataSource db, StripeClient
             upd.Parameters.Add(new() { Value = fixedPrice });
             upd.Parameters.Add(new() { Value = docsPrice });
             upd.Parameters.Add(new() { Value = (object?)cnpjPrice ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Text });
+            upd.Parameters.Add(new() { Value = (object?)simPrice ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Text });
             await upd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             LogSynced(log, p.Code);
         }
@@ -381,16 +524,17 @@ public sealed partial class StripeUsageReporter(BillingDataSource db, StripeClie
         return n + await ReportMonthAsync(month, now, now, ct).ConfigureAwait(false);
     }
 
+    /// <summary>Métricas somadas enviadas à Stripe: nome no relatório, métrica do ledger, evento do medidor.</summary>
+    private (string Report, string Ledger, string Event)[] SumMetrics => [
+        ("documentos", "DOC_AUDIT", options.Value.DocumentsMeterEvent),
+        ("simulacoes", "SIMULATION", options.Value.SimulationsMeterEvent),
+    ];
+
     private async Task<int> ReportMonthAsync(DateOnly month, DateTimeOffset eventTime, DateTimeOffset now, CancellationToken ct)
     {
-        var rows = new List<(Guid Tenant, string Customer, long Docs, long ReportedDocs, long Cnpjs, long? PendingQty, string? PendingId)>();
+        var rows = new List<(Guid Tenant, string Customer, long Cnpjs)>();
         await using (var cmd = db.DataSource.CreateCommand("""
-            SELECT t.id, t.billing_customer_ref,
-                   (SELECT count(*) FROM usage_ledger l WHERE l.tenant_id = t.id AND l.billing_month = $1 AND l.metric = 'DOC_AUDIT'),
-                   coalesce((SELECT r.reported_qty FROM stripe_usage_reports r WHERE r.tenant_id = t.id AND r.billing_month = $1 AND r.metric = 'documentos'), 0),
-                   (SELECT count(*) FROM cnpj_monthly_activity a WHERE a.tenant_id = t.id AND a.billing_month = $1),
-                   (SELECT r.pending_qty FROM stripe_usage_reports r WHERE r.tenant_id = t.id AND r.billing_month = $1 AND r.metric = 'documentos'),
-                   (SELECT r.pending_identifier FROM stripe_usage_reports r WHERE r.tenant_id = t.id AND r.billing_month = $1 AND r.metric = 'documentos')
+            SELECT t.id, t.billing_customer_ref, (SELECT count(*) FROM cnpj_monthly_activity a WHERE a.tenant_id = t.id AND a.billing_month = $1)
               FROM tenants t
              WHERE t.stripe_subscription_id IS NOT NULL AND t.billing_customer_ref IS NOT NULL
                AND t.subscription_status IN ('active','trialing','past_due')
@@ -400,38 +544,72 @@ public sealed partial class StripeUsageReporter(BillingDataSource db, StripeClie
             await using var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await r.ReadAsync(ct).ConfigureAwait(false))
             {
-                rows.Add((r.GetGuid(0), r.GetString(1), r.GetInt64(2), r.GetInt64(3), r.GetInt64(4), r.IsDBNull(5) ? null : r.GetInt64(5), r.IsDBNull(6) ? null : r.GetString(6)));
+                rows.Add((r.GetGuid(0), r.GetString(1), r.GetInt64(2)));
             }
         }
 
         var o = options.Value;
         foreach (var row in rows)
         {
-            // Pendente de uma execução anterior: reenvia exatamente o mesmo intervalo e identificador.
-            var (target, identifier) = row.PendingQty is { } pq && row.PendingId is { } pid
-                ? (pq, pid)
-                : (row.Docs, $"{row.Tenant:N}-{month:yyyyMM}-doc-{row.ReportedDocs}-{row.Docs}");
-            var delta = target - row.ReportedDocs;
-            if (delta > 0)
+            foreach (var (report, ledger, evt) in SumMetrics)
             {
-                await MarkPendingAsync(row.Tenant, month, row.ReportedDocs, target, identifier, ct).ConfigureAwait(false);
-                await stripe.SendMeterEventAsync(o.DocumentsMeterEvent, row.Customer, delta, identifier, eventTime, ct).ConfigureAwait(false);
-                await SaveAsync(row.Tenant, month, "documentos", target, ct).ConfigureAwait(false);
+                await ReportSumAsync(row.Tenant, row.Customer, month, report, ledger, evt, eventTime, ct).ConfigureAwait(false);
             }
 
             await stripe.SendMeterEventAsync(o.CnpjsMeterEvent, row.Customer, row.Cnpjs,
-                $"{row.Tenant:N}-{month:yyyyMM}-cnpj-{now:yyyyMMddHH}", eventTime, ct).ConfigureAwait(false);
+                $"{row.Tenant:N}-{month:yyyyMM}-cnpj-{now:yyyyMMddHHmmss}"   /* único por envio: a Stripe recusa identificador repetido */, eventTime, ct).ConfigureAwait(false);
             await SaveAsync(row.Tenant, month, "cnpjs", row.Cnpjs, ct).ConfigureAwait(false);
         }
 
         return rows.Count;
     }
 
-    private async Task MarkPendingAsync(Guid tenant, DateOnly month, long reported, long target, string identifier, CancellationToken ct)
+    /// <summary>
+    /// Envia o delta de uma métrica somada (D-R05): pendente de uma execução anterior é reenviado igual (a Stripe
+    /// deduplica pelo identificador); senão o delta entre o já reportado e o ledger.
+    /// </summary>
+    private async Task ReportSumAsync(Guid tenant, string customer, DateOnly month, string report, string ledger, string evt, DateTimeOffset eventTime, CancellationToken ct)
+    {
+        long total, reported;
+        long? pendingQty;
+        string? pendingId;
+        await using (var cmd = db.DataSource.CreateCommand("""
+            SELECT (SELECT count(*) FROM usage_ledger l WHERE l.tenant_id = $1 AND l.billing_month = $2 AND l.metric = $3),
+                   coalesce(r.reported_qty, 0), r.pending_qty, r.pending_identifier
+              FROM (SELECT 1) one LEFT JOIN stripe_usage_reports r ON r.tenant_id = $1 AND r.billing_month = $2 AND r.metric = $4
+            """))
+        {
+            cmd.Parameters.Add(new() { Value = tenant });
+            cmd.Parameters.Add(new() { Value = month, NpgsqlDbType = NpgsqlDbType.Date });
+            cmd.Parameters.Add(new() { Value = ledger });
+            cmd.Parameters.Add(new() { Value = report });
+            await using var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            await r.ReadAsync(ct).ConfigureAwait(false);
+            total = r.GetInt64(0);
+            reported = r.GetInt64(1);
+            pendingQty = r.IsDBNull(2) ? null : r.GetInt64(2);
+            pendingId = r.IsDBNull(3) ? null : r.GetString(3);
+        }
+
+        var tag = report == "documentos" ? "doc" : "sim";
+        var (target, identifier) = pendingQty is { } pq && pendingId is { } pid
+            ? (pq, pid)
+            : (total, $"{tenant:N}-{month:yyyyMM}-{tag}-{reported}-{total}");
+        if (target - reported <= 0)
+        {
+            return;
+        }
+
+        await MarkPendingAsync(tenant, month, report, reported, target, identifier, ct).ConfigureAwait(false);
+        await stripe.SendMeterEventAsync(evt, customer, target - reported, identifier, eventTime, ct).ConfigureAwait(false);
+        await SaveAsync(tenant, month, report, target, ct).ConfigureAwait(false);
+    }
+
+    private async Task MarkPendingAsync(Guid tenant, DateOnly month, string metric, long reported, long target, string identifier, CancellationToken ct)
     {
         await using var cmd = db.DataSource.CreateCommand("""
             INSERT INTO stripe_usage_reports (tenant_id, billing_month, metric, reported_qty, pending_qty, pending_identifier, pending_at)
-            VALUES ($1, $2, 'documentos', $3, $4, $5, now())
+            VALUES ($1, $2, $6, $3, $4, $5, now())
             ON CONFLICT (tenant_id, billing_month, metric) DO UPDATE
                SET pending_qty = EXCLUDED.pending_qty, pending_identifier = EXCLUDED.pending_identifier, pending_at = now(), updated_at = now()
             """);
@@ -440,6 +618,7 @@ public sealed partial class StripeUsageReporter(BillingDataSource db, StripeClie
         cmd.Parameters.Add(new() { Value = reported });
         cmd.Parameters.Add(new() { Value = target });
         cmd.Parameters.Add(new() { Value = identifier });
+        cmd.Parameters.Add(new() { Value = metric });
         await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 

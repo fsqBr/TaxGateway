@@ -128,7 +128,7 @@ jobs:
       - name: Tipos, testes de componente e builds (público e backoffice)
         run: |
           npm run typecheck
-          npm test
+          npm run test:coverage   # falha abaixo de 90% (vite.config.ts)
           npx vite build --outDir dist/public
           npx vite build --mode backoffice --outDir dist/backoffice
           # O bundle do backoffice não pode conter o site; o público não pode conter as telas do backoffice.

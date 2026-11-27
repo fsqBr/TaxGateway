@@ -24,6 +24,13 @@ public sealed class RateLimitOptions
 
     /// <summary>Número de réplicas da API: no modo local cada instância aplica limite/N (SDD §5.2).</summary>
     public int InstanceCountHint { get; set; } = 1;
+
+    /// <summary>D-R23: limite de cada PESSOA no portal (sessão), igual em todos os planos e separado do limite da API.</summary>
+    public int PersonRpm { get; set; } = 120;
+
+    public int PersonBurst { get; set; } = 30;
+
+    public int PersonConcurrency { get; set; } = 6;
 }
 
 public enum RateLimitReason { None, Concurrency, Rate }
@@ -67,12 +74,13 @@ public sealed class RateLimitLease : IAsyncDisposable
 public sealed partial class TenantRateLimiter
 {
     // KEYS: 1 = bucket (hash tk/ts), 2 = leases (zset id -> expira_em_ms)
-    // ARGV: rpm, burst, concorrência, ttl do lease (ms), id do lease
+    // ARGV: rpm, burst, concorrência, ttl do lease (ms), id do lease, custo (tokens por requisição, D-R23)
     // Retorno: {permitido, motivo(0 ok,1 conc,2 taxa), tokens restantes, concorrência restante, retry_ms}
     private const string Script = """
         local tb, cc = KEYS[1], KEYS[2]
         local rpm, burst, conc = tonumber(ARGV[1]), tonumber(ARGV[2]), tonumber(ARGV[3])
         local ttl, id = tonumber(ARGV[4]), ARGV[5]
+        local cost = tonumber(ARGV[6]) or 1
         local t = redis.call('TIME')
         local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
         redis.call('ZREMRANGEBYSCORE', cc, '-inf', now)
@@ -85,10 +93,10 @@ public sealed partial class TenantRateLimiter
         if inuse >= conc then
           return {0, 1, math.floor(tokens), 0, 1000}
         end
-        if tokens < 1 then
-          return {0, 2, 0, conc - inuse, math.ceil((1 - tokens) / rate)}
+        if tokens < cost then
+          return {0, 2, math.floor(tokens), conc - inuse, math.ceil((cost - tokens) / rate)}
         end
-        tokens = tokens - 1
+        tokens = tokens - cost
         redis.call('HSET', tb, 'tk', tostring(tokens), 'ts', now)
         redis.call('PEXPIRE', tb, math.ceil(burst / rate) + 1000)
         redis.call('ZADD', cc, now + ttl, id)
@@ -114,26 +122,38 @@ public sealed partial class TenantRateLimiter
         _log = log;
     }
 
-    public async Task<RateLimitLease> AcquireAsync(TenantId tenant, PlanLimits limits, TimeSpan leaseTtl)
+    /// <summary>Limites da pessoa no portal (D-R23), por cima do plano (só taxa e concorrência mudam).</summary>
+    public PlanLimits PersonLimits(PlanLimits plan)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        return plan with { Rpm = _options.PersonRpm, Burst = _options.PersonBurst, Concurrency = _options.PersonConcurrency };
+    }
+
+    /// <summary>
+    /// <paramref name="lane"/>: null = API do tenant (sistemas); "u:&lt;id&gt;" = pessoa; "c:&lt;cnpj&gt;" = CNPJ atendido no OEM.
+    /// <paramref name="cost"/>: tokens consumidos (lote = 10, D-R23).
+    /// </summary>
+    public async Task<RateLimitLease> AcquireAsync(TenantId tenant, PlanLimits limits, TimeSpan leaseTtl, string? lane = null, int cost = 1)
     {
         ArgumentNullException.ThrowIfNull(limits);
+        cost = Math.Clamp(cost, 1, Math.Max(1, limits.Burst));   // custo acima do burst nunca passaria
         RateLimitLease lease;
         if (Stopwatch.GetTimestamp() < Interlocked.Read(ref _localUntilTicks))
         {
-            lease = _local.Acquire(tenant, limits, Math.Max(1, _options.InstanceCountHint));
+            lease = _local.Acquire($"{tenant}:{lane}", limits, Math.Max(1, _options.InstanceCountHint), cost);
         }
         else
         {
             try
             {
-                lease = await AcquireValkeyAsync(tenant, limits, leaseTtl).WaitAsync(TimeSpan.FromMilliseconds(_options.ValkeyTimeoutMs)).ConfigureAwait(false);
+                lease = await AcquireValkeyAsync(tenant, limits, leaseTtl, lane, cost).WaitAsync(TimeSpan.FromMilliseconds(_options.ValkeyTimeoutMs)).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is RedisException or TimeoutException)
             {
                 Interlocked.Exchange(ref _localUntilTicks, Stopwatch.GetTimestamp() + (_options.LocalModeSeconds * Stopwatch.Frequency));
                 Fallback.Add(1);
                 LogLocalMode(_log, ex);
-                lease = _local.Acquire(tenant, limits, Math.Max(1, _options.InstanceCountHint));
+                lease = _local.Acquire($"{tenant}:{lane}", limits, Math.Max(1, _options.InstanceCountHint), cost);
             }
         }
 
@@ -146,14 +166,15 @@ public sealed partial class TenantRateLimiter
         return lease;
     }
 
-    private async Task<RateLimitLease> AcquireValkeyAsync(TenantId tenant, PlanLimits limits, TimeSpan leaseTtl)
+    private async Task<RateLimitLease> AcquireValkeyAsync(TenantId tenant, PlanLimits limits, TimeSpan leaseTtl, string? lane, int cost)
     {
         var id = Guid.CreateVersion7().ToString("N");
-        var bucket = $"rl:{{{tenant}}}:tb";   // hash tag: as duas chaves no mesmo slot do cluster
-        var leases = $"rl:{{{tenant}}}:cc";
+        var suffix = lane is null ? "" : $":{lane}";
+        var bucket = $"rl:{{{tenant}}}{suffix}:tb";   // hash tag: as duas chaves no mesmo slot do cluster
+        var leases = $"rl:{{{tenant}}}{suffix}:cc";
         var db = _valkey.GetDatabase();
         var r = (RedisResult[])(await db.ScriptEvaluateAsync(Script, [bucket, leases],
-            [limits.Rpm, limits.Burst, limits.Concurrency, (long)leaseTtl.TotalMilliseconds, id]).ConfigureAwait(false))!;
+            [limits.Rpm, limits.Burst, limits.Concurrency, (long)leaseTtl.TotalMilliseconds, id, Math.Max(1, cost)]).ConfigureAwait(false))!;
 
         var acquired = (int)r[0] == 1;
         var reason = (int)r[1] switch { 1 => RateLimitReason.Concurrency, 2 => RateLimitReason.Rate, _ => RateLimitReason.None };
@@ -179,9 +200,9 @@ public sealed partial class TenantRateLimiter
     /// <summary>Modo degradado: token bucket e concorrência em memória, por instância.</summary>
     private sealed class LocalLimiter
     {
-        private readonly ConcurrentDictionary<TenantId, State> _states = new();
+        private readonly ConcurrentDictionary<string, State> _states = new(StringComparer.Ordinal);
 
-        public RateLimitLease Acquire(TenantId tenant, PlanLimits limits, int instances)
+        public RateLimitLease Acquire(string tenant, PlanLimits limits, int instances, int cost)
         {
             var rpm = Math.Max(1.0, (double)limits.Rpm / instances);
             var burst = Math.Max(1.0, (double)limits.Burst / instances);
@@ -197,13 +218,13 @@ public sealed partial class TenantRateLimiter
                     return new RateLimitLease(false, RateLimitReason.Concurrency, limits, (int)s.Tokens, 0, TimeSpan.FromSeconds(1), true, null);
                 }
 
-                if (s.Tokens < 1)
+                if (s.Tokens < cost)
                 {
-                    var wait = TimeSpan.FromMilliseconds(Math.Ceiling((1 - s.Tokens) * 60000.0 / rpm));
-                    return new RateLimitLease(false, RateLimitReason.Rate, limits, 0, conc - s.InUse, wait, true, null);
+                    var wait = TimeSpan.FromMilliseconds(Math.Ceiling((cost - s.Tokens) * 60000.0 / rpm));
+                    return new RateLimitLease(false, RateLimitReason.Rate, limits, (int)s.Tokens, conc - s.InUse, wait, true, null);
                 }
 
-                s.Tokens -= 1;
+                s.Tokens -= cost;
                 s.InUse++;
                 return new RateLimitLease(true, RateLimitReason.None, limits, (int)s.Tokens, conc - s.InUse, TimeSpan.Zero, true,
                     () =>
@@ -237,7 +258,8 @@ public static class RateLimitHeaderWriter
         ArgumentNullException.ThrowIfNull(headers);
         ArgumentNullException.ThrowIfNull(lease);
         var l = lease.Limits;
-        headers["RateLimit-Policy"] = $"\"rpm\";q={l.Rpm};w=60, \"conc\";q={l.Concurrency};qu=\"concurrent-requests\"";
+        // D-R23: o burst aparece na política — "a" do rpm é o que dá para fazer AGORA (até o burst), não a cota do minuto.
+        headers["RateLimit-Policy"] = $"\"rpm\";q={l.Rpm};w=60, \"burst\";q={l.Burst}, \"conc\";q={l.Concurrency};qu=\"concurrent-requests\"";
         headers["RateLimit"] = $"\"rpm\";a={Math.Max(0, lease.TokensLeft)};w=60, \"conc\";a={Math.Max(0, lease.ConcurrencyLeft)}";
         if (!lease.Acquired)
         {

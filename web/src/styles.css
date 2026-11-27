@@ -570,3 +570,34 @@ section.item-card.has-findings { border-color: color-mix(in srgb, var(--warn) 45
 }
 
 .pager { display: flex; gap: 12px; align-items: center; justify-content: flex-end; padding: 12px 0 0; }
+
+/* Busca de município pelo nome (D-R16) */
+.municipio-picker { position: relative; }
+.picker-list { position: absolute; z-index: 30; top: 100%; left: 0; right: 0; margin: 2px 0 0; padding: 4px 0; list-style: none;
+  background: var(--surface, #fff); border: 1px solid var(--border, #d0d5dd); border-radius: 8px; box-shadow: 0 8px 24px rgb(0 0 0 / 0.12);
+  max-height: 260px; overflow-y: auto; }
+.picker-list li { padding: 6px 10px; cursor: pointer; }
+.picker-list li.active, .picker-list li:hover { background: var(--accent-soft, #eef2ff); }
+
+/* Dossiê da auditoria (D-R26): página para imprimir ou salvar em PDF */
+@media print {
+  .sidebar, .mobile-bar, .no-print, .skip-link, .update-banner { display: none !important; }
+  .shell { display: block; }
+  .content { padding: 0; }
+  .dossie { font-size: 11pt; }
+}
+
+/* Matriz de comparação dos planos (D-R34): rola dentro do quadro, primeira coluna fixa. */
+.plan-matrix-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); max-width: 100%; }
+.plan-matrix { border-collapse: separate; border-spacing: 0; width: 100%; min-width: 640px; font-size: 0.88rem; }
+.plan-matrix th, .plan-matrix td { padding: 9px 12px; border-bottom: 1px solid var(--border); text-align: center; vertical-align: middle; }
+.plan-matrix thead th { position: sticky; top: 0; background: var(--surface); font-weight: 700; }
+.plan-matrix th[scope="row"], .plan-matrix thead th:first-child { position: sticky; left: 0; z-index: 1; background: var(--surface); text-align: left; font-weight: 500; min-width: 200px; }
+.plan-matrix th[scope="row"] { text-transform: none; letter-spacing: normal; font-size: 0.88rem; color: var(--text); white-space: normal; }
+.plan-matrix thead th { font-size: 0.8rem; color: var(--text); }
+.plan-matrix tr.group th { text-align: left; font-size: 0.72rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); background: var(--bg, var(--surface)); position: static; }
+.plan-matrix .featured { color: var(--accent, var(--ok)); }
+.plan-matrix .current { background: color-mix(in srgb, var(--ok) 8%, transparent); }
+.plan-matrix tbody tr:last-child th, .plan-matrix tbody tr:last-child td { border-bottom: none; }
+.plan-grid-compact .plan { padding: 18px; }
+.plan-grid-compact .plan h3 { font-size: 1.05rem; }

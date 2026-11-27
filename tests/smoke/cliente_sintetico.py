@@ -149,7 +149,7 @@ def main():
         expect(s in (400, 403), f'sem CSRF deveria falhar: {s}')
     csrf()
 
-    @step('Cobrança: empresa nasce sem verificação, SANDBOX tem franquia rígida e o teto é guardado')
+    @step('Cobrança: empresa nasce sem verificação, SANDBOX tem franquia rígida e sem DF-e, e o teto é guardado')
     def cobranca():
         s, b = pessoa.call('GET', '/v1/cobranca')
         expect(s == 200, f'cobrança {s} {b}')
@@ -158,7 +158,7 @@ def main():
         s, b = pessoa.call('PUT', '/v1/cobranca/teto', {'teto_centavos': 5000})
         expect(s == 200 and pessoa.call('GET', '/v1/cobranca')[1]['excedente']['teto_centavos'] == 5000, f'teto {s} {b}')
         s, b = pessoa.call('POST', f'/v1/cnpjs/{st["cnpj"]}/dfe/sync', {'c_uf_autor': 35})
-        expect(s == 403 and b['code'] == 'ERR_EMPRESA_NAO_VERIFICADA', f'DF-e sem verificação {s} {b}')
+        expect(s == 403 and b['code'] == 'ERR_PLANO_SEM_DFE', f'Sandbox não tem DF-e (D-R13): {s} {b}')
         return 'teto R$ 50,00'
     cobranca()
 
@@ -193,7 +193,7 @@ def main():
         return f"CBS {r['totais']['cbs_valor']}; consumo {u['simulacoes']} simulação(ões)"
     erp()
 
-    @step('Backoffice verifica a titularidade manualmente → aviso no portal e DF-e liberado (pede o A1)')
+    @step('Backoffice verifica a titularidade manualmente → aviso no portal; no plano com DF-e, a captura pede o A1')
     def verificar():
         tid = pessoa.call('GET', '/v1/conta/sessao')[1]['empresa_ativa']
         expect(admin.call('POST', f'/admin/v1/tenants/{tid}/verificar', {'observacao': 'x'})[0] == 400, 'observação curta')
@@ -206,8 +206,14 @@ def main():
         expect(v['verificada'] and v['metodo'] == 'MANUAL', f'verificação {v}')
         avisos = pessoa.call('GET', '/v1/avisos')[1]['avisos']
         expect(any(x['tipo'] == 'EMPRESA_VERIFICADA' for x in avisos), f'aviso de empresa verificada: {[x["tipo"] for x in avisos]}')
-        s, b = pessoa.call('POST', f'/v1/cnpjs/{st["cnpj"]}/dfe/sync', {'c_uf_autor': 35})
-        expect(s == 409 and b['code'] == 'ERR_CERT_REQUIRED', f'DF-e verificado pede o certificado: {s} {b}')
+        expect(admin.call('POST', f'/admin/v1/tenants/{tid}/plano', {'plano': 'PROFISSIONAL'})[0] == 200, 'plano com DF-e')
+        t0 = time.time()
+        while time.time() - t0 < 10:
+            s, b = pessoa.call('POST', f'/v1/cnpjs/{st["cnpj"]}/dfe/sync', {'c_uf_autor': 35})
+            if b.get('code') != 'ERR_PLANO_SEM_DFE':
+                break
+            time.sleep(0.5)
+        expect(s == 409 and b['code'] == 'ERR_CERT_REQUIRED', f'DF-e verificado e no plano certo pede o certificado: {s} {b}')
     verificar()
 
     @step('Sessões: segunda sessão com código de recuperação, listar e sair das outras')
@@ -221,6 +227,35 @@ def main():
         expect(pessoa.call('POST', '/v1/conta/sair-outras')[1]['encerradas'] == 1, 'sair das outras')
         expect(outro.call('GET', '/v1/me')[0] == 401, 'sessão encerrada ainda vale')
     sessoes()
+
+    @step('Alíquotas por município (site público), apuração do mês, OAuth pelo portal e log de chamadas')
+    def novidades():
+        anon = Client(P)
+        s, b = anon.call('GET', '/v1/publico/municipios?busca=' + urllib.parse.quote('sao paulo'))
+        expect(s == 200 and b[0]['codigo'] == 3550308, f'busca de município {s} {b}')
+        s, b = anon.call('GET', '/v1/publico/aliquotas?municipio=3550308&data=2027-03-01')
+        cbs = next(t for t in b['tributos'] if t['tributo'] == 'CBS')
+        expect(s == 200 and cbs['provisoria'] and b['total'] is not None, f'alíquotas {s} {b}')
+        s, b = pessoa.call('GET', '/v1/apuracao?competencia=2027-06')
+        expect(s == 200 and 'saldo' in b, f'apuração {s} {b}')
+        s, c = pessoa.call('POST', '/v1/oauth-clients', {'nome': 'ERP sintético', 'scopes': ['usage:read']})
+        expect(s == 201 and c['client_secret'], f'cliente OAuth {s} {c}')
+        req = urllib.request.Request(P + '/oauth/token', method='POST', data=urllib.parse.urlencode(
+            {'grant_type': 'client_credentials', 'client_id': c['client_id'], 'client_secret': c['client_secret']}).encode(),
+            headers={'Content-Type': 'application/x-www-form-urlencoded'})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            expect(r.status == 200, 'token OAuth')
+        expect(pessoa.call('DELETE', f'/v1/oauth-clients/{c["client_id"]}')[0] == 204, 'revogar cliente OAuth')
+        expect(pessoa.call('GET', '/v1/apuracao?competencia=errada')[0] == 400, 'erro proposital')
+        t0 = time.time()
+        while time.time() - t0 < 15:
+            logs = pessoa.call('GET', '/v1/logs?status=erros')[1]['chamadas']
+            if any(x['rota'] == '/v1/apuracao' for x in logs):
+                break
+            time.sleep(1)
+        expect(any(x['rota'] == '/v1/apuracao' and x['status'] == 400 for x in logs), f'log de chamadas {logs[:3]}')
+        return f"CBS 2027 {cbs['aliquota']}% (provisória); OAuth e log ok"
+    novidades()
 
     @step('Webhook num destino que recusa o POST: nova tentativa agendada e retry manual (integrador OEM)')
     def webhook():

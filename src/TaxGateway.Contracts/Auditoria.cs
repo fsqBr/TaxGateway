@@ -22,7 +22,25 @@ public sealed class AuditoriaResponse
     public ResumoFinanceiroDto ResumoFinanceiro { get; set; } = new();
     public List<OcorrenciaDto> Ocorrencias { get; set; } = [];
     public List<AvisoDto> Avisos { get; set; } = [];
+
+    /// <summary>D-R21: alíquota nominal usada por tributo, com origem e ato legal (vazio antes de 2027: base do motor).</summary>
+    public List<AliquotaAplicadaDto> AliquotasAplicadas { get; set; } = [];
     public string AvisoLegal { get; set; } = "Indícios não constituem parecer tributário. Achados determinísticos refletem as regras oficiais vigentes na data de emissão.";
+}
+
+public sealed class AliquotaAplicadaDto
+{
+    public string Tributo { get; set; } = "";
+    public decimal Aliquota { get; set; }
+
+    /// <summary>REFERENCIA | PROPRIA_DO_ENTE | PRODUTO (IS).</summary>
+    public string Origem { get; set; } = "";
+    public string? EnteCodigo { get; set; }
+    public string? Produto { get; set; }
+    public int? Item { get; set; }
+    public string AtoLegal { get; set; } = "";
+    public bool Provisoria { get; set; }
+    public Guid CatalogoId { get; set; }
 }
 
 public sealed class ResumoFinanceiroDto

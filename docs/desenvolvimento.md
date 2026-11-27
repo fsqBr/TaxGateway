@@ -34,7 +34,18 @@ curl -s -X POST http://127.0.0.1:5205/v1/calculo/simular -H "X-Api-Key: $KEY" -H
   "itens":[{"nbs":"122011200","cst_ibs_cbs":"000","c_class_trib":"000001","valor_base_calculo":1200}]}'
 ```
 
-## Mudar uma alíquota (duas pessoas, D-204/D-214)
+## Sincronização com a Receita (D-R30/D-R31)
+
+* O `RateSyncWorker` (workers, `Workers:RateSync`, padrão ligado) aplica no catálogo o que a base oficial da calculadora
+  publicou: completo quando o bundle muda (`rfb_sync_state`), União e UFs todo dia. No compose, a primeira rodada faz
+  cerca de 100 mil consultas ao motor local (alguns minutos). Linha do tempo: `GET /v1/publico/atualizacoes-fiscais`.
+* Bundle novo: o resumo da regressão vai em `src/TaxGateway.Workers/fiscal-bundles/<bundle>.json` (gerado pelo
+  `regression_report.py --summary-json`) e vira o texto do aviso `MOTOR_ATUALIZADO`.
+* Merge automático do PR fiscal: variável do repositório `FISCAL_AUTO_MERGE=true` e segredo `FISCAL_BOT_TOKEN` (PAT ou
+  App com `contents`/`pull-requests`), para o CI rodar no PR; exige "Allow auto-merge" e as verificações obrigatórias
+  na proteção da `main`.
+
+## Mudar uma alíquota à mão (duas pessoas, D-204/D-214)
 
 1. `GET /admin/v1/params/rates`: listar as linhas ativas e escolher o id a substituir.
 2. `POST /admin/v1/params/rates/changes`: o operador A propõe, com `justificativa`, `linhas` e `substitui`.
@@ -239,8 +250,11 @@ docker compose -f docker-compose.yml -f docker-compose.capacity.yml -f docker-co
   `https://SEU-HOST/webhooks/stripe` com `checkout.session.completed`, `customer.subscription.*` e `invoice.*`. Os
   workers criam produtos, preços e medidores a partir dos planos do backoffice. Sem chave, as telas de pagamento
   dizem "não configurado" e o resto funciona.
-- **Avisos** (D-J03): os workers mandam por e-mail (Mailpit em dev) os avisos de franquia, webhook pausado,
-  certificado vencendo e mudança de alíquota; `Workers:Notifications=false` desliga.
+- **Avisos** (D-J03, D-R32): os workers mandam por e-mail (Mailpit em dev) todos os avisos do portal — franquia,
+  cobrança (assinatura, fatura emitida/vencendo, pagamento, renovação), resumo do mês, segurança, webhook,
+  certificado, mudança de alíquota e motor atualizado; `Workers:Notifications=false` desliga. Boas-vindas e login por
+  navegador novo saem direto da API. Informativos desligáveis por pessoa em Minha conta (D-R33).
+- O webhook da Stripe precisa de `invoice.upcoming` (aviso de renovação) além dos eventos acima.
 - **Teto, inadimplência e titularidade** (D-R08 a D-R10): teto de excedente padrão 0 (`PUT /v1/cobranca/teto`); a
   régua roda no `DunningWorker` (workers com `ConnectionStrings__Billing`) a partir de `invoice.payment_failed`;
   `CnpjRegistry__BaseUrl` aponta a consulta pública de CNPJ que devolve `{"email": ...}` (vazio = só certificado e
@@ -297,3 +311,15 @@ for t in api workers migrator; do docker build -f src/Dockerfile --target $t -t 
 docker compose -f docker-compose.yml -f docker-compose.capacity.yml -f docker-compose.web.yml up -d --build api workers rtc-regular-batch web web-backoffice
 python tests/smoke/stack_smoke.py
 ```
+
+## Alíquotas, planos e apuração (D-R12 a D-R28)
+
+- **Catálogo de alíquotas**: tela Alíquotas do backoffice (linha a linha ou CSV, prévia, aprovação/recusa por outra
+  pessoa). Runbook: `docs/runbooks/mudanca-aliquota.md`. Municípios e UFs do IBGE em `municipios`/`ufs` (V0022).
+- **Consulta pública**: `GET /v1/publico/municipios?busca=` e `GET /v1/publico/aliquotas?municipio=&data=`; página `/aliquotas`.
+- **Workers novos**: `ReprocessWorker` (reprocessamento automático, `Workers:Reprocess`), `CatalogEngineCheck`
+  (conferência catálogo × motor a cada 6 h, `Workers:CatalogCheck`), `ApiLogJanitor` (expurgo do log de chamadas).
+- **Limites**: `RateLimiting:PersonRpm/PersonBurst/PersonConcurrency` (pessoa no portal, padrão 120/30/6); sub-limite
+  por CNPJ atendido no plano (`per_cnpj_rpm`); limites de contrato por tenant no backoffice (`PUT /admin/v1/tenants/{id}/limites`).
+- **Regra de consumo única**: `PlanQuota` (API, criação de lote e cada documento dos workers).
+- **Cobertura de testes**: `dotnet tool restore` e `dotnet reportgenerator`; front com `npx vitest run --coverage`.

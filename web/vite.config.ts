@@ -46,5 +46,12 @@ export default defineConfig({
   preview: { host: '127.0.0.1', port: 4173, proxy: Object.fromEntries(proxied.map((p) => [p, { target: api, changeOrigin: false }])) },
   // Nada de data: URI (fontes pequenas viravam data:font e a CSP font-src 'self' bloqueava): tudo vira arquivo.
   build: { sourcemap: false, outDir: 'dist', assetsInlineLimit: 0 },
-  test: { environment: 'jsdom', globals: true, setupFiles: ['./src/test/setup.ts'], css: false, include: ['src/**/*.test.{ts,tsx}'] },
+  test: {
+    environment: 'jsdom', globals: true, setupFiles: ['./src/test/setup.ts'], css: false, include: ['src/**/*.test.{ts,tsx}'],
+    // Meta do projeto: ≥ 90% em todas as frentes (o CI roda com --coverage e falha abaixo disto).
+    coverage: {
+      provider: 'v8', include: ['src/**'], exclude: ['src/test/**', 'src/main.tsx', 'src/**/*.d.ts'],
+      thresholds: { lines: 90, statements: 90, branches: 90, functions: 90 },
+    },
+  },
 });

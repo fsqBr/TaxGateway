@@ -94,6 +94,36 @@ public sealed class SimulacaoResponse
 
     /// <summary>Grupo de operação devolvido pelo motor (ex.: gCompraGov com o redutor), sem alteração.</summary>
     public JsonElement? OperacaoDfe { get; set; }
+
+    /// <summary>
+    /// D-R20: false quando alguma alíquota veio do cliente (<c>aliquotas_nominais</c>) — o resultado é um cenário
+    /// hipotético, não o cálculo oficial do TaxGateway.
+    /// </summary>
+    public bool Oficial { get; set; } = true;
+
+    /// <summary>D-R20: cálculo ao lado do oficial com as exceções ativas do contribuinte (liminar, regime especial...).</summary>
+    public CenarioAjustadoDto? CenarioAjustado { get; set; }
+}
+
+/// <summary>Cálculo ajustado por exceções do contribuinte. O oficial continua sendo o de <c>totais</c>.</summary>
+public sealed class CenarioAjustadoDto
+{
+    public TotaisDto Totais { get; set; } = new();
+
+    /// <summary>Diferença do tributo total (ajustado − oficial).</summary>
+    public decimal Diferenca { get; set; }
+
+    public List<ExcecaoAplicadaDto> Excecoes { get; set; } = [];
+}
+
+public sealed class ExcecaoAplicadaDto
+{
+    public Guid Id { get; set; }
+    public string Tributo { get; set; } = "";
+    public decimal Aliquota { get; set; }
+    public string Motivo { get; set; } = "";
+    public string Processo { get; set; } = "";
+    public List<int> Itens { get; set; } = [];
 }
 
 public sealed class EngineVersionDto

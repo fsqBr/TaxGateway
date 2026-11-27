@@ -18,12 +18,15 @@ operação multiempresa (OEM), cobrança por uso, segurança e LGPD.
 | **Simulação** | `POST /v1/calculo/simular`: CBS, IBS (UF e município) e IS por item, regime regular e Simples Nacional, com o snapshot de parâmetros usado |
 | **Auditoria** | `POST /v1/auditoria/xml`: recalcula NF-e/NFC-e (saída e entrada), valida schema e assinatura ICP-Brasil e aponta divergências com regra, campo e fundamento legal |
 | **Documentos** | Histórico de tudo o que foi auditado, com filtros, comparação por item (declarado × referência × fundamento) e exportação CSV |
-| **Classificação** | `GET /v1/classificacao`: CST e cClassTrib candidatos por NCM ou NBS nos dados abertos do motor oficial |
+| **Alíquotas** | Catálogo por União, 27 UFs e 5.571 municípios (IBGE) com vigência e ato legal, **sincronizado automaticamente com a base oficial da Receita** (data exata em que cada alíquota passa a valer; o que a equipe cadastra à mão passa por aprovação de duas pessoas); linha do tempo pública das atualizações fiscais; consulta pública por município e data (`/v1/publico/aliquotas`, página `/aliquotas`); IS por produto conferido na auditoria; exceções do contribuinte (liminar, regime especial) calculadas ao lado do oficial; reprocessamento automático em mudança retroativa |
+| **Apuração** | `GET /v1/apuracao`: débitos, créditos e saldo estimado do mês a partir das notas auditadas, por município e classificação; fornecedores pelo crédito em risco; CSV para o contador |
+| **Classificação** | `GET /v1/classificacao`: CST e cClassTrib candidatos por NCM ou NBS nos dados abertos do motor oficial; classificação em massa por CSV no portal |
 | **Lotes e webhooks** | ZIP com milhares de XMLs processado pelos workers (fair-share entre clientes), relatório CSV e eventos assinados (HMAC-SHA256) |
 | **DF-e** | Certificado A1 em custódia cifrada, distribuição por NSU com as regras anti-bloqueio da SEFAZ, Ciência da Operação e auditoria automática da entrada |
 | **Contas e identidade** | Pessoas com e-mail, senha e MFA obrigatório, papéis e convites de equipe; sistemas com API key ou OAuth 2.0 client credentials (OpenIddict); revogação e suspensão em < 5 s |
-| **Planos e cobrança** | Planos de mercado editáveis no backoffice, franquia e excedente; assinatura, medição e faturas pela Stripe; multi-CNPJ (OEM) e fechamento mensal idempotente |
-| **Avisos** | Franquia, webhook pausado, certificado vencendo e mudança de alíquota no portal e por e-mail |
+| **Planos e cobrança** | Planos editáveis no backoffice; franquia, excedente só até o teto autorizado pelo cliente e régua de inadimplência; cada limite do plano vale em todos os caminhos (API, lote, DF-e); limites de requisição por plano, por pessoa e por CNPJ atendido; assinatura, medição e faturas pela Stripe; verificação da titularidade do CNPJ |
+| **Avisos** | Ciclo de vida completo no portal e por e-mail: boas-vindas, assinatura, troca de plano, fatura emitida e vencendo, pagamento, renovação, resumo do mês, franquia e teto, inadimplência, webhook pausado, certificado vencendo, titularidade, credencial nova e login novo, mudança de alíquota (só para quem é afetado, na publicação e no dia em que vale) e motor oficial atualizado; informativos desligáveis por pessoa |
+| **Integração** | API keys e clientes OAuth criados no portal, webhooks com reenvio, log das chamadas da API (30 dias) |
 | **LGPD** | RLS forçado em todas as tabelas, XML não guardado por padrão, CPF pseudonimizado com chave fora do banco, atendimento a titulares |
 | **Interfaces** | Site com cadastro e planos, portal do cliente (também no celular), backoffice com operadores e trilha de auditoria (React), central de ajuda em `/ajuda` e referência interativa da API em `/docs` |
 | **Versão** | Versão única (`VERSION`) em `GET /version`, no header `X-TaxGateway-Version` e no portal, com aviso de novidades a partir do [`CHANGELOG.md`](CHANGELOG.md) |
@@ -85,7 +88,11 @@ DF-e, carga) está em [`docs/desenvolvimento.md`](docs/desenvolvimento.md).
 for s in UnitTests SecurityTests ContractTests GoldenTests; do dotnet test tests/TaxGateway.$s; done
 (cd web && npm run typecheck && npm test && npm run e2e)
 python tests/smoke/stack_smoke.py           # roteiro ponta a ponta contra a pilha em containers
+python tests/smoke/cliente_sintetico.py     # jornada de uma empresa nova e do ERP dela (precisa do Mailpit)
 ```
+
+Cobertura: `dotnet test --collect:"XPlat Code Coverage"` + `dotnet reportgenerator` (ferramenta local em
+`dotnet-tools.json`) e `cd web && npx vitest run --coverage`. Meta do projeto: **≥ 90%** no back e no front.
 
 Os testes Golden e de contrato usam Testcontainers e os motores da RFB rodando localmente.
 
@@ -95,7 +102,7 @@ Os testes Golden e de contrato usam Testcontainers e os motores da RFB rodando l
 * **Deploy** (`deploy.yml`): roda depois do CI verde na `main`; imagens no GHCR → staging → produção com aprovação, sempre
   pelo mesmo digest (actions fixadas por SHA, imagens base por digest, Dependabot para atualizações). Fica desligado até existir cluster:
   ligue com a variável de repositório `DEPLOY_ENABLED=true` e os segredos `KUBECONFIG_STAGING`/`KUBECONFIG_PRODUCTION`.
-* **Atualização fiscal** (`fiscal-update.yml`): diária; abre PR com o relatório de regressão quando a RFB publica (ou republica) um motor.
+* **Atualização fiscal** (`fiscal-update.yml`): diária; abre PR com o relatório de regressão e o resumo do bundle quando a RFB publica (ou republica) um motor; com `FISCAL_AUTO_MERGE=true` o PR entra sozinho quando as verificações passam (o deploy em produção continua com aprovação). As alíquotas da base nova são aplicadas pelos workers (D-R30).
 
 ## Documentação
 
@@ -116,10 +123,10 @@ Os testes Golden e de contrato usam Testcontainers e os motores da RFB rodando l
 
 Fases 0 a 9, Hardening técnico, interfaces web, central de ajuda e as correções e lacunas da
 [revisão multidisciplinar](docs/revisao-multidisciplinar.md) (P0, contas com MFA, planos e Stripe, plataforma P1 e
-jornadas de produto) implementados e testados. Dependem de recursos externos ou de decisão humana (detalhes em
+jornadas de produto), regras comerciais (teto, inadimplência, titularidade), planos aplicados em todos os caminhos, alíquotas por ente com transparência e exceções, limites por plano, apuração do mês e navegação por tarefa implementados e testados. Dependem de recursos externos ou de decisão humana (detalhes em
 [`docs/decisoes.md`](docs/decisoes.md)): conta Stripe real, ensaio do canário em cluster, OIDC do GitHub para o
 cluster e assinatura de imagens, homologação real de DF-e (30 dias sem `cStat 656`), NFS-e nacional, pentest externo e
-revisão jurídica dos Termos, da Política de Privacidade, do RIPD e do DPA.
+revisão jurídica dos Termos, da Política de Privacidade, do RIPD e do DPA, e os atos fiscais ainda não publicados (CBS definitiva de 2027, referências de 2028–2033, alíquotas próprias de entes e do IS por produto).
 
 **Aviso:** indícios de auditoria não constituem parecer tributário.
 

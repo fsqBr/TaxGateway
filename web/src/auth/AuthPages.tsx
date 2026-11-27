@@ -7,6 +7,7 @@ import { Alert, Field, useAction } from '../components/ui';
 import { account, codeOf, LOGIN_PATH, MFA_PATH, type Realm } from '../lib/api';
 import { onlyCnpjChars } from '../lib/format';
 import { useSession } from './session';
+import type { PlanoPublico } from '../pages/Planos';
 
 // Telas de conta (D-U01 a D-U08): entrar, MFA, cadastro, confirmação de e-mail, senha e convite. Mesmo visual para
 // portal e backoffice; o backoffice não tem cadastro (operadores são convidados).
@@ -239,9 +240,39 @@ export function RecoveryCodes({ codes }: { codes: string[] }) {
 
 const passwordHint = 'Mínimo de 12 caracteres. Uma frase funciona bem (ex.: "notas conferidas antes do fechamento").';
 
+/** Plano escolhido no site antes do cadastro; o portal lê esta chave para oferecer a contratação depois do login. */
+export const PLANO_ESCOLHIDO_KEY = 'tg:plano-escolhido';
+
+function lerPlanoEscolhido(): string | undefined {
+  try { return sessionStorage.getItem(PLANO_ESCOLHIDO_KEY) ?? undefined; } catch { return undefined; }
+}
+
+const nomeDoCodigo = (codigo: string) => codigo.toLowerCase().split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+
+/** ?plano=CODIGO vindo de /planos: valida o código, guarda para o portal e busca o nome e se o plano tem DF-e. */
+function usePlanoEscolhido() {
+  const [params] = useSearchParams();
+  const bruto = (params.get('plano') ?? '').trim().toUpperCase();
+  const codigo = /^[A-Z][A-Z0-9_]{1,29}$/.test(bruto) && bruto !== 'SANDBOX' ? bruto : undefined;
+  const [plano, setPlano] = useState<PlanoPublico>();
+  useEffect(() => {
+    if (!codigo) return;
+    try { sessionStorage.setItem(PLANO_ESCOLHIDO_KEY, codigo); } catch { /* armazenamento bloqueado: o portal só não oferece o atalho */ }
+    let vivo = true;
+    account<PlanoPublico[]>('portal', '/planos', { silent: true })
+      .then((ps) => { if (vivo) setPlano(ps.find((p) => p.codigo === codigo)); })
+      .catch(() => undefined);
+    return () => { vivo = false; };
+  }, [codigo]);
+  if (!codigo) return undefined;
+  return { codigo, nome: plano?.nome ?? nomeDoCodigo(codigo), dfe: plano?.captura_dfe ?? true, gratis: plano ? plano.preco_centavos === 0 && plano.contratacao_online : false };
+}
+
 export function SignupPage() {
   const [form, setForm] = useState({ nome: '', email: '', senha: '', empresa: '', cnpj: '', aceite: false });
   const [done, setDone] = useState(false);
+  const escolhido = usePlanoEscolhido();
+  const planoPago = escolhido && !escolhido.gratis ? escolhido : undefined;
   const { busy, error, run } = useAction();
   const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm({ ...form, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
@@ -262,6 +293,12 @@ export function SignupPage() {
           <MailCheck size={40} aria-hidden="true" color="var(--accent)" />
           <h1>Confira seu e-mail</h1>
           <p className="muted">Enviamos um link de confirmação para <strong>{form.email}</strong>. Ele vale por 24 horas. Depois de confirmar, entre e configure a verificação em duas etapas.</p>
+          {planoPago && (
+            <Alert kind="info">
+              Sua conta começa no Sandbox. Para contratar o plano <strong>{planoPago.nome}</strong>, entre no portal, verifique a empresa e
+              assine em <strong>Plano e cobrança</strong>.
+            </Alert>
+          )}
           <Link className="button lg" to="/portal/entrar">Ir para o login</Link>
         </div>
       </AuthLayout>
@@ -273,8 +310,16 @@ export function SignupPage() {
       <form onSubmit={submit}>
         <div>
           <h1>Criar conta grátis</h1>
-          <p className="muted" style={{ marginTop: 6 }}>Comece no plano Sandbox, com o motor oficial e sem cartão. Troque de plano quando quiser.</p>
+          <p className="muted" style={{ marginTop: 6 }}>Comece no plano Sandbox, com o motor oficial e sem cartão: 200 auditorias e 2.000 simulações por mês. Troque de plano quando quiser.</p>
         </div>
+        {planoPago && (
+          <Alert kind="info">
+            <strong>Você escolheu o plano {planoPago.nome}.</strong> A conta começa no Sandbox (grátis). Para pagar o plano {planoPago.nome}
+            {planoPago.dfe ? ' e ligar a captura de notas de fornecedores (DF-e)' : ''}, será preciso verificar a empresa: com o certificado
+            e-CNPJ, com um código enviado ao e-mail do cadastro do CNPJ na Receita Federal ou pela análise do nosso suporte. Depois de
+            entrar, o portal oferece a contratação em Plano e cobrança.
+          </Alert>
+        )}
         <Field label="Seu nome"><input autoComplete="name" value={form.nome} onChange={set('nome')} required maxLength={120} /></Field>
         <Field label="E-mail de trabalho"><input type="email" autoComplete="email" value={form.email} onChange={set('email')} required /></Field>
         <Field label="Senha" hint={passwordHint}><input type="password" autoComplete="new-password" minLength={12} value={form.senha} onChange={set('senha')} required /></Field>
@@ -296,6 +341,7 @@ export function ConfirmEmailPage() {
   const [params] = useSearchParams();
   const [state, setState] = useState<'wait' | 'ok' | 'error'>('wait');
   const { error, run } = useAction();
+  const [planoEscolhido] = useState(lerPlanoEscolhido);
   const once = useRef(false);
   useEffect(() => {
     if (once.current) return;
@@ -307,6 +353,9 @@ export function ConfirmEmailPage() {
       <div className="stack">
         <h1>{state === 'ok' ? 'E-mail confirmado' : state === 'error' ? 'Não foi possível confirmar' : 'Confirmando…'}</h1>
         {state === 'ok' && <p className="muted">Pronto! Agora entre e configure a verificação em duas etapas.</p>}
+        {state === 'ok' && planoEscolhido && (
+          <p className="muted small">O plano que você escolheu ({nomeDoCodigo(planoEscolhido)}) fica à sua espera em <strong>Plano e cobrança</strong>, depois de verificar a empresa.</p>
+        )}
         <Alert>{error}</Alert>
         {state !== 'wait' && <Link className="button lg" to="/portal/entrar">Ir para o login</Link>}
       </div>

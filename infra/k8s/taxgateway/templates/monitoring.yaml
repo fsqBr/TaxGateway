@@ -92,6 +92,22 @@ spec:
           annotations:
             summary: "LCR da ICP-Brasil com mais de 36 h: confira o CrlPublisher dos workers e o acesso aos pontos de distribuição"
             runbook: docs/runbooks/lcr-e-cache.md
+        # D-R22: alíquota de referência publicada por menos de 90 dias à frente (ex.: CBS 2028, transição 2029-2033).
+        - alert: TaxGatewayAliquotaSemCobertura
+          expr: min by (tributo) (taxgateway_aliquota_cobertura_dias) < 90
+          for: 1h
+          labels: { severity: ticket }
+          annotations:
+            summary: "Alíquota de {{ "{{" }} $labels.tributo {{ "}}" }} sem publicação para os próximos 90 dias: carregue o ato (Senado/CG-IBS) no backoffice"
+            runbook: docs/runbooks/mudanca-aliquota.md
+        # D-R22: catálogo de alíquotas diferente da base do motor oficial nas datas em que o motor decide a alíquota.
+        - alert: TaxGatewayCatalogoDivergeDoMotor
+          expr: max(taxgateway_catalogo_divergente_motor) > 0
+          for: 30m
+          labels: { severity: ticket }
+          annotations:
+            summary: "Catálogo de alíquotas diverge do motor oficial (bundle novo?): veja o log CatalogEngineCheck dos workers"
+            runbook: docs/runbooks/mudanca-aliquota.md
         # D-P10: entrada do Valkey com selo inválido = possível adulteração do cache (investigar como incidente de segurança).
         - alert: TaxGatewayCacheAdulterado
           expr: sum(increase(taxgateway_cache_tampered_total[10m])) > 0

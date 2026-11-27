@@ -130,6 +130,21 @@ public static class EmailTemplates
         Html($"Código {code}", $"Alguém pediu, no TaxGateway, a confirmação de titularidade do CNPJ da empresa <b>{WebUtility.HtmlEncode(company)}</b>. Informe o código <b style=\"font-size:20px;letter-spacing:4px\">{code}</b> na tela de verificação. Vale por 30 minutos.", null, null,
             "Este e-mail foi enviado para o endereço do cadastro público do CNPJ na Receita Federal. Se você não reconhece o pedido, ignore."));
 
+    /// <summary>D-R32: boas-vindas depois da confirmação do e-mail, com os primeiros passos.</summary>
+    public static EmailMessage Welcome(string to, string name, string portal, string help) => new(to, "Boas-vindas ao TaxGateway",
+        $"Olá, {name}.\n\nSua conta está ativa. Primeiros passos:\n"
+        + "1. Ative a verificação em duas etapas (pedida no primeiro acesso).\n"
+        + "2. Em Empresa, confirme a titularidade do CNPJ (exigida para plano pago e DF-e).\n"
+        + "3. Faça uma simulação ou envie um XML para auditar — o Sandbox já permite testar.\n"
+        + "4. Para integrar, crie uma chave de API em Credenciais.\n\n"
+        + $"Portal: {portal}\nCentral de ajuda: {help}\n\nVocê vai receber aqui os avisos importantes: cobrança, uso da franquia, "
+        + "mudanças de alíquota que afetam a sua empresa e alertas de segurança. Os informativos podem ser desligados em Minha conta.",
+        Html("Boas-vindas ao TaxGateway", $"Olá, {WebUtility.HtmlEncode(name)}. Sua conta está ativa.<br><br>"
+            + "<b>Primeiros passos</b><br>1. Ative a verificação em duas etapas.<br>2. Em <b>Empresa</b>, confirme a titularidade do CNPJ.<br>"
+            + "3. Faça uma simulação ou envie um XML para auditar.<br>4. Para integrar, crie uma chave de API em <b>Credenciais</b>.<br><br>"
+            + $"Dúvidas? Veja a <a href=\"{WebUtility.HtmlEncode(help)}\">central de ajuda</a>.", portal, "Abrir o portal",
+            "Você vai receber aqui os avisos importantes (cobrança, franquia, mudanças de alíquota e segurança). Os informativos podem ser desligados em Minha conta."));
+
     public static EmailMessage SecurityNotice(string to, string name, string what) => new(to, "Aviso de segurança do TaxGateway",
         $"Olá, {name}.\n\n{what}\n\nSe não foi você, redefina sua senha imediatamente e fale com o administrador da sua conta.",
         Html("Aviso de segurança", $"Olá, {WebUtility.HtmlEncode(name)}. {WebUtility.HtmlEncode(what)} Se não foi você, redefina sua senha imediatamente.", null, null));

@@ -4,6 +4,8 @@ import { Ban, Building2, History, Layers3, Percent, Receipt, Scale, UserCog } fr
 import { Operadores, Trilha } from './Operadores';
 import { Planos } from './Planos';
 import { Disputas } from './Disputas';
+import { Aliquotas } from './Aliquotas';
+import { LimitesContrato, type Limites } from './LimitesContrato';
 import { useSession } from '../auth/session';
 import { Shell, type NavItem } from '../components/Shell';
 import { ConfirmButton } from '../components/ConfirmDialog';
@@ -180,7 +182,7 @@ interface TenantDetail {
   tenant: { tenant_id: string; nome: string; cnpj_raiz: string; plano: string; situacao: string; criado_em: string;
     cobranca: { provedor: string | null; cliente: string | null; assinatura: string | null; situacao_assinatura: string | null; fim_do_periodo: string | null };
     teto_centavos: number; verificada_em: string | null; metodo_verificacao: string | null; verificada_por: string | null;
-    inadimplente_desde: string | null; motivo_suspensao: string | null };
+    inadimplente_desde: string | null; motivo_suspensao: string | null; limites?: Limites | null };
   pessoas: { nome: string; email: string; papel: string; mfa: boolean; situacao: string; ultimo_acesso: string | null }[];
   cnpjs: { cnpj: string; ativo: boolean; criado_em: string }[];
   api_keys: { nome: string; prefixo: string; scopes: string[]; expira_em: string | null; revogada_em: string | null; ultimo_uso: string | null; criada_em: string }[];
@@ -240,6 +242,7 @@ function TenantDetalhe({ tenant, planos, onClose, onChange }: { tenant: Tenant; 
               </div>
             </Card>
           )}
+          {can('admin:commercial') && <LimitesContrato tenantId={t.tenant_id} nome={t.nome} atuais={t.limites} />}
           {can('admin:security') && !t.verificada_em && (
             <Card title="Verificar titularidade manualmente" description="Só depois de conferir contrato social ou documento equivalente. Registre o que foi conferido — fica na trilha.">
               <div className="row">
@@ -336,126 +339,6 @@ function OAuthClients({ tenant, onSecret, onChange }: { tenant: Tenant; onSecret
   );
 }
 
-interface Rate { id: string; tributo: string; tipo: string; esfera: string; ente_codigo: string | null; aliquota: number; valid_from: string; valid_to: string | null; ato_legal: string; fonte: string; provisoria: boolean }
-interface Change { id: string; dominio: string; status: string; proposto_por: string; aprovado_por: string | null; justificativa: string; vigente_em: string; criado_em: string; payload: unknown }
-
-const emptyLine = { tributo: 'CBS', tipo: 'REFERENCIA', esfera: 'UNIAO', ente_codigo: '', aliquota: '', valid_from: '', valid_to: '', ato_legal: '', fonte: 'SENADO', provisoria: false };
-
-export function Aliquotas() {
-  const rates = useLoad(() => backoffice<Rate[]>('/admin/v1/params/rates'));
-  const [status, setStatus] = useState('PROPOSED');
-  const changes = useLoad(() => backoffice<Change[]>('/admin/v1/params/changes', { query: { status } }), [status]);
-  const [justificativa, setJustificativa] = useState('');
-  const [vigente, setVigente] = useState('');
-  const [linha, setLinha] = useState(emptyLine);
-  const [substitui, setSubstitui] = useState<string[]>([]);
-  const [msg, setMsg] = useState<string>();
-  const { busy, error, run } = useAction();
-
-  const propose = async (e: FormEvent) => {
-    e.preventDefault();
-    const r = await run(() =>
-      backoffice<{ change_id: string }>('/admin/v1/params/rates/changes', {
-        method: 'POST',
-        body: {
-          justificativa,
-          vigente_em: vigente ? new Date(`${vigente}T00:00:00-03:00`).toISOString() : undefined,
-          linhas: [{ ...linha, ente_codigo: linha.ente_codigo || null, aliquota: Number(linha.aliquota), valid_to: linha.valid_to || null }],
-          substitui,
-        },
-      }));
-    if (r) {
-      setMsg(`Proposta ${r.change_id} criada. Outra pessoa precisa aprová-la.`);
-      setLinha(emptyLine);
-      setSubstitui([]);
-      void changes.reload();
-    }
-  };
-
-  const approve = async (id: string) => {
-    if (await run(() => backoffice(`/admin/v1/params/changes/${id}/approve`, { method: 'POST' })) !== undefined) {
-      setMsg('Mudança aplicada; propaga para todas as instâncias em até 5 s.');
-      void changes.reload();
-      void rates.reload();
-    }
-  };
-
-  return (
-    <>
-      <PageHeader title="Alíquotas" description="Catálogo de alíquotas de referência. Toda mudança precisa de uma pessoa que propõe e outra que aprova, citando o ato legal." />
-      <Alert>{error}</Alert>
-      <Alert kind="success">{msg}</Alert>
-      <Card title="Catálogo vigente">
-        {rates.loading && <Loading />}
-        <Alert>{rates.error}</Alert>
-        {rates.data && (
-          <Table head={['Substituir', 'Tributo', 'Tipo/Esfera', 'Ente', 'Alíquota', 'Vigência', 'Fonte', 'Ato legal']} empty={rates.data.length === 0}>
-            {rates.data.map((r) => (
-              <tr key={r.id}>
-                <td><input type="checkbox" aria-label={`Substituir ${r.tributo} ${r.valid_from}`} checked={substitui.includes(r.id)} onChange={(e) => setSubstitui(e.target.checked ? [...substitui, r.id] : substitui.filter((x) => x !== r.id))} /></td>
-                <td><strong>{r.tributo}</strong>{r.provisoria && <> <Badge tone="warn">provisória</Badge></>}</td>
-                <td>{r.tipo} · {r.esfera}</td>
-                <td>{r.ente_codigo ?? '—'}</td>
-                <td className="num">{r.aliquota.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}%</td>
-                <td>{r.valid_from} → {r.valid_to ?? 'indefinido'}</td>
-                <td>{r.fonte}</td>
-                <td>{r.ato_legal}</td>
-              </tr>
-            ))}
-          </Table>
-        )}
-      </Card>
-      <div style={{ height: 16 }} />
-      <Card title="Propor mudança (fluxo de duas pessoas)">
-        <form className="stack" onSubmit={propose}>
-          <Field label="Justificativa" hint="Cite o ato publicado (DOU, resolução, lei)."><input value={justificativa} onChange={(e) => setJustificativa(e.target.value)} required /></Field>
-          <div className="grid">
-            <Field label="Tributo"><select value={linha.tributo} onChange={(e) => setLinha({ ...linha, tributo: e.target.value })}>{['CBS', 'IBS_UF', 'IBS_MUN', 'IS'].map((x) => <option key={x}>{x}</option>)}</select></Field>
-            <Field label="Tipo"><select value={linha.tipo} onChange={(e) => setLinha({ ...linha, tipo: e.target.value })}>{['REFERENCIA', 'PROPRIA_ENTE'].map((x) => <option key={x}>{x}</option>)}</select></Field>
-            <Field label="Esfera"><select value={linha.esfera} onChange={(e) => setLinha({ ...linha, esfera: e.target.value })}>{['UNIAO', 'UF', 'MUNICIPIO'].map((x) => <option key={x}>{x}</option>)}</select></Field>
-            <Field label="Código do ente" hint="Só para alíquota própria de UF/município."><input value={linha.ente_codigo} onChange={(e) => setLinha({ ...linha, ente_codigo: e.target.value })} /></Field>
-            <Field label="Alíquota (%)"><input type="number" step="0.0001" min="0" value={linha.aliquota} onChange={(e) => setLinha({ ...linha, aliquota: e.target.value })} required /></Field>
-            <Field label="Vigente de"><input type="date" value={linha.valid_from} onChange={(e) => setLinha({ ...linha, valid_from: e.target.value })} required /></Field>
-            <Field label="Vigente até (exclusive)"><input type="date" value={linha.valid_to} onChange={(e) => setLinha({ ...linha, valid_to: e.target.value })} /></Field>
-            <Field label="Fonte"><select value={linha.fonte} onChange={(e) => setLinha({ ...linha, fonte: e.target.value })}>{['LEI_FEDERAL', 'SENADO', 'TCU', 'CG_IBS', 'LEI_ENTE', 'BUNDLE_RFB'].map((x) => <option key={x}>{x}</option>)}</select></Field>
-            <Field label="Aplicar a partir de" hint="Momento em que a mudança passa a valer no sistema."><input type="date" value={vigente} onChange={(e) => setVigente(e.target.value)} /></Field>
-          </div>
-          <Field label="Ato legal"><input value={linha.ato_legal} onChange={(e) => setLinha({ ...linha, ato_legal: e.target.value })} required /></Field>
-          <label className="checkbox"><input type="checkbox" checked={linha.provisoria} onChange={(e) => setLinha({ ...linha, provisoria: e.target.checked })} /> Provisória</label>
-          {substitui.length > 0 && <p className="muted">Substitui {substitui.length} linha(s) marcada(s) no catálogo.</p>}
-          <button type="submit" disabled={busy}>Propor</button>
-        </form>
-      </Card>
-      <div style={{ height: 16 }} />
-      <Card
-        title="Mudanças"
-        actions={
-          <select aria-label="Situação" value={status} onChange={(e) => setStatus(e.target.value)} style={{ width: 'auto' }}>
-            {['PROPOSED', 'APPLIED', 'REJECTED', ''].map((s) => <option key={s} value={s}>{s || 'Todas'}</option>)}
-          </select>
-        }
-      >
-        {changes.loading && <Loading />}
-        <Alert>{changes.error}</Alert>
-        {changes.data && (
-          <Table head={['Criada', 'Situação', 'Proposta por', 'Aprovada por', 'Justificativa', '']} empty={changes.data.length === 0}>
-            {changes.data.map((c) => (
-              <tr key={c.id}>
-                <td>{dateTime(c.criado_em)}</td>
-                <td><StatusBadge status={c.status} /></td>
-                <td>{c.proposto_por}</td>
-                <td>{c.aprovado_por ?? '—'}</td>
-                <td>{c.justificativa}<details><summary className="muted">linhas</summary><Json value={c.payload} /></details></td>
-                <td>{c.status === 'PROPOSED' && <Confirm tone="secondary" label="Aprovar e aplicar" onConfirm={() => void approve(c.id)} />}</td>
-              </tr>
-            ))}
-          </Table>
-        )}
-      </Card>
-    </>
-  );
-}
-
 interface Reconcile { competencia: string; tenants: number; divergencias: Record<string, unknown>[] }
 
 export function Faturamento() {
@@ -463,8 +346,8 @@ export function Faturamento() {
   const [rec, setRec] = useState<Reconcile>();
   const [closed, setClosed] = useState<string>();
   const [adj, setAdj] = useState({ tenant_id: '', valor: '', motivo: '' });
-  const { busy, error, run } = useAction();
-  const notConfigured = error?.includes('HTTP_404');
+  const { busy, error, errorCode, run } = useAction();
+  const notConfigured = errorCode === 'HTTP_404';   // rotas de faturamento só existem com ConnectionStrings:Billing
 
   return (
     <>

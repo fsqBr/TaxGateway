@@ -65,7 +65,7 @@ export function Avisos() {
             </div>
             <p>{a.mensagem}</p>
             <div className="row">
-              {a.link && <Link to={a.link} className="button secondary">Abrir</Link>}
+              {a.link && <Link to={destino(a)} className="button secondary">Abrir</Link>}
               {!a.lido && <button className="ghost" onClick={() => void marcar(a.id)}>Marcar como lido</button>}
             </div>
           </article>
@@ -74,3 +74,7 @@ export function Avisos() {
     </>
   );
 }
+
+/** Avisos sobre a empresa (titularidade) abrem a página Empresa — avisos antigos apontavam para Cobrança (D-R25). */
+const destino = (a: { tipo: string; link: string | null }) =>
+  a.tipo === 'EMPRESA_VERIFICADA' || a.tipo === 'DISPUTA_CNPJ' ? '/portal/empresa' : a.link ?? '/portal';

@@ -38,7 +38,10 @@ public static class PlansBillingEndpoints
                          'codigo', code, 'nome', name, 'descricao', description, 'recursos', features, 'preco_centavos', price_cents,
                          'documentos_incluidos', included_docs, 'simulacoes_incluidas', included_simulations, 'cnpjs_incluidos', included_cnpjs,
                          'usuarios', max_users, 'excedente_documento_centavos', overage_doc_millicents / 1000.0, 'cnpj_extra_centavos', cnpj_price_cents,
-                         'contratacao_online', self_service) ORDER BY sort_order), '[]')::text
+                         'contratacao_online', self_service, 'requisicoes_por_minuto', rpm, 'requisicoes_simultaneas', concurrency,
+                         'requisicoes_por_minuto_por_cnpj', per_cnpj_rpm, 'lote_max_documentos', batch_max_docs, 'lote_max_bytes', batch_max_bytes,
+                         'excedente_simulacao_milicentavos', overage_sim_millicents, 'captura_dfe', dfe_enabled, 'franquia_rigida', hard_quota)
+                         ORDER BY sort_order), '[]')::text
                   FROM plans WHERE is_public AND active
                 """);
             return Results.Text((string)(await cmd.ExecuteScalarAsync(ct))!, "application/json");
@@ -98,7 +101,7 @@ public static class PlansBillingEndpoints
                 r.IsDBNull(5) ? null : r.GetString(5), r.IsDBNull(6) ? null : r.GetFieldValue<DateTimeOffset>(6));
         }, http.RequestAborted);
 
-    private static async Task<IResult> BillingStatusAsync(HttpContext http, ITenantDb db, StripeClient stripe)
+    private static async Task<IResult> BillingStatusAsync(HttpContext http, ITenantDb db, StripeClient stripe, TimeProvider clock)
     {
         var t = await TenantAsync(http, db);
         var invoices = await db.InTenantAsync(http.GetCaller().Identity.Tenant, async (s, ct) =>
@@ -120,7 +123,7 @@ public static class PlansBillingEndpoints
                        (SELECT count(*) FROM usage_ledger WHERE billing_month = $1 AND metric = 'SIMULATION')
                   FROM tenants t
                 """);
-            cmd.Parameters.Add(new() { Value = TaxGateway.Api.Simulation.SimulationService.BillingMonth(DateTimeOffset.UtcNow), NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Date });
+            cmd.Parameters.Add(new() { Value = TaxGateway.Api.Simulation.SimulationService.BillingMonth(clock.GetUtcNow()), NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Date });
             await using var r = await cmd.ExecuteReaderAsync(ct);
             await r.ReadAsync(ct);
             return (Cap: r.GetInt64(0), Verified: r.IsDBNull(1) ? (DateTimeOffset?)null : r.GetFieldValue<DateTimeOffset>(1), Method: r.IsDBNull(2) ? null : r.GetString(2),
@@ -152,12 +155,12 @@ public static class PlansBillingEndpoints
         });
     }
 
-    private sealed record PaidPlan(string Code, string Fixed, string Docs, string? Cnpjs, bool SelfService, bool Active);
+    private sealed record PaidPlan(string Code, string Fixed, string Docs, string? Cnpjs, bool SelfService, bool Active, string? Sims = null);
 
     private static async Task<PaidPlan?> PaidPlanAsync(NpgsqlDataSource appDb, string code, CancellationToken ct)
     {
         await using var cmd = appDb.CreateCommand("""
-            SELECT code, stripe_price_id, stripe_metered_price_id, stripe_cnpj_price_id, self_service, active FROM plans WHERE code = $1 AND price_cents > 0
+            SELECT code, stripe_price_id, stripe_metered_price_id, stripe_cnpj_price_id, self_service, active, stripe_sim_price_id FROM plans WHERE code = $1 AND price_cents > 0
             """);
         cmd.Parameters.Add(new() { Value = code });
         await using var r = await cmd.ExecuteReaderAsync(ct);
@@ -171,7 +174,7 @@ public static class PlansBillingEndpoints
             throw new ApiProblemException(503, "ERR_PAGAMENTO_INDISPONIVEL", "Plano ainda não disponível para contratação online", "Tente em alguns minutos ou fale com vendas.");
         }
 
-        return new PaidPlan(r.GetString(0), r.GetString(1), r.GetString(2), r.IsDBNull(3) ? null : r.GetString(3), r.GetBoolean(4), r.GetBoolean(5));
+        return new PaidPlan(r.GetString(0), r.GetString(1), r.GetString(2), r.IsDBNull(3) ? null : r.GetString(3), r.GetBoolean(4), r.GetBoolean(5), r.IsDBNull(6) ? null : r.GetString(6));
     }
 
     /// <summary>
@@ -205,6 +208,11 @@ public static class PlansBillingEndpoints
         if (plan.Cnpjs is not null)
         {
             prices.Add((plan.Cnpjs, true));
+        }
+
+        if (plan.Sims is not null)
+        {
+            prices.Add((plan.Sims, true));   // D-R15
         }
 
         // D-R02: assinatura existente e não encerrada (inclusive incompleta ou inadimplente) é resolvida no portal de
@@ -295,7 +303,7 @@ public static class PlansBillingEndpoints
     }
 
     private static readonly HashSet<string> NumericFields = ["price_cents", "included_docs", "included_simulations", "included_cnpjs", "max_users",
-        "overage_doc_millicents", "overage_sim_millicents", "cnpj_price_cents", "rpm", "burst", "concurrency", "batch_max_docs", "batch_max_bytes", "sort_order"];
+        "overage_doc_millicents", "overage_sim_millicents", "cnpj_price_cents", "rpm", "burst", "concurrency", "batch_max_docs", "batch_max_bytes", "sort_order", "per_cnpj_rpm"];
 
     private static readonly HashSet<string> BoolFields = ["bill_schema_errors", "hard_quota", "dfe_enabled", "is_public", "self_service", "active"];
 

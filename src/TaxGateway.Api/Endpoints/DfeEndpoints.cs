@@ -1,5 +1,7 @@
 using System.Text.Json.Nodes;
 
+using Microsoft.Extensions.DependencyInjection;
+
 using TaxGateway.Api.Http;
 using TaxGateway.Core.Fiscal;
 using TaxGateway.Infrastructure.Dfe;
@@ -17,6 +19,7 @@ public static class DfeEndpoints
         v1.MapDelete("/cnpjs/{cnpj}/certificado", DeleteCertAsync).WithMetadata(new RequiredScope(Scopes.DfeManage));
         v1.MapPost("/cnpjs/{cnpj}/dfe/sync", SyncAsync).WithMetadata(new RequiredScope(Scopes.DfeManage));
         v1.MapGet("/cnpjs/{cnpj}/dfe/status", StatusAsync).WithMetadata(new RequiredScope(Scopes.DfeManage));
+        v1.MapPost("/cnpjs/{cnpj}/certificado/testar", TestAsync).WithMetadata(new RequiredScope(Scopes.DfeManage));
         return v1;
     }
 
@@ -64,7 +67,15 @@ public static class DfeEndpoints
         try
         {
             var tenant = http.GetCaller().Identity.Tenant;
+            var previous = await store.GetInfoAsync(tenant, c!, http.RequestAborted);
             var info = await store.StoreAsync(tenant, c!, pfx, senha, http.RequestAborted);
+            // D-R37: certificado é a credencial mais sensível da conta — dono e administradores ficam sabendo de toda troca.
+            await db.InTenantAsync(tenant, (s, ct) => TenantNotices.SecurityAsync(s, tenant.Value,
+                previous is null ? "Certificado A1 enviado" : "Certificado A1 substituído",
+                $"O certificado A1 de {info.Subject} (CNPJ {c}, vence em {info.NotAfter.ToOffset(TimeSpan.FromHours(-3)):dd/MM/yyyy}) foi " +
+                (previous is null ? "enviado" : $"substituído (o anterior, {previous.Thumbprint[..8]}…, foi apagado)") +
+                " para a captura de notas. Se ninguém da empresa reconhece, remova em DF-e e troque a senha do certificado.",
+                "/portal/dfe", $"cert:{info.Thumbprint}", ct), http.RequestAborted);
             // D-R10: A1 ICP-Brasil da mesma raiz da empresa prova a titularidade — a empresa fica verificada.
             if (http.GetCaller().Billing is not { CnpjVerified: true })
             {
@@ -111,7 +122,7 @@ public static class DfeEndpoints
         return info is null ? ApiProblem.Result(404, "ERR_NOT_FOUND", "Nenhum certificado para este CNPJ") : Results.Ok(Dto(info));
     }
 
-    private static async Task<IResult> DeleteCertAsync(HttpContext http, string cnpj, TenantCnpjService cnpjs, CertificateStore store)
+    private static async Task<IResult> DeleteCertAsync(HttpContext http, string cnpj, TenantCnpjService cnpjs, CertificateStore store, ITenantDb db, TimeProvider clock)
     {
         var (c, error) = await ResolveAsync(http, cnpj, cnpjs);
         if (error is not null)
@@ -119,9 +130,85 @@ public static class DfeEndpoints
             return error;
         }
 
-        return await store.DeleteAsync(http.GetCaller().Identity.Tenant, c!, http.RequestAborted)
-            ? Results.NoContent()
-            : ApiProblem.Result(404, "ERR_NOT_FOUND", "Nenhum certificado para este CNPJ");
+        var tenant = http.GetCaller().Identity.Tenant;
+        if (!await store.DeleteAsync(tenant, c!, http.RequestAborted))
+        {
+            return ApiProblem.Result(404, "ERR_NOT_FOUND", "Nenhum certificado para este CNPJ");
+        }
+
+        await db.InTenantAsync(tenant, (s, ct) => TenantNotices.SecurityAsync(s, tenant.Value, "Certificado A1 removido",
+            $"O certificado A1 do CNPJ {c} foi removido: a captura de notas desse CNPJ parou. Se ninguém da empresa reconhece, avise o suporte.",
+            "/portal/dfe", $"cert-removido:{c}:{clock.GetUtcNow().ToUnixTimeSeconds()}", ct), http.RequestAborted);
+        return Results.NoContent();
+    }
+
+    /// <summary>
+    /// D-R37: "Testar conexão" — confere, em linguagem simples, se o certificado guardado abre com a senha, se está no
+    /// prazo e se a SEFAZ o aceita na conexão segura. Não faz consulta de distribuição: não gasta a cota nem arrisca 656.
+    /// </summary>
+    private static async Task<IResult> TestAsync(HttpContext http, string cnpj, TenantCnpjService cnpjs, CertificateStore store, ISefazDfeClient sefaz, TimeProvider clock)
+    {
+        var (c, error) = await ResolveAsync(http, cnpj, cnpjs);
+        if (error is not null)
+        {
+            return error;
+        }
+
+        var tenant = http.GetCaller().Identity.Tenant;
+        var checks = new JsonArray();
+        void Add(string item, string situacao, string detalhe) =>
+            checks.Add(new JsonObject { ["item"] = item, ["situacao"] = situacao, ["detalhe"] = detalhe });
+        JsonObject Result()
+        {
+            var all = checks.Select(x => x!["situacao"]!.GetValue<string>()).ToList();
+            return new JsonObject
+            {
+                ["cnpj"] = c,
+                ["resultado"] = all.Contains("FALHA") ? "FALHA" : all.Contains("ATENCAO") ? "ATENCAO" : "OK",
+                ["verificacoes"] = checks,
+                ["testado_em"] = clock.GetUtcNow(),
+            };
+        }
+
+        var info = await store.GetInfoAsync(tenant, c!, http.RequestAborted);
+        if (info is null)
+        {
+            Add("Certificado guardado", "FALHA", "Nenhum certificado enviado para este CNPJ.");
+            return Results.Ok(Result());
+        }
+
+        Add("Certificado guardado", "OK", $"{info.Subject} ({info.Thumbprint[..8]}…).");
+        System.Security.Cryptography.X509Certificates.X509Certificate2? cert;
+        try
+        {
+            cert = await store.LoadAsync(tenant, c!, http.RequestAborted);
+        }
+        catch (System.Security.Cryptography.CryptographicException)
+        {
+            cert = null;
+        }
+
+        using (cert)
+        {
+            if (cert is null)
+            {
+                Add("Abre com a senha guardada", "FALHA", "Não foi possível abrir o certificado guardado. Envie o arquivo .pfx e a senha de novo.");
+                return Results.Ok(Result());
+            }
+
+            Add("Abre com a senha guardada", "OK", "O arquivo e a senha guardados estão íntegros.");
+            var days = (int)Math.Floor((info.NotAfter - clock.GetUtcNow()).TotalDays);
+            Add("Prazo de validade", days < 0 ? "FALHA" : days < 30 ? "ATENCAO" : "OK",
+                days < 0 ? $"Venceu em {info.NotAfter.ToOffset(TimeSpan.FromHours(-3)):dd/MM/yyyy}. Envie o certificado novo."
+                : $"Vence em {info.NotAfter.ToOffset(TimeSpan.FromHours(-3)):dd/MM/yyyy} ({days} dias).{(days < 30 ? " Renove antes para a captura não parar." : "")}");
+            if (days >= 0)
+            {
+                var ping = await sefaz.PingAsync(cert, http.RequestAborted);
+                Add("Conexão com a SEFAZ", ping.Ok ? "OK" : ping.Code == "CERT_RECUSADO" ? "FALHA" : "ATENCAO", ping.Message);
+            }
+        }
+
+        return Results.Ok(Result());
     }
 
     /// <summary>
@@ -130,6 +217,13 @@ public static class DfeEndpoints
     /// </summary>
     private static async Task<IResult> SyncAsync(HttpContext http, string cnpj, TenantCnpjService cnpjs, CertificateStore store, ITenantDb db)
     {
+        // D-R13: captura de DF-e é recurso de plano (Profissional em diante; Sandbox e Essencial não têm).
+        if (!http.GetCaller().Limits.DfeEnabled)
+        {
+            return ApiProblem.Result(403, "ERR_PLANO_SEM_DFE", "Seu plano não inclui a captura de notas (DF-e)",
+                "A captura automática de notas de fornecedores está no plano Profissional em diante. Troque de plano em Plano e cobrança.");
+        }
+
         // D-R10: captura de notas de terceiros só para empresa com titularidade verificada (o envio do A1 da matriz já verifica).
         if (http.GetCaller().Billing is not { CnpjVerified: true })
         {
@@ -174,10 +268,10 @@ public static class DfeEndpoints
             cmd.Parameters.Add(new() { Value = ciencia });
             return await cmd.ExecuteNonQueryAsync(ct);
         }, http.RequestAborted);
-        return await StatusAsync(http, c!, cnpjs, db);
+        return await StatusAsync(http, c!, cnpjs, db, http.RequestServices.GetRequiredService<CertificateStore>(), http.RequestServices.GetRequiredService<TimeProvider>());
     }
 
-    private static async Task<IResult> StatusAsync(HttpContext http, string cnpj, TenantCnpjService cnpjs, ITenantDb db)
+    private static async Task<IResult> StatusAsync(HttpContext http, string cnpj, TenantCnpjService cnpjs, ITenantDb db, CertificateStore store, TimeProvider clock)
     {
         var (c, error) = await ResolveAsync(http, cnpj, cnpjs);
         if (error is not null)
@@ -213,7 +307,23 @@ public static class DfeEndpoints
                 ["documentos"] = JsonNode.Parse(r.GetString(8)),
             };
         }, http.RequestAborted);
-        return status is null ? ApiProblem.Result(404, "ERR_NOT_FOUND", "Captura de DF-e não configurada para este CNPJ") : Results.Ok(status);
+        if (status is null)
+        {
+            return ApiProblem.Result(404, "ERR_NOT_FOUND", "Captura de DF-e não configurada para este CNPJ");
+        }
+
+        // D-R37: uma situação em linguagem simples ("funcionando", "parado"...) para o cliente saber sem interpretar códigos.
+        var cert = await store.GetInfoAsync(http.GetCaller().Identity.Tenant, c!, http.RequestAborted);
+        var health = DfeHealth.Evaluate(true, status["ativo"]!.GetValue<bool>(), cert?.NotAfter, status["ultima_consulta"]?.GetValue<DateTimeOffset>(),
+            status["ultimo_cstat"]?.GetValue<string>(), status["ultimo_656"]?.GetValue<DateTimeOffset>(), status["proxima_consulta"]!.GetValue<DateTimeOffset>(), clock.GetUtcNow());
+        status["saude"] = new JsonObject
+        {
+            ["situacao"] = health.Situacao,
+            ["ok"] = health.Ok,
+            ["mensagem"] = health.Mensagem,
+            ["certificado_vence_em_dias"] = health.CertificadoVenceEmDias,
+        };
+        return Results.Ok(status);
     }
 
     private static JsonObject Dto(CertificateInfo i) => new()

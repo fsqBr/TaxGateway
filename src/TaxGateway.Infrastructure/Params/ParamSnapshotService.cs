@@ -110,11 +110,11 @@ public sealed partial class ParamSnapshotService(NpgsqlDataSource db, IConnectio
             BatchCommands =
             {
                 new("""
-                    SELECT id, tributo, ente_codigo, forma_aplicacao, aliquota, valid_from, valid_to, ato_legal, fonte, provisoria
+                    SELECT id, tributo, ente_codigo, forma_aplicacao, aliquota, valid_from, valid_to, ato_legal, fonte, provisoria, produto
                       FROM rate_catalog WHERE superseded_at IS NULL
-                     ORDER BY tributo, COALESCE(ente_codigo, ''), valid_from
+                     ORDER BY tributo, COALESCE(ente_codigo, ''), COALESCE(produto, ''), valid_from
                     """),
-                new("SELECT code, rpm, burst, concurrency, batch_max_docs, batch_max_bytes, queue_priority, bill_schema_errors, max_users, included_docs, included_simulations, hard_quota, dfe_enabled, overage_doc_millicents, overage_sim_millicents FROM plans ORDER BY code"),
+                new("SELECT code, rpm, burst, concurrency, batch_max_docs, batch_max_bytes, queue_priority, bill_schema_errors, max_users, included_docs, included_simulations, hard_quota, dfe_enabled, overage_doc_millicents, overage_sim_millicents, per_cnpj_rpm FROM plans ORDER BY code"),
                 new("SELECT crt, tp_regime_ibscbs, engines, simples_mode FROM engine_routing ORDER BY crt, tp_regime_ibscbs"),
                 new("SELECT valid_from, default_status FROM credit_rules ORDER BY valid_from"),
             },
@@ -128,10 +128,10 @@ public sealed partial class ParamSnapshotService(NpgsqlDataSource db, IConnectio
                 r.GetGuid(0), ParseTributo(r.GetString(1)), r.IsDBNull(2) ? null : r.GetString(2),
                 r.IsDBNull(3) ? null : ParseForma(r.GetString(3)), r.GetDecimal(4),
                 r.GetFieldValue<DateOnly>(5), r.IsDBNull(6) ? null : r.GetFieldValue<DateOnly>(6),
-                r.GetString(7), r.GetString(8), r.GetBoolean(9));
+                r.GetString(7), r.GetString(8), r.GetBoolean(9), r.IsDBNull(10) ? null : r.GetString(10));
             rates.Add(row);
             sb.Append(CultureInfo.InvariantCulture,
-                $"{row.Id}|{row.Tributo}|{row.EnteCodigo}|{row.Forma}|{row.Aliquota:0.0000}|{row.ValidFrom:O}|{row.ValidTo:O}|{row.Fonte}|{row.Provisoria}\n");
+                $"{row.Id}|{row.Tributo}|{row.EnteCodigo}|{row.Forma}|{row.Aliquota:0.0000}|{row.ValidFrom:O}|{row.ValidTo:O}|{row.Fonte}|{row.Provisoria}{(row.Produto is null ? "" : "|" + row.Produto)}\n");
         }
 
         await r.NextResultAsync(ct).ConfigureAwait(false);
@@ -139,7 +139,7 @@ public sealed partial class ParamSnapshotService(NpgsqlDataSource db, IConnectio
         while (await r.ReadAsync(ct).ConfigureAwait(false))
         {
             var p = new PlanLimits(r.GetString(0), r.GetInt32(1), r.GetInt32(2), r.GetInt32(3), r.GetInt32(4), r.GetInt64(5), r.GetString(6), r.GetBoolean(7),
-                r.IsDBNull(8) ? null : r.GetInt32(8), r.GetInt64(9), r.GetInt64(10), r.GetBoolean(11), r.GetBoolean(12), r.GetInt64(13), r.GetInt64(14));
+                r.IsDBNull(8) ? null : r.GetInt32(8), r.GetInt64(9), r.GetInt64(10), r.GetBoolean(11), r.GetBoolean(12), r.GetInt64(13), r.GetInt64(14), r.IsDBNull(15) ? null : r.GetInt32(15));
             plans[p.PlanCode] = p;
             sb.Append(CultureInfo.InvariantCulture, $"{p.PlanCode}|{p.Rpm}|{p.Burst}|{p.Concurrency}|{p.BatchMaxDocs}|{p.BatchMaxBytes}|{p.QueuePriority}|{p.BillSchemaErrors}|{p.MaxUsers}|{p.IncludedDocs}|{p.IncludedSimulations}|{p.HardQuota}|{p.DfeEnabled}|{p.OverageDocMillicents}|{p.OverageSimMillicents}\n");
         }
@@ -165,7 +165,10 @@ public sealed partial class ParamSnapshotService(NpgsqlDataSource db, IConnectio
         return (sb.ToString(), rates, plans, routing, credit);
     }
 
-    /// <summary>Limites efetivos: plano do snapshot + <c>limits_override</c> do tenant (rpm, burst, concurrency).</summary>
+    /// <summary>
+    /// Limites efetivos: plano do snapshot + <c>limits_override</c> do tenant (contrato, D-R15): rpm, burst, concurrency,
+    /// batch_max_docs e batch_max_bytes. Valores ausentes ou ≤ 0 mantêm os do plano.
+    /// </summary>
     public static PlanLimits EffectiveLimits(ParamSnapshot snapshot, string planCode, string overrideJson)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
@@ -182,7 +185,15 @@ public sealed partial class ParamSnapshotService(NpgsqlDataSource db, IConnectio
         using var doc = JsonDocument.Parse(overrideJson);
         var o = doc.RootElement;
         int Get(string name, int fallback) => o.TryGetProperty(name, out var v) && v.TryGetInt32(out var i) && i > 0 ? i : fallback;
-        return plan with { Rpm = Get("rpm", plan.Rpm), Burst = Get("burst", plan.Burst), Concurrency = Get("concurrency", plan.Concurrency) };
+        long GetLong(string name, long fallback) => o.TryGetProperty(name, out var v) && v.TryGetInt64(out var i) && i > 0 ? i : fallback;
+        return plan with
+        {
+            Rpm = Get("rpm", plan.Rpm),
+            Burst = Get("burst", plan.Burst),
+            Concurrency = Get("concurrency", plan.Concurrency),
+            BatchMaxDocs = Get("batch_max_docs", plan.BatchMaxDocs),
+            BatchMaxBytes = GetLong("batch_max_bytes", plan.BatchMaxBytes),
+        };
     }
 
     private static Tributo ParseTributo(string s) => s switch

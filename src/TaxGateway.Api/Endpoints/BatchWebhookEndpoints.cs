@@ -18,7 +18,7 @@ public static class BatchWebhookEndpoints
 
     public static RouteGroupBuilder MapBatchesAndWebhooks(this RouteGroupBuilder v1)
     {
-        v1.MapPost("/auditoria/lotes", CreateBatchAsync).WithMetadata(new RequiredScope(Scopes.AuditoriaWrite), new QuotaMetric("DOC_AUDIT"),
+        v1.MapPost("/auditoria/lotes", CreateBatchAsync).WithMetadata(new RequiredScope(Scopes.AuditoriaWrite), new QuotaMetric("DOC_AUDIT"), new RateCost(10, 900),
             new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(2L * 1024 * 1024 * 1024));
         v1.MapPost("/auditoria/lotes/upload-url", UploadUrl).WithMetadata(new RequiredScope(Scopes.AuditoriaWrite));
         v1.MapGet("/auditoria/lotes/{id:guid}", GetBatchAsync).WithMetadata(new RequiredScope(Scopes.AuditoriaWrite));
@@ -146,7 +146,18 @@ public static class BatchWebhookEndpoints
                     }
                 }
 
-                created = await ingest.IngestAsync(tenant, staged!, limits.BatchMaxBytes, limits.BatchMaxDocs, limits.PriorityRank, dir, http.RequestAborted);
+                var quotaDb = sp.GetRequiredService<ITenantDb>();
+                var clock = sp.GetRequiredService<TimeProvider>();
+                created = await ingest.IngestAsync(tenant, staged!, limits.BatchMaxBytes, limits.BatchMaxDocs, limits.PriorityRank, dir, http.RequestAborted,
+                    async (docs, c) =>
+                    {
+                        var usage = await TaxGateway.Infrastructure.Billing.PlanQuota.LoadAsync(quotaDb, tenant, TaxGateway.Api.Simulation.SimulationService.BillingMonth(clock.GetUtcNow()), includeReserved: true, c);
+                        if (TaxGateway.Infrastructure.Billing.PlanQuota.Check(limits, caller.Identity.TenantStatus, caller.Billing?.OverageCapCents ?? 0, usage,
+                                TaxGateway.Infrastructure.Billing.PlanQuota.DocMetric, docs) is { } denial)
+                        {
+                            throw new BatchRejectedException(denial.Code, denial.Detail, denial.Status);
+                        }
+                    });
                 var seconds = (int)Math.Ceiling(created.Documents / (opts.Value.DocsPerSecondPerSlot * opts.Value.PerTenantInFlight));
                 var json = new JsonObject
                 {
@@ -163,7 +174,7 @@ public static class BatchWebhookEndpoints
             }
             catch (BatchRejectedException ex)
             {
-                var problem = new ApiProblemException(ex.Code == "ERR_BATCH_TOO_LARGE" ? 413 : 422, ex.Code, "Lote recusado", ex.Message);
+                var problem = new ApiProblemException(ex.Status, ex.Code, "Lote recusado", ex.Message);
                 await idempotency.CompleteAsync(tenant, idemKey, problem.Status, ApiProblem.ToJson(problem), CancellationToken.None);
                 throw problem;
             }
@@ -181,7 +192,7 @@ public static class BatchWebhookEndpoints
         catch (BatchRejectedException ex)
         {
             // Recusa antes da reserva da chave (ex.: upload acima do limite durante a leitura).
-            return ApiProblem.Result(ex.Code == "ERR_BATCH_TOO_LARGE" ? 413 : 422, ex.Code, "Lote recusado", ex.Message);
+            return ApiProblem.Result(ex.Status, ex.Code, "Lote recusado", ex.Message);
         }
         finally
         {

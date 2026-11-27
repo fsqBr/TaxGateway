@@ -25,10 +25,12 @@ public static class CompanyEndpoints
     {
         var billing = new RequiredScope(Scopes.BillingManage);
         v1.MapPut("/cobranca/teto", SetCapAsync).WithMetadata(billing).ExcludeFromDescription();
-        v1.MapGet("/verificacao-cnpj", StatusAsync).WithMetadata(billing).ExcludeFromDescription();
-        v1.MapPost("/verificacao-cnpj/certificado", ByCertificateAsync).WithMetadata(billing).ExcludeFromDescription();
-        v1.MapPost("/verificacao-cnpj/email", SendCodeAsync).WithMetadata(billing).ExcludeFromDescription();
-        v1.MapPost("/verificacao-cnpj/email/confirmar", ConfirmCodeAsync).WithMetadata(billing).ExcludeFromDescription();
+        // A verificação libera também o DF-e: o fiscal (cnpjs:manage) pode fazê-la, não só quem cuida da cobrança.
+        var company = new RequiredScope(Scopes.BillingManage, Scopes.CnpjsManage);
+        v1.MapGet("/verificacao-cnpj", StatusAsync).WithMetadata(company).ExcludeFromDescription();
+        v1.MapPost("/verificacao-cnpj/certificado", ByCertificateAsync).WithMetadata(company).ExcludeFromDescription();
+        v1.MapPost("/verificacao-cnpj/email", SendCodeAsync).WithMetadata(company).ExcludeFromDescription();
+        v1.MapPost("/verificacao-cnpj/email/confirmar", ConfirmCodeAsync).WithMetadata(company).ExcludeFromDescription();
         return v1;
     }
 
@@ -43,6 +45,7 @@ public static class CompanyEndpoints
     public static RouteGroupBuilder MapAdminCompany(this RouteGroupBuilder admin)
     {
         admin.MapPut("/tenants/{id:guid}/teto", AdminSetCapAsync).WithMetadata(new RequiredScope(AdminEndpoints.Commercial));
+        admin.MapPut("/tenants/{id:guid}/limites", AdminSetLimitsAsync).WithMetadata(new RequiredScope(AdminEndpoints.Commercial));
         admin.MapPost("/tenants/{id:guid}/verificar", AdminVerifyAsync).WithMetadata(new RequiredScope(AdminEndpoints.Security));
         admin.MapGet("/disputas", ListDisputesAsync).WithMetadata(new RequiredScope(AdminEndpoints.Security));
         admin.MapPost("/disputas/{id:guid}/resolver", ResolveDisputeAsync).WithMetadata(new RequiredScope(AdminEndpoints.Security));
@@ -88,12 +91,25 @@ public static class CompanyEndpoints
         return Results.Ok(new JsonObject { ["teto_centavos"] = cents.Value });
     }
 
+    /// <summary>D-R29: rotas de admin sobre um tenant respondem 404 se ele não existe (antes gravavam trilha e diziam 200).</summary>
+    private static async Task<bool> TenantExistsAsync(AdminDataSource db, Guid id, CancellationToken ct)
+    {
+        await using var cmd = db.DataSource.CreateCommand("SELECT EXISTS (SELECT 1 FROM tenants WHERE id = $1)");
+        cmd.Parameters.Add(new() { Value = id });
+        return await cmd.ExecuteScalarAsync(ct) is true;
+    }
+
     private static async Task<IResult> AdminSetCapAsync(Guid id, HttpContext http, AdminDataSource db, IConnectionMultiplexer valkey, AccountService accounts)
     {
         var cents = Cents(await BodyAsync(http));
         if (cents is not >= 0)
         {
             return ApiProblem.Result(400, "ERR_VALIDATION", "teto_centavos maior ou igual a zero");
+        }
+
+        if (!await TenantExistsAsync(db, id, http.RequestAborted))
+        {
+            return ApiProblem.Result(404, "ERR_NOT_FOUND", "Tenant não encontrado");
         }
 
         await using (var cmd = db.DataSource.CreateCommand("SELECT app.set_overage_cap($1, $2)"))
@@ -107,6 +123,42 @@ public static class CompanyEndpoints
         await accounts.AuditAsync(null, "operator", AdminKeyFilter.Get(http).Name, "tenant.teto_alterado", id.ToString(), http.Connection.RemoteIpAddress?.ToString(),
             new JsonObject { ["teto_centavos"] = cents.Value }, http.RequestAborted);
         return Results.Ok(new JsonObject { ["tenant_id"] = id, ["teto_centavos"] = cents.Value });
+    }
+
+    private static readonly string[] LimitKeys = ["rpm", "burst", "concurrency", "batch_max_docs", "batch_max_bytes"];
+
+    /// <summary>
+    /// D-R15: limites de contrato (Enterprise/OEM) por cima do plano. Corpo: qualquer subconjunto de rpm, burst,
+    /// concurrency, batch_max_docs, batch_max_bytes (inteiros positivos); objeto vazio volta aos limites do plano.
+    /// </summary>
+    private static async Task<IResult> AdminSetLimitsAsync(Guid id, HttpContext http, AdminDataSource db, IConnectionMultiplexer valkey, AccountService accounts)
+    {
+        var body = await BodyAsync(http);
+        var o = new JsonObject();
+        foreach (var (k, v) in body ?? [])
+        {
+            if (!LimitKeys.Contains(k) || v is not JsonValue jv || !jv.TryGetValue<long>(out var n) || n <= 0 || (k != "batch_max_bytes" && n > int.MaxValue))
+            {
+                return ApiProblem.Result(400, "ERR_VALIDATION", "Limites inválidos", $"Use inteiros positivos em: {string.Join(", ", LimitKeys)}.");
+            }
+
+            o[k] = n;
+        }
+
+        await using (var cmd = db.DataSource.CreateCommand("UPDATE tenants SET limits_override = $2::jsonb WHERE id = $1"))
+        {
+            cmd.Parameters.Add(new() { Value = id });
+            cmd.Parameters.Add(new() { Value = o.ToJsonString() });
+            if (await cmd.ExecuteNonQueryAsync(http.RequestAborted) == 0)
+            {
+                return ApiProblem.Result(404, "ERR_NOT_FOUND", "Tenant não encontrado");
+            }
+        }
+
+        await TenantProfileCache.PublishChangedAsync(valkey, id);
+        await accounts.AuditAsync(null, "operator", AdminKeyFilter.Get(http).Name, "tenant.limites_alterados", id.ToString(), http.Connection.RemoteIpAddress?.ToString(),
+            (JsonObject)o.DeepClone(), http.RequestAborted);
+        return Results.Ok(new JsonObject { ["tenant_id"] = id, ["limites"] = o });
     }
 
     // ---------------------------------------------------------------- verificação
@@ -328,6 +380,11 @@ public static class CompanyEndpoints
         if (note is null || note.Length < 5 || note.Length > 500)
         {
             return ApiProblem.Result(400, "ERR_VALIDATION", "Informe a observação (documento conferido, de 5 a 500 caracteres)");
+        }
+
+        if (!await TenantExistsAsync(db, id, http.RequestAborted))
+        {
+            return ApiProblem.Result(404, "ERR_NOT_FOUND", "Tenant não encontrado");
         }
 
         var op = AdminKeyFilter.Get(http).Name;

@@ -64,6 +64,9 @@ public sealed class LinhaAliquotaDto
     public string? AtoLegal { get; set; }
     public string? Fonte { get; set; }
     public bool Provisoria { get; set; }
+
+    /// <summary>Só IS (D-R17): "NCM:&lt;prefixo de 2 a 8 dígitos&gt;" ou "CCLASS:&lt;cClassTrib&gt;".</summary>
+    public string? Produto { get; set; }
 }
 
 public sealed class PropostaCriadaResponse

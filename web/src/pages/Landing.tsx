@@ -2,10 +2,11 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ArrowRight, BadgeCheck, Building2, Calculator, CheckCircle2, Cpu, DownloadCloud, FileCheck2, Fingerprint, KeyRound,
-  Layers, Lock, MapPin, ScrollText, ShieldCheck, Webhook,
+  Landmark, Layers, Lock, MapPin, ScrollText, ShieldCheck, Webhook,
 } from 'lucide-react';
-import { Logo } from '../components/Logo';
-import { VersionTag } from '../components/VersionNotice';
+import { integer } from '../lib/format';
+import { planoDestaque, precoLabel, usePlanos } from './Planos';
+import { SiteFooter, SiteHeader } from './SiteChrome';
 
 // Capturas reais do portal com dados de demonstração (D-W13), geradas por `npm run screenshots`.
 const showcase = [
@@ -15,6 +16,44 @@ const showcase = [
   { key: 'visao-geral', label: 'Consumo', path: '/portal', title: 'Consumo e limites à vista', text: 'Documentos auditados, simulações, CNPJs ativos e o limite do plano na competência.', help: '/ajuda/primeiros-passos' },
   { key: 'webhooks', label: 'Webhooks', path: '/portal/webhooks', title: 'Eventos com histórico e reenvio', text: 'Cadastre URLs, gire o segredo sem parar a integração e reenvie entregas que falharam.', help: '/ajuda/webhooks' },
 ] as const;
+
+/** D-R36: resumo dos planos na home — só para dar a ideia de preço; a comparação completa fica em /planos. */
+export function PlanosResumo() {
+  const { planos } = usePlanos();
+  const online = (planos ?? []).filter((p) => p.contratacao_online).slice(0, 4);
+  if (online.length === 0) return null;
+  const destaque = planoDestaque(planos!);
+  return (
+    <section className="section" id="planos" style={{ paddingTop: 0 }}>
+      <div className="section-head">
+        <div className="eyebrow">Planos</div>
+        <h2 style={{ fontSize: '1.9rem', letterSpacing: '-0.03em' }}>Comece grátis. Pague pelo que usar.</h2>
+        <p>Toda conta começa no Sandbox, sem cartão. Nos planos pagos, o excedente só é cobrado até o teto que você definir.</p>
+      </div>
+      <div className="plan-grid plan-grid-compact">
+        {online.map((p) => (
+          <article key={p.codigo} aria-label={`Plano ${p.nome}`} className={`card plan${p.codigo === destaque ? ' featured' : ''}`}>
+            {p.codigo === destaque && <span className="plan-flag">Recomendado</span>}
+            <h3>{p.nome}</h3>
+            <div className="plan-price">
+              <strong>{precoLabel(p)}</strong>
+              {p.preco_centavos > 0 && <span className="muted small">/mês</span>}
+            </div>
+            <p className="muted small">
+              {integer(p.documentos_incluidos)} auditorias e {integer(p.simulacoes_incluidas)} simulações por mês
+              {p.cnpjs_incluidos !== null && ` · ${integer(p.cnpjs_incluidos)} ${p.cnpjs_incluidos === 1 ? 'CNPJ' : 'CNPJs'}`}
+              {p.captura_dfe ? ' · notas de fornecedores (DF-e)' : ''}
+            </p>
+          </article>
+        ))}
+      </div>
+      <div className="row" style={{ gap: 12, marginTop: 16, flexWrap: 'wrap' }}>
+        <Link to="/planos#comparar" className="button secondary">Comparar todos os planos <ArrowRight size={16} aria-hidden="true" /></Link>
+        <Link to="/cadastro" className="button">Criar conta grátis</Link>
+      </div>
+    </section>
+  );
+}
 
 function Showcase() {
   const [i, setI] = useState(0);
@@ -51,16 +90,16 @@ function Showcase() {
 const features = [
   { icon: Calculator, title: 'Simulação na hora da venda', text: 'CBS, IBS e Imposto Seletivo por item, calculados pelo motor oficial da Receita Federal, com a alíquota e o ato legal de cada tributo.' },
   { icon: FileCheck2, title: 'Auditoria do XML', text: 'Recalculamos a NF-e/NFC-e autorizada e apontamos cada divergência com regra, campo, valor de referência e fundamentação legal.' },
-  { icon: Layers, title: 'Lotes de milhares de notas', text: 'Envie um ZIP, acompanhe o progresso e receba o relatório por webhook. O lote não disputa capacidade com o seu checkout.' },
-  { icon: DownloadCloud, title: 'Captura automática de DF-e', text: 'Com o certificado A1, buscamos as notas em que você é destinatário, manifestamos a ciência e auditamos a entrada.' },
-  { icon: Building2, title: 'Multi-CNPJ para software houses', text: 'Atenda todos os seus clientes com uma integração só, com uso e cobrança separados por CNPJ.' },
+  { icon: Layers, title: 'Lotes de milhares de notas', text: 'Envie um ZIP (até o limite do seu plano), acompanhe o progresso e receba o relatório por webhook. Os lotes vão para uma fila própria e não travam o seu checkout.' },
+  { icon: DownloadCloud, title: 'Captura automática de DF-e', text: 'Do plano Profissional em diante: com o certificado A1, buscamos na SEFAZ as notas em que você é destinatário, manifestamos a ciência e auditamos a entrada.' },
+  { icon: Building2, title: 'Vários CNPJs para software houses', text: 'No plano Parceiro OEM, atenda todos os seus clientes com uma integração só, com uso e limite de requisições separados por CNPJ atendido.' },
   { icon: Webhook, title: 'Eventos assinados', text: 'Webhooks com assinatura HMAC-SHA256, reenvio automático e histórico de entregas.' },
 ];
 
 const facts = [
   { icon: Cpu, text: 'Motores oficiais da RFB' },
   { icon: ScrollText, text: 'NF-e e NFC-e (leiaute RTC)' },
-  { icon: KeyRound, text: 'OAuth 2.0 e API key' },
+  { icon: KeyRound, text: 'API key e OAuth 2.0' },
   { icon: MapPin, text: 'Dados processados no Brasil' },
   { icon: Fingerprint, text: 'LGPD por padrão' },
 ];
@@ -68,22 +107,7 @@ const facts = [
 export default function Landing() {
   return (
     <div className="site">
-      <header className="site-header">
-        <div className="inner">
-          <Link to="/" aria-label="Início"><Logo size={30} /></Link>
-          <nav className="site-nav" aria-label="Principal">
-            <a href="#produto" className="hide-sm">Produto</a>
-            <a href="#funcionando" className="hide-sm">Veja funcionando</a>
-            <Link to="/planos" className="hide-sm">Planos</Link>
-            <a href="#seguranca" className="hide-sm">Segurança</a>
-            <a href="#desenvolvedores" className="hide-sm">Desenvolvedores</a>
-            <Link to="/ajuda">Ajuda</Link>
-            <a href="/docs/" className="hide-sm">Documentação</a>
-            <Link to="/portal" className="hide-sm">Entrar</Link>
-            <Link className="button" to="/cadastro">Criar conta grátis</Link>
-          </nav>
-        </div>
-      </header>
+      <SiteHeader />
 
       <section className="hero">
         <div className="inner">
@@ -92,13 +116,14 @@ export default function Landing() {
             <h1>Cálculo e auditoria de <em>IBS, CBS e Imposto Seletivo</em>, por API.</h1>
             <p className="lead">
               O TaxGateway roda os motores oficiais de cálculo da Receita Federal e acrescenta o que falta para produção:
-              leitura do XML, regras de auditoria, lotes, captura de DF-e e operação multiempresa — com segurança e LGPD de verdade.
+              leitura do XML, regras de auditoria, alíquotas por município com o ato legal, lotes, captura de DF-e e vários CNPJs —
+              com segurança e LGPD de verdade.
             </p>
             <div className="row">
               <Link className="button lg" to="/cadastro">Criar conta grátis <ArrowRight size={16} aria-hidden="true" /></Link>
-              <Link className="button secondary lg" to="/portal">Acessar o portal</Link>
+              <Link className="button secondary lg" to="/portal">Entrar</Link>
             </div>
-            <p className="hero-note">Plano Sandbox sem cartão, com o mesmo motor que a Receita Federal publica.</p>
+            <p className="hero-note">Plano Sandbox grátis e sem cartão: 200 auditorias e 2.000 simulações por mês, com o mesmo motor que a Receita Federal publica.</p>
           </div>
           <div aria-label="Exemplo de chamada e resposta">
             <div className="window">
@@ -141,7 +166,7 @@ export default function Landing() {
         <div className="section-head">
           <div className="eyebrow">Produto</div>
           <h2>O motor da Receita é gratuito. Colocá-lo em produção, não.</h2>
-          <p>Mapear o XML, manter alíquotas e regras atualizadas, escalar sem travar o checkout e operar 24×7 é o que o TaxGateway entrega pronto.</p>
+          <p>Mapear o XML, manter alíquotas e regras atualizadas, escalar sem travar o checkout e manter tudo no ar é o que o TaxGateway entrega pronto.</p>
         </div>
         <div className="grid features-grid">
           {features.map((f) => (
@@ -166,7 +191,9 @@ export default function Landing() {
             <ul className="checklist">
               <li><CheckCircle2 size={18} aria-hidden="true" />Saída (você emitiu) e entrada (você recebeu), com crédito potencial</li>
               <li><CheckCircle2 size={18} aria-hidden="true" />Validação de schema e assinatura digital ICP-Brasil</li>
-              <li><CheckCircle2 size={18} aria-hidden="true" />Reprocessamento quando a alíquota oficial muda</li>
+              <li><CheckCircle2 size={18} aria-hidden="true" />Alíquota e ato legal usados em cada tributo, com aviso quando a alíquota é provisória</li>
+              <li><CheckCircle2 size={18} aria-hidden="true" />Imposto Seletivo conferido pelo produto da nota</li>
+              <li><CheckCircle2 size={18} aria-hidden="true" />Reprocessamento automático e sem custo quando uma alíquota oficial muda com efeito retroativo</li>
             </ul>
           </div>
           <div className="card finding" aria-label="Exemplo de ocorrência de auditoria">
@@ -187,7 +214,43 @@ export default function Landing() {
         </div>
       </section>
 
+      <section className="section" id="aliquotas" style={{ paddingTop: 0 }}>
+        <div className="split">
+          <div>
+            <div className="eyebrow">Alíquotas</div>
+            <h2 style={{ fontSize: '1.9rem', letterSpacing: '-0.03em', marginTop: 8 }}>A alíquota de cada município, com o ato legal.</h2>
+            <p className="muted" style={{ marginTop: 12, fontSize: '1.02rem' }}>
+              Consulte de graça, sem cadastro, a CBS e o IBS (estadual e municipal) vigentes em qualquer município numa data:
+              a referência nacional ou a alíquota própria do estado ou do município, o ato legal e a vigência — a mesma tabela que a
+              simulação e a auditoria usam.
+            </p>
+            <ul className="checklist">
+              <li><CheckCircle2 size={18} aria-hidden="true" />Transição de 2026 a 2033, com o que ainda não foi publicado</li>
+              <li><CheckCircle2 size={18} aria-hidden="true" />Sincronizada todo dia com a base oficial da Receita, com aviso quando muda</li>
+              <li><CheckCircle2 size={18} aria-hidden="true" />Alíquota provisória sempre sinalizada</li>
+              <li><CheckCircle2 size={18} aria-hidden="true" />Exceções da sua empresa (liminar, regime especial) calculadas ao lado do oficial, no portal</li>
+            </ul>
+            <Link to="/aliquotas" className="button secondary" style={{ marginTop: 16 }}>Consultar alíquotas <ArrowRight size={16} aria-hidden="true" /></Link>
+          </div>
+          <div className="card" aria-label="Exemplo de consulta de alíquotas">
+            <div className="finding-head"><strong><Landmark size={16} aria-hidden="true" /> São Paulo / SP · 15/06/2027</strong><span className="badge badge-warn">CBS provisória</span></div>
+            <div className="table-wrap">
+              <table>
+                <tbody>
+                  <tr><td>CBS</td><td className="num">11,20%</td><td>Referência nacional</td></tr>
+                  <tr><td>IBS estadual</td><td className="num">0,05%</td><td>Referência nacional</td></tr>
+                  <tr><td>IBS municipal</td><td className="num">0,05%</td><td>Referência nacional</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p className="muted small">A CBS de 2027 é provisória: o Senado define a alíquota até 15/12/2026.</p>
+          </div>
+        </div>
+      </section>
+
       <Showcase />
+
+      <PlanosResumo />
 
       <section className="band-dark" id="seguranca">
         <div className="section">
@@ -201,7 +264,7 @@ export default function Landing() {
               { icon: Lock, t: 'Isolamento por cliente', d: 'Cada consulta ao banco é restrita ao seu tenant por política do próprio banco — testado a cada build.' },
               { icon: ShieldCheck, t: 'XML não guardado por padrão', d: 'Retenção só quando você pede, cifrada com chave exclusiva sua. Expurgo de titular sob demanda.' },
               { icon: Fingerprint, t: 'CPF pseudonimizado', d: 'Nos registros o CPF vira um HMAC com chave fora do banco. Um vazamento do banco não revela CPFs.' },
-              { icon: BadgeCheck, t: 'Credenciais fortes', d: 'API keys com hash e pepper, OAuth 2.0 com rotação de chave sem interrupção e revogação imediata.' },
+              { icon: BadgeCheck, t: 'Credenciais fortes', d: 'API keys guardadas só como hash, com escopos por sistema e revogação em segundos. OAuth 2.0 para integradores, com rotação de chave sem interrupção.' },
             ].map((x) => (
               <article className="card feature" key={x.t}>
                 <span className="icon"><x.icon size={20} aria-hidden="true" /></span>
@@ -220,7 +283,7 @@ export default function Landing() {
           <p>API REST com JSON, erros padronizados com código estável, idempotência e referência interativa.</p>
         </div>
         <div className="steps">
-          <div className="card"><h3>Pegue sua credencial</h3><p className="muted" style={{ marginTop: 6 }}>API key ou cliente OAuth 2.0, com escopos por função.</p></div>
+          <div className="card"><h3>Pegue sua credencial</h3><p className="muted" style={{ marginTop: 6 }}>Crie no portal uma API key por sistema, com os escopos de que ele precisa. OAuth 2.0 (client credentials) é para sistemas e software houses, habilitado pelo nosso time.</p></div>
           <div className="card"><h3>Simule e audite</h3><p className="muted" style={{ marginTop: 6 }}>Simule no checkout; audite o XML depois da autorização ou em lote.</p></div>
           <div className="card"><h3>Reaja a eventos</h3><p className="muted" style={{ marginTop: 6 }}>Webhooks assinados avisam o seu ERP quando cada resultado fica pronto.</p></div>
         </div>
@@ -228,27 +291,16 @@ export default function Landing() {
         <div className="cta">
           <div>
             <h2>Pronto para a Reforma Tributária?</h2>
-            <p style={{ marginTop: 6 }}>Comece pelo portal ou explore a referência completa da API.</p>
+            <p style={{ marginTop: 6 }}>Crie a conta grátis no Sandbox ou explore a documentação completa da API.</p>
           </div>
           <div className="row">
             <Link className="button lg" to="/cadastro">Criar conta grátis</Link>
-            <a className="button secondary lg" href="/docs/">Referência da API</a>
+            <a className="button secondary lg" href="/docs/">Documentação da API</a>
           </div>
         </div>
       </section>
 
-      <footer className="site-footer">
-        <div className="inner">
-          <div>
-            <Logo size={26} />
-            <p className="muted small" style={{ marginTop: 10, maxWidth: 320 }}>Cálculo e auditoria de IBS, CBS e Imposto Seletivo sobre os motores oficiais da Receita Federal.</p>
-          </div>
-          <div><h4>Produto</h4><ul><li><a href="#produto">Recursos</a></li><li><a href="#seguranca">Segurança</a></li><li><Link to="/ajuda/novidades">Novidades</Link></li></ul></div>
-          <div><h4>Desenvolvedores</h4><ul><li><Link to="/ajuda">Central de ajuda</Link></li><li><a href="/docs/">Referência da API</a></li><li><a href="/openapi/v1.json">OpenAPI (JSON)</a></li></ul></div>
-          <div><h4>Acesso</h4><ul><li><Link to="/cadastro">Criar conta</Link></li><li><Link to="/portal">Portal do cliente</Link></li><li><Link to="/termos">Termos de Uso</Link></li><li><Link to="/privacidade">Privacidade</Link></li></ul></div>
-        </div>
-        <div className="legal"><div className="inner"><span>© TaxGateway · <VersionTag className="" /></span><span>Indícios não constituem parecer tributário.</span></div></div>
-      </footer>
+      <SiteFooter />
     </div>
   );
 }

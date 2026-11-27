@@ -62,7 +62,7 @@ export async function request<T = unknown>(realm: Realm, path: string, opts: Req
   const json = text && (resp.headers.get('content-type') ?? '').includes('json') ? safeParse(text) : undefined;
   if (!resp.ok) {
     const p = (json ?? {}) as { code?: string; title?: string; detail?: string; error?: string; error_description?: string };
-    const err = new ApiError(resp.status, p.code ?? p.error ?? `HTTP_${resp.status}`, p.title ?? p.error_description ?? resp.statusText ?? 'Erro', p.detail);
+    const err = new ApiError(resp.status, p.code ?? p.error ?? `HTTP_${resp.status}`, p.title ?? p.error_description ?? (resp.statusText || `Erro ${resp.status} do servidor`), p.detail);
     if (!opts.silent && (resp.status === 401 || err.code === 'ERR_MFA_NECESSARIO')) {
       window.dispatchEvent(new CustomEvent<AuthEventDetail>(AUTH_EVENT, { detail: { realm, code: err.code } }));
     }

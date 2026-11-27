@@ -507,3 +507,5 @@ web/*.tmp.mjs
 *.local.json
 .env.local
 secrets/
+
+web/coverage/

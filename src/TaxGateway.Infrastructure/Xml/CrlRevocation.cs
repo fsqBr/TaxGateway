@@ -177,8 +177,9 @@ public sealed partial class CrlCache : BackgroundService
                     Load(new Uri(url), bytes, issuer);
                     _pending.TryRemove(url, out _);
                 }
-                catch (Exception ex) when (ex is HttpRequestException or CryptographicException or AsnContentException or InvalidDataException or TaskCanceledException
-                                           && !stoppingToken.IsCancellationRequested)
+                // Qualquer falha de uma LCR (rede, S3/Valkey no modo compartilhado, conteúdo) fica no log: o laço de fundo
+                // não pode derrubar o processo da API (antes S3/Redis escapavam do filtro e paravam o host).
+                catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
                 {
                     LogFetchFailed(log, ex, url);
                 }

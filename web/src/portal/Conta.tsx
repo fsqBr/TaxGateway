@@ -49,6 +49,41 @@ export function ContestarTitularidade() {
 }
 
 /** Minha conta: senha, verificação em duas etapas e sessões abertas (D-U01). */
+interface PreferenciasEmail { desligados: string[]; opcionais: { tipo: string; descricao: string }[] }
+
+/** D-R33: avisos informativos que a pessoa pode deixar de receber por e-mail (continuam no sino do portal). */
+export function PreferenciasEmail() {
+  const prefs = useLoad(() => account<PreferenciasEmail>('portal', '/preferencias-email'));
+  const save = useAction();
+  const [ok, setOk] = useState(false);
+  const toggle = async (tipo: string, receber: boolean) => {
+    if (!prefs.data) return;
+    setOk(false);
+    const desligados = receber ? prefs.data.desligados.filter((x) => x !== tipo) : [...prefs.data.desligados, tipo];
+    if (await save.run(() => account<PreferenciasEmail>('portal', '/preferencias-email', { method: 'PUT', body: { desligados } })) !== undefined) {
+      setOk(true);
+      await prefs.reload();
+    }
+  };
+  return (
+    <Card title="E-mails de aviso" description="Cobrança, acesso, segurança, franquia esgotada e mudanças de alíquota que afetam a empresa sempre chegam por e-mail. Os informativos abaixo você escolhe; todos continuam no sino do portal.">
+      {prefs.loading ? <Loading /> : (
+        <div className="stack" role="group" aria-label="Avisos informativos por e-mail">
+          {prefs.data?.opcionais.map((o) => (
+            <label key={o.tipo} className="row" style={{ gap: 8 }}>
+              <input type="checkbox" checked={!prefs.data!.desligados.includes(o.tipo)} disabled={save.busy}
+                onChange={(e) => void toggle(o.tipo, e.target.checked)} />
+              {o.descricao}
+            </label>
+          ))}
+        </div>
+      )}
+      <Alert>{save.error ?? prefs.error}</Alert>
+      {ok && <Alert kind="success">Preferências salvas.</Alert>}
+    </Card>
+  );
+}
+
 export function MinhaConta() {
   const { sessao, reload } = useSession();
   const sessions = useLoad(() => account<{ id: string; ip: string | null; navegador: string | null; criada_em: string; ultimo_uso: string; atual: boolean }[]>('portal', '/sessoes'));
@@ -118,6 +153,7 @@ export function MinhaConta() {
         )}
         <Alert>{out.error ?? sessions.error}</Alert>
       </Card>
+      <PreferenciasEmail />
       <ContestarTitularidade />
     </>
   );

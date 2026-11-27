@@ -19,25 +19,34 @@ public sealed record ReprocessSummary(int Encontrados, int Reprocessados, int Se
 public sealed partial class ReprocessService(ITenantDb db, TenantSettingsService settings, AuditService audit,
     IParamSnapshotProvider snapshots, ILogger<ReprocessService> log, XmlVault? vault = null)
 {
-    public async Task<ReprocessSummary> RunAsync(TenantId tenant, DateOnly fromMonth, DateOnly toMonth, CancellationToken ct)
+    /// <summary>
+    /// Reaudita a auditoria mais recente de cada chave no período, sem cobrança (PlatformInitiated, D-R07). Com
+    /// <paramref name="municipio"/> ou <paramref name="ufCodigo"/>, só os documentos daquele ente (D-R19).
+    /// </summary>
+    public async Task<ReprocessSummary> RunAsync(TenantId tenant, DateOnly fromMonth, DateOnly toMonth, CancellationToken ct,
+        int? municipio = null, short? ufCodigo = null)
     {
         var docs = await db.InTenantAsync(tenant, async (s, c) =>
         {
             // Só a auditoria mais recente de cada chave (a que o registry aponta).
             await using var cmd = s.CreateCommand("""
-                SELECT f.access_key, f.xml_storage_key
+                SELECT f.access_key, f.xml_storage_key, f.kind
                   FROM document_registry r
                   JOIN fiscal_documents f ON f.id = r.latest_document_id AND f.access_key = r.access_key
-                 WHERE f.billing_month BETWEEN $1 AND $2 AND f.kind = 'OUTBOUND'
+                 WHERE f.billing_month BETWEEN $1 AND $2
+                   AND ($3::int IS NULL OR f.municipio_incidencia = $3)
+                   AND ($4::smallint IS NULL OR f.municipio_incidencia / 100000 = $4)
                  ORDER BY f.billing_month, f.created_at
                 """);
             cmd.Parameters.Add(new() { Value = fromMonth });
             cmd.Parameters.Add(new() { Value = toMonth });
+            cmd.Parameters.Add(new() { Value = (object?)municipio ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer });
+            cmd.Parameters.Add(new() { Value = (object?)ufCodigo ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Smallint });
             await using var r = await cmd.ExecuteReaderAsync(c).ConfigureAwait(false);
-            var list = new List<(string Chave, string? Key)>();
+            var list = new List<(string Chave, string? Key, string Kind)>();
             while (await r.ReadAsync(c).ConfigureAwait(false))
             {
-                list.Add((r.GetString(0), r.IsDBNull(1) ? null : r.GetString(1)));
+                list.Add((r.GetString(0), r.IsDBNull(1) ? null : r.GetString(1), r.GetString(2)));
             }
 
             return list;
@@ -47,7 +56,7 @@ public sealed partial class ReprocessService(ITenantDb db, TenantSettingsService
         var limits = ParamSnapshotService.EffectiveLimits(snapshots.Current, "ENTERPRISE", "{}");
         var caller = new Caller(new ApiKeyIdentity(tenant, Guid.Empty, [Scopes.AuditoriaWrite], "ENTERPRISE", "ACTIVE", "{}", AutoProvisionCnpj: true), limits);
         int ok = 0, semXml = 0, falhas = 0;
-        foreach (var (chave, key) in docs)
+        foreach (var (chave, key, kind) in docs)
         {
             if (key is null || vault is null)
             {
@@ -58,7 +67,7 @@ public sealed partial class ReprocessService(ITenantDb db, TenantSettingsService
             try
             {
                 var xml = await vault.GetAsync(kek, key, ct).ConfigureAwait(false);
-                await audit.AuditAsync(caller, new AuditRequest(xml, "OUTBOUND", Reprocess: true, SignatureOptional: false, PlatformInitiated: true), ct).ConfigureAwait(false);
+                await audit.AuditAsync(caller, new AuditRequest(xml, kind, Reprocess: true, SignatureOptional: false, PlatformInitiated: true), ct).ConfigureAwait(false);
                 ok++;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)

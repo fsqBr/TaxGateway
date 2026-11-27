@@ -1,12 +1,12 @@
 import { useState, type FormEvent } from 'react';
-import { useSearchParams } from 'react-router-dom';
-import { CreditCard, ExternalLink, ShieldCheck } from 'lucide-react';
+import { Link, useSearchParams } from 'react-router-dom';
+import { CreditCard, ExternalLink } from 'lucide-react';
 import { useSession } from '../auth/session';
 import { Alert, Badge, Card, Field, Loading, PageHeader, Table, useAction, useLoad } from '../components/ui';
 import { ConfirmButton } from '../components/ConfirmDialog';
-import { PlanCards, precoLabel, usePlanos } from '../pages/Planos';
+import { PlanCards, PlanMatrix, precoLabel, usePlanos } from '../pages/Planos';
 import { portal } from '../lib/api';
-import { dateTime, fileToBase64, money } from '../lib/format';
+import { dateTime, money } from '../lib/format';
 
 interface Cobranca {
   plano: string;
@@ -25,7 +25,16 @@ const SITUACAO: Record<string, { label: string; tone: 'ok' | 'warn' | 'bad' | 'n
   uncollectible: { label: 'incobrável', tone: 'bad' },
 };
 
-const METODO: Record<string, string> = { CERTIFICADO: 'certificado e-CNPJ', EMAIL_RECEITA: 'código no e-mail do cadastro da Receita', MANUAL: 'análise do suporte' };
+/** Plano escolhido em /planos antes do cadastro (guardado pelo site, D-R25). */
+const planoEscolhido = (): string | null => {
+  try {
+    return sessionStorage.getItem('tg:plano-escolhido');
+  } catch {
+    return null;
+  }
+};
+
+export const METODO: Record<string, string> = { CERTIFICADO: 'certificado e-CNPJ', EMAIL_RECEITA: 'código no e-mail do cadastro da Receita', MANUAL: 'análise do suporte' };
 
 /** D-R09: régua de inadimplência — aviso, consumo bloqueado no dia 10, suspensão no dia 15. */
 function Inadimplencia({ i }: { i: NonNullable<Cobranca['inadimplencia']> }) {
@@ -73,62 +82,6 @@ function Teto({ e, onSaved }: { e: Cobranca['excedente']; onSaved: () => Promise
   );
 }
 
-/** D-R10: titularidade do CNPJ — exigida para plano pago e captura de DF-e. */
-function Verificacao({ v, onDone }: { v: Cobranca['verificacao']; onDone: () => Promise<void> }) {
-  const status = useLoad(() => portal<{ cnpj: string; metodos_disponiveis: string[] }>('/v1/verificacao-cnpj'));
-  const { busy, error, run } = useAction();
-  const [pfx, setPfx] = useState<File>();
-  const [senha, setSenha] = useState('');
-  const [enviado, setEnviado] = useState<string>();
-  const [codigo, setCodigo] = useState('');
-  if (v.verificada) {
-    return (
-      <Card title="Titularidade da empresa">
-        <p className="row" style={{ gap: 8 }}><ShieldCheck size={18} aria-hidden="true" /> <Badge tone="ok">verificada</Badge>
-          <span className="muted small">por {METODO[v.metodo ?? ''] ?? v.metodo} em {dateTime(v.verificada_em)}</span></p>
-      </Card>
-    );
-  }
-  const porCertificado = async (ev: FormEvent) => {
-    ev.preventDefault();
-    if (pfx && await run(async () => portal('/v1/verificacao-cnpj/certificado', { method: 'POST', body: { pfx_base64: await fileToBase64(pfx), senha } }))) await onDone();
-  };
-  const enviarCodigo = async () => {
-    const r = await run(() => portal<{ enviado_para: string }>('/v1/verificacao-cnpj/email', { method: 'POST' }));
-    if (r) setEnviado(r.enviado_para);
-  };
-  const confirmar = async (ev: FormEvent) => {
-    ev.preventDefault();
-    if (await run(() => portal('/v1/verificacao-cnpj/email/confirmar', { method: 'POST', body: { codigo } }))) await onDone();
-  };
-  const email = status.data?.metodos_disponiveis.includes('EMAIL_RECEITA');
-  return (
-    <Card title="Verifique a empresa" description="Para contratar plano pago e ligar a captura de notas (DF-e), confirme que a empresa é sua. Isso protege o CNPJ contra uso por terceiros.">
-      <Alert>{error ?? status.error}</Alert>
-      <form onSubmit={(ev) => void porCertificado(ev)}>
-        <p><strong>Com o certificado e-CNPJ (A1)</strong> <span className="muted small">— na hora. Usado só para conferir a cadeia ICP-Brasil e o CNPJ; não é guardado.</span></p>
-        <div className="row" style={{ gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-          <Field label="Arquivo .pfx"><input type="file" accept=".pfx,.p12" onChange={(ev) => setPfx(ev.target.files?.[0])} /></Field>
-          <Field label="Senha do certificado"><input type="password" autoComplete="off" value={senha} onChange={(ev) => setSenha(ev.target.value)} /></Field>
-          <button type="submit" disabled={busy || !pfx || !senha}>Verificar com certificado</button>
-        </div>
-      </form>
-      {email && (
-        <div style={{ marginTop: 16 }}>
-          <p><strong>Com um código no e-mail do cadastro do CNPJ na Receita</strong></p>
-          {!enviado ? <button type="button" className="secondary" disabled={busy} onClick={() => void enviarCodigo()}>Enviar código</button> : (
-            <form className="row" style={{ gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }} onSubmit={(ev) => void confirmar(ev)}>
-              <Field label={`Código enviado para ${enviado}`} hint="Vale por 30 minutos, até 5 tentativas."><input inputMode="numeric" maxLength={6} value={codigo} onChange={(ev) => setCodigo(ev.target.value.replace(/\D/g, ''))} /></Field>
-              <button type="submit" disabled={busy || codigo.length !== 6}>Confirmar código</button>
-            </form>
-          )}
-        </div>
-      )}
-      <p className="muted small" style={{ marginTop: 16 }}>Sem certificado nem acesso ao e-mail do cadastro? Escreva para suporte@taxgateway.com.br com o contrato social — a verificação manual sai em até 2 dias úteis.</p>
-    </Card>
-  );
-}
-
 /** Plano e cobrança (D-C02): contratar/trocar pela Stripe, gerenciar pagamento e ver faturas. Dono, admin e financeiro. */
 export function PlanoCobranca() {
   const { reload } = useSession();
@@ -136,6 +89,7 @@ export function PlanoCobranca() {
   const { planos } = usePlanos();
   const { busy, error, run } = useAction();
   const [params] = useSearchParams();
+  const escolhido = params.get('plano') ?? planoEscolhido();
 
   const contratar = async (codigo: string) => {
     const r = await run(() => portal<{ acao: string; url?: string }>('/v1/cobranca/checkout', { method: 'POST', body: { plano: codigo } }));
@@ -168,7 +122,11 @@ export function PlanoCobranca() {
           </div>
         )}
       </Card>
-      {data.data && <Verificacao v={data.data.verificacao} onDone={async () => { await data.reload(); await reload(); }} />}
+      {data.data && !data.data.verificacao.verificada && (
+        <Alert kind="info">Para contratar um plano pago, verifique a empresa primeiro (certificado e-CNPJ, código no e-mail do cadastro da Receita ou suporte): <Link to="/portal/empresa">Verificar a empresa</Link>.</Alert>
+      )}
+      {data.data?.verificacao.verificada && <p className="muted small">Empresa verificada por {METODO[data.data.verificacao.metodo ?? ''] ?? data.data.verificacao.metodo} em {dateTime(data.data.verificacao.verificada_em)}.</p>}
+      {escolhido && data.data && escolhido !== data.data.plano && <Alert kind="info">Você escolheu o plano <strong>{planos?.find((p) => p.codigo === escolhido)?.nome ?? escolhido}</strong> no site. Ele está destacado abaixo.</Alert>}
       {data.data && <Teto key={data.data.excedente.teto_centavos} e={data.data.excedente} onSaved={data.reload} />}
       {planos && data.data && (
         <Card title={data.data.assinatura ? 'Trocar de plano' : 'Contratar um plano'} description="A troca vale na hora; a diferença proporcional entra na próxima fatura. Planos sob consulta: fale com vendas.">
@@ -184,6 +142,12 @@ export function PlanoCobranca() {
                   disabled={busy || !data.data.pagamento_online} onConfirm={() => contratar(p.codigo)} />
               : <button type="button" disabled={busy || !data.data?.pagamento_online || !data.data.verificacao.verificada} title={data.data?.verificacao.verificada ? undefined : 'Verifique a empresa primeiro'} onClick={() => void contratar(p.codigo)}>Contratar {p.nome}</button>;
           }} />
+          {planos.length > 1 && (
+            <details style={{ marginTop: 16 }}>
+              <summary>Comparar todos os planos, recurso a recurso</summary>
+              <div style={{ marginTop: 12 }}><PlanMatrix planos={planos} atual={atual} /></div>
+            </details>
+          )}
         </Card>
       )}
       <Card title="Faturas" flush>

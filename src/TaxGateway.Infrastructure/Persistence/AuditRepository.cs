@@ -34,7 +34,8 @@ public sealed record AuditRecord(
     bool IsBillable,
     bool Reprocess,
     decimal CreditPotential = 0,
-    string? CreditStatus = null);
+    string? CreditStatus = null,
+    int? MunicipioIncidencia = null);     // D-R19: quem é afetado por mudança de alíquota local
 
 public sealed record StoredAudit(Guid Id, DateOnly BillingMonth, string Status, string ResponseJson, bool IsBillable, byte[] XmlSha256);
 
@@ -105,9 +106,9 @@ public sealed class AuditRepository(ITenantDb db)
                     INSERT INTO fiscal_documents (id, billing_month, tenant_id, kind, model, access_key, cnpj_subject, cnpj_counterparty,
                         is_consumidor_final, cpf_hmac, engine, engine_bundle, rules_version, param_snapshot_id, audit_status,
                         declared, recalculated, difference_total, findings, xml_storage_key, xml_sha256, is_billable, reprocess_of,
-                        credit_potential, credit_status)
+                        credit_potential, credit_status, municipio_incidencia)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
-                        CASE WHEN $23 THEN (SELECT first_document_id FROM document_registry WHERE idempotency_hash = $24) END, $25, $26)
+                        CASE WHEN $23 THEN (SELECT first_document_id FROM document_registry WHERE idempotency_hash = $24) END, $25, $26, $27)
                     """);
                 static object N(object? v) => v ?? DBNull.Value;
                 doc.Parameters.Add(new() { Value = a.Id });
@@ -136,6 +137,7 @@ public sealed class AuditRepository(ITenantDb db)
                 doc.Parameters.Add(new() { Value = hash });
                 doc.Parameters.Add(new() { Value = a.CreditPotential });
                 doc.Parameters.Add(new() { Value = N(a.CreditStatus), NpgsqlDbType = NpgsqlDbType.Text });
+                doc.Parameters.Add(new() { Value = N(a.MunicipioIncidencia), NpgsqlDbType = NpgsqlDbType.Integer });
                 batch.BatchCommands.Add(doc);
 
                 if (a.IsBillable)
@@ -176,7 +178,8 @@ public sealed class AuditRepository(ITenantDb db)
         }, ct);
 }
 
-public sealed record TenantSettings(int? XmlRetentionDays, string KmsKeyRef, bool AutoProvisionCnpj = false, string PlanCode = "STARTER", string LimitsOverrideJson = "{}");
+public sealed record TenantSettings(int? XmlRetentionDays, string KmsKeyRef, bool AutoProvisionCnpj = false, string PlanCode = "STARTER", string LimitsOverrideJson = "{}",
+    string Status = "ACTIVE", long OverageCapCents = 0);
 
 /// <summary>Retenção do XML e referência da KEK do tenant (cache L1 de 30 s).</summary>
 public sealed class TenantSettingsService(ITenantDb db, IMemoryCache cache)
@@ -191,14 +194,14 @@ public sealed class TenantSettingsService(ITenantDb db, IMemoryCache cache)
 
         var settings = await db.InTenantAsync(tenant, async (s, c) =>
         {
-            await using var cmd = s.CreateCommand("SELECT xml_retention_days, kms_key_ref, auto_provision_cnpj, plan_code, limits_override::text FROM tenants");
+            await using var cmd = s.CreateCommand("SELECT xml_retention_days, kms_key_ref, auto_provision_cnpj, plan_code, limits_override::text, status, overage_cap_cents FROM tenants");
             await using var r = await cmd.ExecuteReaderAsync(c).ConfigureAwait(false);
             if (!await r.ReadAsync(c).ConfigureAwait(false))
             {
                 throw new InvalidOperationException("Tenant não encontrado no contexto.");
             }
 
-            return new TenantSettings(r.IsDBNull(0) ? null : r.GetInt32(0), r.GetString(1), r.GetBoolean(2), r.GetString(3), r.GetString(4));
+            return new TenantSettings(r.IsDBNull(0) ? null : r.GetInt32(0), r.GetString(1), r.GetBoolean(2), r.GetString(3), r.GetString(4), r.GetString(5), r.GetInt64(6));
         }, ct).ConfigureAwait(false);
         cache.Set(key, settings, new MemoryCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(30), Size = 1 });
         return settings;

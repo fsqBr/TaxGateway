@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Caching.Memory;
 
 using TaxGateway.Api.Simulation;
+using TaxGateway.Infrastructure.Billing;
 using TaxGateway.Infrastructure.Persistence;
 
 namespace TaxGateway.Api.Http;
@@ -8,7 +9,8 @@ namespace TaxGateway.Api.Http;
 public sealed record QuotaMetric(string Metric);
 
 /// <summary>
-/// Franquia, teto de excedente e inadimplência nas rotas que consomem (simular, auditar, lotes).
+/// Franquia, teto de excedente e inadimplência nas rotas que consomem (simular, auditar, lotes). A decisão é a de
+/// <see cref="PlanQuota"/> (a mesma da criação de lote e dos workers, D-R12); aqui ficam o cache e os avisos.
 /// <list type="bullet">
 /// <item>D-R09: tenant RESTRICTED (pagamento pendente há 10 dias) não consome: 402 <c>ERR_PAGAMENTO_PENDENTE</c>.</item>
 /// <item>D-C07: plano com franquia rígida (Sandbox) para ao esgotar: 402 <c>ERR_FRANQUIA_ESGOTADA</c>.</item>
@@ -22,8 +24,6 @@ public sealed class QuotaFilter(ITenantDb db, IMemoryCache cache, TimeProvider c
 {
     private static readonly TimeSpan Ttl = TimeSpan.FromSeconds(30);
 
-    private sealed record Usage(long Docs, long Sims);
-
     public async ValueTask<object?> InvokeAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
     {
         ArgumentNullException.ThrowIfNull(context);
@@ -36,87 +36,37 @@ public sealed class QuotaFilter(ITenantDb db, IMemoryCache cache, TimeProvider c
         }
 
         var caller = http.GetCaller();
-        if (caller.Identity.TenantStatus == "RESTRICTED")
-        {
-            return ApiProblem.Result(402, "ERR_PAGAMENTO_PENDENTE", "Pagamento pendente: consumo suspenso",
-                "Consulta e exportação continuam liberadas. Regularize o pagamento em Plano e cobrança para voltar a simular e auditar.");
-        }
-
         var l = caller.Limits;
-        var isDoc = metric == "DOC_AUDIT";
-        var included = isDoc ? l.IncludedDocs : l.IncludedSimulations;
-        var unitMillicents = isDoc ? l.OverageDocMillicents : l.OverageSimMillicents;
-        // Sem franquia definida e sem preço de excedente (planos legados/negociados): sem limite.
-        if (included <= 0 && !l.HardQuota && unitMillicents <= 0)
-        {
-            return await next(context).ConfigureAwait(false);
-        }
-
         var month = SimulationService.BillingMonth(clock.GetUtcNow());
         var key = $"quota:{caller.Identity.Tenant}:{month:yyyyMM}";
-        if (!cache.TryGetValue(key, out Usage? usage) || usage is null)
+        if (!cache.TryGetValue(key, out QuotaUsage? usage) || usage is null)
         {
-            usage = await db.InTenantAsync(caller.Identity.Tenant, async (s, ct) =>
-            {
-                await using var cmd = s.CreateCommand("""
-                    SELECT count(*) FILTER (WHERE metric = 'DOC_AUDIT'), count(*) FILTER (WHERE metric = 'SIMULATION')
-                      FROM usage_ledger WHERE billing_month = $1
-                    """);
-                cmd.Parameters.Add(new() { Value = month, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Date });
-                await using var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-                await r.ReadAsync(ct).ConfigureAwait(false);
-                return new Usage(r.GetInt64(0), r.GetInt64(1));
-            }, http.RequestAborted).ConfigureAwait(false);
+            usage = await PlanQuota.LoadAsync(db, caller.Identity.Tenant, month, includeReserved: true, http.RequestAborted).ConfigureAwait(false);
             cache.Set(key, usage, new MemoryCacheEntryOptions { AbsoluteExpirationRelativeToNow = Ttl, Size = 1 });
             await NotifyAsync(caller, month, usage, http.RequestAborted).ConfigureAwait(false);
         }
 
-        var used = isDoc ? usage.Docs : usage.Sims;
-        var what = isDoc ? "auditorias" : "simulações";
-        if (l.HardQuota)
+        // D-R12: mesma regra da criação de lote e dos workers (PlanQuota).
+        if (PlanQuota.Check(l, caller.Identity.TenantStatus, caller.Billing?.OverageCapCents ?? 0, usage, metric) is { } denial)
         {
-            if (used >= included)
+            if (denial.Code != "ERR_PAGAMENTO_PENDENTE")
             {
                 TaxGateway.Infrastructure.TaxGatewayMetrics.QuotaExhausted.Add(1, new KeyValuePair<string, object?>("metrica", metric));
-                return ApiProblem.Result(402, "ERR_FRANQUIA_ESGOTADA", $"Franquia de {what} do plano esgotada neste mês",
-                    $"O plano {l.PlanCode} inclui {included} {what} por mês, sem excedente. Troque de plano em Plano e cobrança para continuar.");
             }
 
-            return await next(context).ConfigureAwait(false);
-        }
-
-        // Plano pago: dentro da franquia passa; fora dela, só até o teto de excedente.
-        if (used < included || unitMillicents <= 0)
-        {
-            return await next(context).ConfigureAwait(false);
-        }
-
-        var cap = caller.Billing?.OverageCapCents ?? 0;
-        if (OverageCents(l, usage) + (unitMillicents / 1000.0m) > cap)
-        {
-            TaxGateway.Infrastructure.TaxGatewayMetrics.QuotaExhausted.Add(1, new KeyValuePair<string, object?>("metrica", metric));
-            return cap == 0
-                ? ApiProblem.Result(402, "ERR_TETO_EXCEDENTE", $"Franquia de {what} esgotada e sem teto de excedente",
-                    $"O plano {l.PlanCode} inclui {included} {what} por mês. Para continuar este mês, defina um teto de excedente (cobrança automática até o valor escolhido) ou troque de plano em Plano e cobrança.")
-                : ApiProblem.Result(402, "ERR_TETO_EXCEDENTE", "Teto de excedente atingido",
-                    $"O excedente do mês chegou ao teto de R$ {cap / 100.0m:0.00}. Aumente o teto ou troque de plano em Plano e cobrança.");
+            return ApiProblem.Result(denial.Status, denial.Code, denial.Title, denial.Detail);
         }
 
         return await next(context).ConfigureAwait(false);
     }
 
     /// <summary>Excedente acumulado no mês, em centavos (mesma regra do fechamento: o que passa da franquia × preço).</summary>
-    public static decimal OverageCents(TaxGateway.Core.Params.PlanLimits l, long docs, long sims)
-    {
-        ArgumentNullException.ThrowIfNull(l);
-        return (Math.Max(0, docs - l.IncludedDocs) * l.OverageDocMillicents / 1000.0m)
-               + (Math.Max(0, sims - l.IncludedSimulations) * l.OverageSimMillicents / 1000.0m);
-    }
+    public static decimal OverageCents(TaxGateway.Core.Params.PlanLimits l, long docs, long sims) => PlanQuota.OverageCents(l, docs, sims);
 
-    private static decimal OverageCents(TaxGateway.Core.Params.PlanLimits l, Usage u) => OverageCents(l, u.Docs, u.Sims);
+    private static decimal OverageCents(TaxGateway.Core.Params.PlanLimits l, QuotaUsage u) => PlanQuota.OverageCents(l, u.Docs, u.Sims);
 
     /// <summary>Avisos de franquia (80% e 100%) e de teto (80% e 100%), uma vez por mês cada (dedupe no banco).</summary>
-    private async Task NotifyAsync(Caller caller, DateOnly month, Usage usage, CancellationToken ct)
+    private async Task NotifyAsync(Caller caller, DateOnly month, QuotaUsage usage, CancellationToken ct)
     {
         var l = caller.Limits;
         var cap = caller.Billing?.OverageCapCents ?? 0;

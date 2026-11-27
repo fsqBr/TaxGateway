@@ -73,7 +73,8 @@ jobs:
             curl -fs http://127.0.0.1:18080/api/api-docs >/dev/null && curl -fs http://127.0.0.1:28080/api/api-docs >/dev/null && break
             sleep 2
           done
-          python3 infra/rfb/regression_report.py --base http://127.0.0.1:18080/api/ --candidate http://127.0.0.1:28080/api/ --out out/regressao.md
+          # D-R31: o resumo vai junto no PR e vira o texto do aviso "motor oficial atualizado" às contas.
+          python3 infra/rfb/regression_report.py --base http://127.0.0.1:18080/api/ --candidate http://127.0.0.1:28080/api/ --out out/regressao.md             --bundle "${{ steps.detect.outputs.bundle }}" --summary-json "src/TaxGateway.Workers/fiscal-bundles/${{ steps.detect.outputs.bundle }}.json"
           cat out/regressao.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Resumo da detecção no topo do relatório (nova versão ou tag republicada, D-Q04)
@@ -96,12 +97,27 @@ jobs:
           PY
 
       - name: Abrir PR com o relatório
+        id: pr
         if: steps.detect.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
         with:
           branch: fiscal/bundle-${{ steps.detect.outputs.bundle }}
           title: "Bundle fiscal ${{ steps.detect.outputs.bundle }}"
           commit-message: "Atualiza motores da RFB para o bundle ${{ steps.detect.outputs.bundle }}"
-          add-paths: infra/rfb/versions.json
+          add-paths: |
+            infra/rfb/versions.json
+            src/TaxGateway.Workers/fiscal-bundles/*.json
           body-path: out/regressao.md
           labels: fiscal, requer-aprovacao-fiscal
+          # PR aberto com o GITHUB_TOKEN não dispara o CI (regra do GitHub); com FISCAL_BOT_TOKEN (PAT/App) o CI roda
+          # no PR e o merge automático pode acontecer.
+          token: ${{ secrets.FISCAL_BOT_TOKEN || github.token }}
+
+      # D-R30/D-R31: com a variável FISCAL_AUTO_MERGE=true no repositório, o PR entra sozinho quando todas as
+      # verificações obrigatórias passarem (contratos, testes oficiais dos motores, CI completo). O deploy em produção
+      # continua passando pela aprovação do ambiente "production" (deploy.yml).
+      - name: Merge automático quando as verificações passarem
+        if: steps.detect.outputs.changed == 'true' && vars.FISCAL_AUTO_MERGE == 'true' && steps.pr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ secrets.FISCAL_BOT_TOKEN || github.token }}
+        run: gh pr merge --auto --squash "${{ steps.pr.outputs.pull-request-number }}"

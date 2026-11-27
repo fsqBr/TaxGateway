@@ -182,10 +182,25 @@ public sealed partial class AccountService(
     {
         var userId = await ConsumeUserTokenAsync(token, "verify_email", ct).ConfigureAwait(false)
             ?? throw new AccountException(400, "ERR_LINK_INVALIDO", "Link inválido ou expirado", "Peça um novo e-mail de confirmação.");
-        await using var cmd = appDb.CreateCommand("UPDATE users SET email_verified_at = coalesce(email_verified_at, now()) WHERE id = $1");
+        await using var cmd = appDb.CreateCommand("""
+            UPDATE users SET email_verified_at = now() WHERE id = $1 AND email_verified_at IS NULL RETURNING email, name, realm
+            """);
         cmd.Parameters.Add(new() { Value = userId });
-        await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        (string Email, string Name, string Realm)? first = null;
+        await using (var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false))
+        {
+            if (await r.ReadAsync(ct).ConfigureAwait(false))
+            {
+                first = (r.GetString(0), r.GetString(1), r.GetString(2));
+            }
+        }
+
         await AuditAsync(null, "user", userId.ToString(), "email.confirmado", null, null, new JsonObject(), ct).ConfigureAwait(false);
+        // D-R32: boas-vindas só na primeira confirmação, com os primeiros passos.
+        if (first is { Realm: "customer" } f)
+        {
+            await email.SendAsync(EmailTemplates.Welcome(f.Email, f.Name, $"{O.PublicBaseUrl}/portal", $"{O.PublicBaseUrl}/ajuda"), ct).ConfigureAwait(false);
+        }
     }
 
     // ------------------------------------------------------------------------------------------------- login e sessão
@@ -241,6 +256,17 @@ public sealed partial class AccountService(
                 "Enviamos um link de confirmação no cadastro. Peça um novo se não encontrar.");
         }
 
+        // D-R32: entrada por um navegador/dispositivo que esta pessoa nunca usou → aviso de segurança por e-mail.
+        bool newDevice;
+        await using (var seen = appDb.CreateCommand("""
+            SELECT count(*) > 0 AND count(*) FILTER (WHERE user_agent IS NOT DISTINCT FROM $2) = 0 FROM user_sessions WHERE user_id = $1
+            """))
+        {
+            seen.Parameters.Add(new() { Value = id });
+            seen.Parameters.Add(new() { Value = (object?)Truncate(userAgent, 300) ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Text });
+            newDevice = await seen.ExecuteScalarAsync(ct).ConfigureAwait(false) is true;
+        }
+
         var cookie = OpaqueToken.New();
         var sessionId = Guid.CreateVersion7();
         Guid? active = null;
@@ -263,7 +289,71 @@ public sealed partial class AccountService(
         await BatchAsync(ct, insert, Cmd("UPDATE users SET failed_logins = 0, locked_until = NULL, last_login_at = now() WHERE id = $1", id)).ConfigureAwait(false);
 
         await AuditAsync(null, realm == "operator" ? "operator" : "user", id.ToString(), "login.senha_ok", null, ip, new JsonObject { ["mfa"] = mfa ? "verificar" : "configurar" }, ct).ConfigureAwait(false);
+        if (newDevice)
+        {
+            await email.SendAsync(EmailTemplates.SecurityNotice(e, name,
+                $"Houve uma entrada na sua conta por um navegador ou dispositivo novo ({DeviceLabel(userAgent)}, IP {ip ?? "desconhecido"}, " +
+                $"{DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(-3)):dd/MM/yyyy HH:mm} no horário de Brasília)."), ct).ConfigureAwait(false);
+        }
+
         return (cookie, new SessionInfo(sessionId, id, realm, e, name, false, mfa, active, opScopes, verified));
+    }
+
+    /// <summary>D-R33: avisos que a pessoa pode deixar de receber por e-mail (continuam no portal). Mesma lista do CHECK da V0027.</summary>
+    public static readonly IReadOnlyDictionary<string, string> OptionalNotices = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["RESUMO_MENSAL"] = "Resumo do mês (documentos auditados, divergências e crédito em risco)",
+        ["MOTOR_ATUALIZADO"] = "Nova versão do motor oficial da Receita",
+        ["RENOVACAO_PROXIMA"] = "Assinatura renova em breve",
+        ["FATURA_EMITIDA"] = "Fatura emitida",
+        ["PAGAMENTO_RECEBIDO"] = "Pagamento recebido",
+        ["FRANQUIA_80"] = "Franquia do plano em 80%",
+        ["TETO_80"] = "Teto de excedente em 80%",
+    };
+
+    public async Task<string[]> GetEmailOptOutAsync(SessionInfo s, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(s);
+        await using var cmd = appDb.CreateCommand("SELECT notice_email_opt_out FROM users WHERE id = $1");
+        cmd.Parameters.Add(new() { Value = s.UserId });
+        return await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false) as string[] ?? [];
+    }
+
+    public async Task<string[]> SetEmailOptOutAsync(SessionInfo s, IReadOnlyCollection<string> off, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(s);
+        ArgumentNullException.ThrowIfNull(off);
+        var invalid = off.Where(x => !OptionalNotices.ContainsKey(x)).ToList();
+        if (invalid.Count > 0)
+        {
+            throw new AccountException(400, "ERR_VALIDATION", "Aviso que não pode ser desligado",
+                $"Cobrança, acesso, segurança, franquia esgotada e mudanças fiscais sempre vão por e-mail. Não reconhecidos: {string.Join(", ", invalid)}.");
+        }
+
+        var value = off.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+        await using var cmd = appDb.CreateCommand("UPDATE users SET notice_email_opt_out = $2 WHERE id = $1");
+        cmd.Parameters.Add(new() { Value = s.UserId });
+        cmd.Parameters.Add(new() { Value = value });
+        await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        await AuditAsync(null, "user", s.UserId.ToString(), "preferencias_email.alteradas", null, null,
+            new JsonObject { ["desligados"] = new JsonArray([.. value.Select(x => (JsonNode)x)]) }, ct).ConfigureAwait(false);
+        return value;
+    }
+
+    /// <summary>"Chrome no Windows" a partir do User-Agent (só para o aviso; sem biblioteca de parsing).</summary>
+    public static string DeviceLabel(string? userAgent)
+    {
+        var ua = userAgent ?? "";
+        var browser = ua.Contains("Edg/", StringComparison.Ordinal) ? "Edge"
+            : ua.Contains("Firefox/", StringComparison.Ordinal) ? "Firefox"
+            : ua.Contains("Chrome/", StringComparison.Ordinal) ? "Chrome"
+            : ua.Contains("Safari/", StringComparison.Ordinal) ? "Safari" : "navegador desconhecido";
+        var os = ua.Contains("Windows", StringComparison.Ordinal) ? "Windows"
+            : ua.Contains("Android", StringComparison.Ordinal) ? "Android"
+            : ua.Contains("iPhone", StringComparison.Ordinal) || ua.Contains("iPad", StringComparison.Ordinal) ? "iOS"
+            : ua.Contains("Mac OS", StringComparison.Ordinal) ? "macOS"
+            : ua.Contains("Linux", StringComparison.Ordinal) ? "Linux" : null;
+        return os is null ? browser : $"{browser} no {os}";
     }
 
     private static AccountException InvalidCredentials() => new(401, "ERR_CREDENCIAIS", "E-mail ou senha incorretos");
@@ -752,6 +842,22 @@ public sealed partial class AccountService(
     public async Task<Guid> AcceptInviteAsync(string token, SessionInfo? session, string? name, string? password, string? ip, CancellationToken ct)
     {
         var info = await InviteInfoAsync(token, ct).ConfigureAwait(false);
+        // D-R14: o limite de usuários do plano vale no aceite (o plano pode ter baixado depois do convite).
+        await tenantDb.InTenantAsync(new TenantId(info.Tenant), async (s, c) =>
+        {
+            await using var cmd = s.CreateCommand("""
+                SELECT (SELECT count(*) FROM user_memberships), p.max_users
+                  FROM tenants t JOIN plans p ON p.code = t.plan_code
+                """);
+            await using var r = await cmd.ExecuteReaderAsync(c).ConfigureAwait(false);
+            if (await r.ReadAsync(c).ConfigureAwait(false) && !r.IsDBNull(1) && r.GetInt64(0) >= r.GetInt32(1))
+            {
+                throw new AccountException(422, "ERR_LIMITE_USUARIOS", "Limite de usuários do plano atingido",
+                    $"O plano da empresa permite {r.GetInt32(1)} usuário(s). Peça a quem administra a conta para trocar de plano ou liberar um acesso.");
+            }
+
+            return 0;
+        }, ct).ConfigureAwait(false);
         Guid userId;
         if (info.HasAccount)
         {
@@ -813,6 +919,7 @@ public sealed partial class AccountService(
 
         await tenantDb.InTenantAsync(tenant, async (s, c) =>
         {
+            await EnsureOwnerOnlyByOwnerAsync(s, member, actorRole, c).ConfigureAwait(false);
             await EnsureNotLastOwnerAsync(s, member, role, c).ConfigureAwait(false);
             await using var cmd = s.CreateCommand("UPDATE user_memberships SET role = $2 WHERE user_id = $1");
             cmd.Parameters.Add(new() { Value = member });
@@ -823,10 +930,11 @@ public sealed partial class AccountService(
         await AuditAsync(tenant, "user", actor.UserId.ToString(), "membro.papel_alterado", member.ToString(), ip, new JsonObject { ["papel"] = role }, ct).ConfigureAwait(false);
     }
 
-    public async Task RemoveMemberAsync(TenantId tenant, SessionInfo actor, Guid member, string? ip, CancellationToken ct)
+    public async Task RemoveMemberAsync(TenantId tenant, SessionInfo actor, Guid member, string? ip, CancellationToken ct, string actorRole = "owner")
     {
         await tenantDb.InTenantAsync(tenant, async (s, c) =>
         {
+            await EnsureOwnerOnlyByOwnerAsync(s, member, actorRole, c).ConfigureAwait(false);
             await EnsureNotLastOwnerAsync(s, member, null, c).ConfigureAwait(false);
             await using var cmd = s.CreateCommand("DELETE FROM user_memberships WHERE user_id = $1");
             cmd.Parameters.Add(new() { Value = member });
@@ -843,6 +951,22 @@ public sealed partial class AccountService(
         }
 
         await AuditAsync(tenant, "user", actor.UserId.ToString(), "membro.removido", member.ToString(), ip, new JsonObject(), ct).ConfigureAwait(false);
+    }
+
+    /// <summary>D-R29: administrador não rebaixa nem remove um dono (só outro dono pode).</summary>
+    private static async Task EnsureOwnerOnlyByOwnerAsync(TenantScope s, Guid member, string actorRole, CancellationToken ct)
+    {
+        if (actorRole == "owner")
+        {
+            return;
+        }
+
+        await using var cmd = s.CreateCommand("SELECT role FROM user_memberships WHERE user_id = $1");
+        cmd.Parameters.Add(new() { Value = member });
+        if (await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false) is "owner")
+        {
+            throw new AccountException(403, "ERR_FORBIDDEN_SCOPE", "Só um dono pode alterar ou remover outro dono");
+        }
     }
 
     private static async Task EnsureNotLastOwnerAsync(TenantScope s, Guid member, string? newRole, CancellationToken ct)

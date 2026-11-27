@@ -163,6 +163,14 @@ public sealed record RequiredScope(string Scope, string? OrScope = null)
     public string Describe() => OrScope is null ? $"'{Scope}'" : $"'{Scope}' ou '{OrScope}'";
 }
 
+/// <summary>D-R23: custo da rota em tokens do limite (lote = 10) e TTL do lease de concorrência (upload longo).</summary>
+public sealed record RateCost(int Tokens, int LeaseSeconds = 10);
+
+/// <summary>
+/// Limite de requisições (SDD §5; D-R23): sistemas (API key/OAuth) usam o limite do PLANO do tenant; cada pessoa no
+/// portal tem o próprio limite (igual em todos os planos), sem disputar com o ERP; no OEM, cada CNPJ atendido
+/// (<c>X-On-Behalf-Of-CNPJ</c>) tem um sub-limite, para um cliente final não esgotar o dos outros.
+/// </summary>
 public sealed class RateLimitFilter(TenantRateLimiter limiter) : IEndpointFilter
 {
     /// <summary>TTL do lease = teto do endpoint + 5 s (SDD §5.2): uma requisição que morreu não prende o slot.</summary>
@@ -174,14 +182,36 @@ public sealed class RateLimitFilter(TenantRateLimiter limiter) : IEndpointFilter
         ArgumentNullException.ThrowIfNull(next);
         var http = context.HttpContext;
         var caller = http.GetCaller();
-        var lease = await limiter.AcquireAsync(caller.Identity.Tenant, caller.Limits, LeaseTtl).ConfigureAwait(false);
+        var cost = http.GetEndpoint()?.Metadata.GetMetadata<RateCost>();
+        var ttl = cost is null ? LeaseTtl : TimeSpan.FromSeconds(cost.LeaseSeconds);
+        var tokens = cost?.Tokens ?? 1;
+        var person = SessionAuthenticator.User(http);
+        var limits = person is null ? caller.Limits : limiter.PersonLimits(caller.Limits);
+
+        // Sub-limite do CNPJ atendido (OEM): checado antes do limite geral do tenant.
+        if (person is null && caller.OnBehalfOf is { } cnpj && caller.Limits.PerCnpjRpm is { } perCnpj)
+        {
+            var sub = caller.Limits with { Rpm = perCnpj, Burst = Math.Max(1, perCnpj / 4), Concurrency = caller.Limits.Concurrency };
+            var subLease = await limiter.AcquireAsync(caller.Identity.Tenant, sub, ttl, $"c:{cnpj}", tokens).ConfigureAwait(false);
+            await subLease.DisposeAsync().ConfigureAwait(false);   // só a taxa por CNPJ; a concorrência é a do tenant
+            if (!subLease.Acquired)
+            {
+                RateLimitHeaderWriter.Write(http.Response.Headers, subLease);
+                return ApiProblem.Result(429, "ERR_RATE_LIMITED", "Limite do CNPJ atendido excedido",
+                    $"Cada CNPJ atendido pode fazer até {perCnpj} requisições por minuto no plano {caller.Limits.PlanCode}.");
+            }
+        }
+
+        var lease = await limiter.AcquireAsync(caller.Identity.Tenant, limits, ttl, person is null ? null : $"u:{person.Session.UserId:N}", tokens).ConfigureAwait(false);
         await using (lease.ConfigureAwait(false))
         {
             RateLimitHeaderWriter.Write(http.Response.Headers, lease);
             if (!lease.Acquired)
             {
                 var what = lease.Reason == RateLimitReason.Rate ? "requisições por minuto" : "requisições simultâneas";
-                return ApiProblem.Result(429, "ERR_RATE_LIMITED", "Limite do plano excedido", $"Limite de {what} do plano {caller.Limits.PlanCode}.");
+                return person is null
+                    ? ApiProblem.Result(429, "ERR_RATE_LIMITED", "Limite do plano excedido", $"Limite de {what} do plano {caller.Limits.PlanCode}.")
+                    : ApiProblem.Result(429, "ERR_RATE_LIMITED", "Muitas ações em pouco tempo", $"Limite de {what} por pessoa no portal. Aguarde alguns segundos.");
             }
 
             return await next(context).ConfigureAwait(false);

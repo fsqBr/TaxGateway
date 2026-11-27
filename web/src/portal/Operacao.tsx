@@ -2,13 +2,15 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Building2, Calculator, CheckCircle2, Circle, FileCheck2, Gauge, Plus, Sparkles, Trash2 } from 'lucide-react';
 import { Alert, Badge, Card, Field, Json, Loading, PageHeader, Stat, StatusBadge, Table, statusLabel, useAction, useLoad } from '../components/ui';
-import { CnpjInput, Dropzone, UfSelect } from '../components/inputs';
+import { CnpjInput, Dropzone } from '../components/inputs';
 import { ApiError, downloadFile, portal } from '../lib/api';
 import { cnpj as formatCnpj, currentMonth, dateTime, integer, money } from '../lib/format';
 import { buildExampleXml } from '../lib/nfeExemplo';
 import { useSession } from '../auth/session';
 import { DocumentoDrawer } from './Documentos';
 import type { Me } from './PortalApp';
+import { MunicipioPicker, type Municipio } from '../components/MunicipioPicker';
+import { AvisoList, REGIME_LABEL } from '../components/AvisoList';
 
 interface Usage {
   competencia: string;
@@ -35,7 +37,12 @@ export function Overview({ me }: { me?: Me }) {
   const [mes, setMes] = useState(currentMonth());
   const usage = useLoad(() => portal<Usage>('/v1/usage', { query: { mes } }), [mes]);
   const passos = useLoad(() => portal<Passos>('/v1/primeiros-passos'));
-  const historico = useLoad(() => Promise.all(lastMonths(6).map((m) => portal<Usage>('/v1/usage', { query: { mes: m } }).catch(() => undefined))));
+  // Em sequência: 6 chamadas paralelas + a do mês passariam do limite de 6 simultâneas por pessoa (D-R13) e a 7ª levava 429.
+  const historico = useLoad(async () => {
+    const meses: (Usage | undefined)[] = [];
+    for (const m of lastMonths(6)) meses.push(await portal<Usage>('/v1/usage', { query: { mes: m } }).catch(() => undefined));
+    return meses;
+  });
   const u = usage.data;
   const ratio = u && u.franquia_documentos > 0 ? u.documentos_auditados / u.franquia_documentos : undefined;
   const hist = (historico.data ?? []).filter((x): x is Usage => !!x);
@@ -70,7 +77,7 @@ export function Overview({ me }: { me?: Me }) {
         <div className="grid">
           <Stat label="Documentos auditados" icon={FileCheck2} value={integer(u.documentos_auditados)} meter={ratio}
             hint={u.franquia_documentos > 0 ? <>Franquia de {integer(u.franquia_documentos)}{u.excedente_documentos > 0 && <> · <strong>{integer(u.excedente_documentos)} excedentes</strong></>}</> : 'Sem franquia definida no plano'} />
-          <Stat label="Simulações" icon={Calculator} value={integer(u.simulacoes)} hint="Cobradas por chamada" />
+          <Stat label="Simulações" icon={Calculator} value={integer(u.simulacoes)} hint="Franquia mensal do plano; o excedente, só até o teto" />
           <Stat label="CNPJs ativos" icon={Building2} value={integer(u.cnpjs_ativos)} hint="Com uso na competência" />
           {me && <Stat label="Limite do plano" icon={Gauge} value={`${integer(me.limites.rpm)}/min`} hint={`${me.limites.concorrencia} requisições simultâneas · plano ${me.plano}`} />}
         </div>
@@ -101,13 +108,25 @@ export function Overview({ me }: { me?: Me }) {
 
 interface ItemForm { ncm: string; cst: string; cclass: string; valor: string; quantidade: string; unidade: string }
 
+interface Totais { valor_base_total: number; cbs_valor: number; ibs_uf_valor: number; ibs_mun_valor: number; ibs_total_valor: number; imposto_seletivo_valor: number }
+
 interface Simulacao {
   simulation_id: string;
   regime_calculo: string;
   param_snapshot_id: number;
-  totais: { valor_base_total: number; cbs_valor: number; ibs_uf_valor: number; ibs_mun_valor: number; ibs_total_valor: number; imposto_seletivo_valor: number };
+  totais: Totais;
   avisos: { codigo: string; mensagem: string }[];
+  oficial?: boolean;
+  cenario_ajustado?: { totais: Totais; diferenca: number; excecoes: { id: string; tributo: string; aliquota: number; motivo: string; processo: string; itens: number[] }[] } | null;
 }
+
+/** Agora, no horário de Brasília, no formato do campo datetime-local. */
+const agoraBrasilia = () => new Date(Date.now() - 3 * 3600_000).toISOString().slice(0, 16);
+
+const LINHAS: [keyof Totais, string][] = [
+  ['valor_base_total', 'Base de cálculo'], ['cbs_valor', 'CBS'], ['ibs_uf_valor', 'IBS estadual'], ['ibs_mun_valor', 'IBS municipal'],
+  ['ibs_total_valor', 'IBS total'], ['imposto_seletivo_valor', 'Imposto Seletivo'],
+];
 
 const itemVazio = (): ItemForm => ({ ncm: '84713012', cst: '000', cclass: '000001', valor: '1000', quantidade: '1', unidade: 'UN' });
 
@@ -116,20 +135,20 @@ export function Simular({ me }: { me: Me }) {
   const [modo, setModo] = useState<'form' | 'json'>('form');
   const [emitente, setEmitente] = useState(me.cnpj_raiz);
   const [regime, setRegime] = useState('REGIME_REGULAR');
-  const [data, setData] = useState('2027-06-15T14:00');
-  const [municipio, setMunicipio] = useState('3550308');
-  const [uf, setUf] = useState('SP');
+  const [data, setData] = useState(agoraBrasilia());
+  const [municipio, setMunicipio] = useState<Municipio | undefined>({ codigo: 3550308, nome: 'São Paulo', uf: 'SP' });
+  const [comparacao, setComparacao] = useState<Simulacao>();
   const [itens, setItens] = useState<ItemForm[]>([itemVazio()]);
   const [text, setText] = useState('');
   const [result, setResult] = useState<Simulacao>();
   const { busy, error, run, setError } = useAction();
 
-  const corpo = () => ({
+  const corpo = (dataHora = data) => ({
     cnpj_emitente: emitente,
     regime_tributario: regime,
-    data_fato_gerador: `${data}:00-03:00`,
-    municipio_ibge: Number(municipio),
-    uf,
+    data_fato_gerador: `${dataHora}:00-03:00`,
+    municipio_ibge: municipio?.codigo ?? 0,
+    uf: municipio?.uf ?? '',
     itens: itens.map((it, i) => ({
       numero: i + 1, ncm: it.ncm.replace(/\D/g, ''), cst_ibs_cbs: it.cst, c_class_trib: it.cclass,
       valor_base_calculo: Number(it.valor.replace(',', '.')), quantidade: Number(it.quantidade.replace(',', '.')), unidade: it.unidade,
@@ -152,7 +171,18 @@ export function Simular({ me }: { me: Me }) {
         return;
       }
     }
+    if (modo === 'form' && !municipio) {
+      setError('Escolha o município na lista.');
+      return;
+    }
+    setComparacao(undefined);
     setResult(await run(() => portal<Simulacao>('/v1/calculo/simular', { method: 'POST', body, idempotent: true })));
+  };
+
+  /** A mesma operação com a reforma em vigor (CBS cheia em 2027), para comparar com o ano de teste. */
+  const comparar2027 = async () => {
+    const quando = `2027-${data.slice(5, 7)}-${data.slice(8, 10)}T${data.slice(11, 16)}`;
+    setComparacao(await run(() => portal<Simulacao>('/v1/calculo/simular', { method: 'POST', body: corpo(quando), idempotent: true })));
   };
 
   const setItem = (i: number, patch: Partial<ItemForm>) => setItens(itens.map((it, j) => (j === i ? { ...it, ...patch } : it)));
@@ -178,9 +208,8 @@ export function Simular({ me }: { me: Me }) {
                       <option value="SIMPLES_NACIONAL">Simples Nacional</option>
                     </select>
                   </Field>
-                  <Field label="Data e hora do fato gerador" hint="Horário de Brasília."><input type="datetime-local" min="2026-01-01T00:00" value={data} onChange={(e) => setData(e.target.value)} required /></Field>
-                  <Field label="Município (IBGE)" hint="7 dígitos. São Paulo: 3550308."><input value={municipio} inputMode="numeric" maxLength={7} onChange={(e) => setMunicipio(e.target.value.replace(/\D/g, ''))} required /></Field>
-                  <Field label="UF"><UfSelect value={uf} onChange={setUf} /></Field>
+                  <Field label="Data e hora do fato gerador" hint="Horário de Brasília. 2026 é o ano de teste (CBS 0,9% e IBS 0,1%)."><input type="datetime-local" min="2026-01-01T00:00" value={data} onChange={(e) => setData(e.target.value)} required /></Field>
+                  <MunicipioPicker label="Município de incidência" value={municipio} onChange={setMunicipio} />
                 </div>
                 {itens.map((it, i) => (
                   <fieldset key={i} className="item-card">
@@ -211,23 +240,29 @@ export function Simular({ me }: { me: Me }) {
           </form>
         </Card>
         {result ? (
-          <Card title="Resultado">
-            <p className="muted">Regime {result.regime_calculo} · snapshot de parâmetros {result.param_snapshot_id}</p>
-            <Table head={['Tributo', 'Valor']}>
-              <tr><td>Base de cálculo</td><td className="num">{money(result.totais.valor_base_total)}</td></tr>
-              <tr><td>CBS</td><td className="num">{money(result.totais.cbs_valor)}</td></tr>
-              <tr><td>IBS estadual</td><td className="num">{money(result.totais.ibs_uf_valor)}</td></tr>
-              <tr><td>IBS municipal</td><td className="num">{money(result.totais.ibs_mun_valor)}</td></tr>
-              <tr><td>IBS total</td><td className="num">{money(result.totais.ibs_total_valor)}</td></tr>
-              <tr><td>Imposto Seletivo</td><td className="num">{money(result.totais.imposto_seletivo_valor)}</td></tr>
+          <Card title="Resultado" actions={result.oficial === false ? <Badge tone="warn">NÃO OFICIAL</Badge> : <Badge tone="ok">cálculo oficial</Badge>}>
+            <p className="muted">{REGIME_LABEL[result.regime_calculo] ?? result.regime_calculo} · <Link to="/portal/aliquotas">ver alíquotas usadas</Link></p>
+            <Table head={comparacao ? ['Tributo', 'Nesta data', 'Em 2027'] : result.cenario_ajustado ? ['Tributo', 'Oficial', 'Com exceções'] : ['Tributo', 'Valor']}>
+              {LINHAS.map(([k, label]) => (
+                <tr key={k}>
+                  <td>{label}</td>
+                  <td className="num">{money(result.totais[k])}</td>
+                  {comparacao ? <td className="num">{money(comparacao.totais[k])}</td> : result.cenario_ajustado && <td className="num">{money(result.cenario_ajustado.totais[k])}</td>}
+                </tr>
+              ))}
             </Table>
-            {result.avisos.length > 0 && (
-              <Alert kind="warning">{result.avisos.map((a) => <div key={a.codigo}>{a.codigo}: {a.mensagem}</div>)}</Alert>
+            {result.cenario_ajustado && (
+              <p className="small">Exceções do contribuinte aplicadas: {result.cenario_ajustado.excecoes.map((x) => `${x.motivo.toLowerCase().replace('_', ' ')} ${x.processo} (${x.tributo} ${x.aliquota}%)`).join('; ')}.
+                Diferença: <strong>{money(result.cenario_ajustado.diferenca)}</strong>. O valor oficial continua sendo o da primeira coluna.</p>
             )}
-            <details><summary>Resposta completa (JSON)</summary><Json value={result} /></details>
+            {!comparacao && data.startsWith('2026') && modo === 'form' && (
+              <button type="button" className="secondary" disabled={busy} onClick={() => void comparar2027()}>Comparar com a mesma operação em 2027</button>
+            )}
+            <AvisoList avisos={[...result.avisos, ...(comparacao?.avisos ?? []).filter((a) => !result.avisos.some((b) => b.codigo === a.codigo))]} />
+            <details><summary>Resposta completa (JSON)</summary><Json value={comparacao ? { atual: result, em_2027: comparacao } : result} /></details>
           </Card>
         ) : (
-          <Card title="Como funciona"><p className="muted">Preencha a operação e os itens. O cálculo usa o motor oficial da RFB e o catálogo de alíquotas vigente na data; nada é emitido nem enviado ao fisco. Para integrar, veja o mesmo pedido em "JSON da API".</p></Card>
+          <Card title="Como funciona"><p className="muted">Preencha a operação e os itens. O cálculo usa o motor oficial da Receita e as alíquotas vigentes na data para o município escolhido (veja em Alíquotas); nada é emitido nem enviado ao fisco. Para integrar, veja o mesmo pedido em "JSON da API".</p></Card>
         )}
       </div>
     </>
@@ -243,6 +278,28 @@ interface Auditoria {
   resumo_financeiro: { tributo_declarado: { cbs: number; ibs: number }; tributo_recalculado?: { cbs: number; ibs: number }; diferenca: number; credito_potencial?: number };
   ocorrencias: { regra: string; natureza: string; severidade: string; numero_item?: number; mensagem: string; fundamentacao: string }[];
   avisos: { codigo: string; mensagem: string }[];
+  aliquotas_aplicadas?: AliquotaAplicada[];
+}
+
+export interface AliquotaAplicada { tributo: string; aliquota: number; origem: string; ente_codigo?: string | null; produto?: string | null; item?: number | null; ato_legal: string; provisoria: boolean }
+
+const TRIBUTO_NOME: Record<string, string> = { CBS: 'CBS', IBS_UF: 'IBS estadual', IBS_MUN: 'IBS municipal', IS: 'Imposto Seletivo' };
+
+/** D-R21: alíquota e ato legal usados no recálculo, por tributo (transparência para o fiscal). */
+export function AliquotasAplicadas({ itens }: { itens?: AliquotaAplicada[] }) {
+  if (!itens?.length) return <p className="muted small">Antes de 2027 o motor oficial usa as alíquotas da base dele (ano de teste: CBS 0,9% e IBS 0,1%).</p>;
+  return (
+    <Table head={['Tributo', 'Alíquota', 'Origem', 'Ato legal']}>
+      {itens.map((a, i) => (
+        <tr key={`${a.tributo}-${a.item ?? ''}-${i}`}>
+          <td data-label="Tributo">{TRIBUTO_NOME[a.tributo] ?? a.tributo}{a.item ? ` (item ${a.item})` : ''}</td>
+          <td data-label="Alíquota" className="num">{a.aliquota.toLocaleString('pt-BR', { maximumFractionDigits: 4 })}%{a.provisoria && <> <Badge tone="warn">provisória</Badge></>}</td>
+          <td data-label="Origem">{a.origem === 'PROPRIA_DO_ENTE' ? `Própria do ente ${a.ente_codigo ?? ''}` : a.origem === 'PRODUTO' ? `Produto ${a.produto ?? ''}` : 'Referência nacional'}</td>
+          <td data-label="Ato legal" className="small">{a.ato_legal}</td>
+        </tr>
+      ))}
+    </Table>
+  );
 }
 
 export function Auditar({ me }: { me?: Me }) {
@@ -255,13 +312,13 @@ export function Auditar({ me }: { me?: Me }) {
   const [detalhe, setDetalhe] = useState(false);
   const { busy, error, run, setError } = useAction();
 
-  const enviar = async (f: File, comExemplo: boolean) => {
+  const enviar = async (f: File, comExemplo: boolean, confirmar?: string) => {
     setCnpjFaltando(undefined);
     setResult(undefined);
     try {
       setResult(await portal<Auditoria>('/v1/auditoria/xml', {
         method: 'POST', rawBody: await f.text(), contentType: 'application/xml', idempotent: true,
-        query: { direction, assinatura: comExemplo ? 'opcional' : undefined },
+        query: { direction, assinatura: comExemplo ? 'opcional' : undefined, confirmar, reprocess: confirmar ? true : undefined },
       }));
       setError(undefined);
     } catch (e) {
@@ -330,7 +387,7 @@ export function Auditar({ me }: { me?: Me }) {
               )}
             </Table>
             <p>Diferença: <strong>{money(result.resumo_financeiro.diferenca)}</strong></p>
-            {result.avisos.length > 0 && <Alert kind="info">{result.avisos.map((a) => <div key={a.codigo}><code>{a.codigo}</code> {a.mensagem}</div>)}</Alert>}
+            <AvisoList kind="info" avisos={result.avisos} />
             <h2 style={{ margin: '12px 0 8px' }}>Ocorrências</h2>
             <Table head={['Regra', 'Natureza', 'Item', 'Mensagem']} empty={result.ocorrencias.length === 0} emptyText="Nenhuma ocorrência: o declarado confere com o recalculado.">
               {result.ocorrencias.map((o, i) => (
@@ -338,10 +395,17 @@ export function Auditar({ me }: { me?: Me }) {
                   <td data-label="Regra"><code>{o.regra}</code></td>
                   <td data-label="Natureza"><Badge tone={o.natureza === 'DETERMINISTICA' ? 'bad' : 'warn'}>{o.natureza === 'DETERMINISTICA' ? 'Divergência' : o.natureza === 'INDICIO' ? 'Indício' : 'Informativo'}</Badge></td>
                   <td data-label="Item">{o.numero_item ?? '—'}</td>
-                  <td data-label="Mensagem">{o.mensagem}<div className="muted">{o.fundamentacao}</div></td>
+                  <td data-label="Mensagem">{o.mensagem}<div className="muted">{o.fundamentacao}</div>
+                    {o.natureza === 'INDICIO' && file && (
+                      <button type="button" className="ghost small" disabled={busy} title="Nova auditoria com o enquadramento confirmado (conta na franquia)"
+                        onClick={() => void run(() => enviar(file, exemplo, o.regra))}>Confirmar enquadramento e auditar de novo</button>
+                    )}
+                  </td>
                 </tr>
               ))}
             </Table>
+            <h2 style={{ margin: '12px 0 8px' }}>Alíquotas usadas</h2>
+            <AliquotasAplicadas itens={result.aliquotas_aplicadas} />
           </Card>
           {detalhe && <DocumentoDrawer id={result.audit_id.replace(/^aud_/, '')} onClose={() => setDetalhe(false)} />}
         </>
@@ -375,11 +439,13 @@ export function Lotes() {
   const andamento = (list.data?.lotes ?? []).some((l) => EM_ANDAMENTO.has(l.status));
 
   // Acompanha sozinho enquanto houver lote em processamento (antes era preciso clicar em "Atualizar").
+  // Depende só do reload (estável): com o objeto inteiro o intervalo era recriado a cada renderização e podia nunca disparar.
+  const recarregar = list.reload;
   useEffect(() => {
     if (!andamento) return;
-    const t = window.setInterval(() => void list.reload(), 5000);
+    const t = window.setInterval(() => void recarregar(), 5000);
     return () => window.clearInterval(t);
-  }, [andamento, list]);
+  }, [andamento, recarregar]);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();

@@ -14,6 +14,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- D-R31: resumo do relatório de regressão de cada bundle (gerado pelo pipeline fiscal) para o aviso às contas. -->
+    <None Include="fiscal-bundles\*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\TaxGateway.Core\TaxGateway.Core.csproj" />
     <ProjectReference Include="..\TaxGateway.Infrastructure\TaxGateway.Infrastructure.csproj" />
     <ProjectReference Include="..\TaxGateway.Contracts\TaxGateway.Contracts.csproj" />

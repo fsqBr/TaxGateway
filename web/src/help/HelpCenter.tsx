@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, NavLink, useParams } from 'react-router-dom';
 import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, Copy, Info, Search, Sparkles } from 'lucide-react';
-import { Logo } from '../components/Logo';
 import { RichText } from '../components/RichText';
+import { SiteHeader } from '../pages/SiteChrome';
 import { VersionTag } from '../components/VersionNotice';
 import { APP_VERSION, CHANGELOG, compareVersions, markSeen } from '../lib/version';
 import { ARTICLES, CATEGORIES, NOVIDADES_ICON, searchArticles } from './articles';
@@ -17,22 +17,6 @@ function useTitle(title: string) {
     document.title = `${title} · Ajuda TaxGateway`;
     return () => { document.title = prev; };
   }, [title]);
-}
-
-function HelpHeader() {
-  return (
-    <header className="site-header">
-      <div className="inner">
-        <Link to="/" aria-label="Início"><Logo size={30} suffix="Ajuda" /></Link>
-        <nav className="site-nav" aria-label="Principal">
-          <Link to="/ajuda" className="hide-sm">Central de ajuda</Link>
-          <Link to="/ajuda/novidades" className="hide-sm">Novidades</Link>
-          <a href="/docs/">Referência da API</a>
-          <Link className="button" to="/portal">Entrar</Link>
-        </nav>
-      </div>
-    </header>
-  );
 }
 
 function HelpFooter() {
@@ -169,7 +153,7 @@ function HelpHome() {
           <section aria-live="polite">
             <h2 className="help-cat-title">{results.length ? `${results.length} resultado(s) para "${q.trim()}"` : `Nada encontrado para "${q.trim()}"`}</h2>
             {results.length ? <div className="grid help-grid">{results.map((a) => <ArticleCard key={a.slug} a={a} />)}</div>
-              : <p className="muted">Tente outras palavras ou veja a <a href="/docs/">referência da API</a>.</p>}
+              : <p className="muted">Tente outras palavras ou veja a <a href="/docs/">documentação da API</a>.</p>}
           </section>
         ) : (
           <>
@@ -275,7 +259,7 @@ export default function HelpCenter() {
   }
   return (
     <div className="site help">
-      <HelpHeader />
+      <SiteHeader suffix="Ajuda" />
       <main id="conteudo">{body}</main>
       <HelpFooter />
     </div>

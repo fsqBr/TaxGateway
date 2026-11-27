@@ -178,8 +178,8 @@ public static class DocumentAuditor
             if (c.PossuiPercentualReducao || TratamentosCondicionados.Any(t => trat.Contains(t, StringComparison.Ordinal)))
             {
                 findings.Add(F(RuleCatalog.R021, it.Numero, $"det[{it.Numero}]/imposto/IBSCBS/cClassTrib", it.CClassTrib, null,
-                    $"cClassTrib {it.CClassTrib} ({c.TratamentoTributario}) depende de requisitos que o XML não comprova. Confirme o enquadramento com o fornecedor "
-                    + "(ou informe confirmar=R021).", ImpactoIndicio(it)));
+                    $"cClassTrib {it.CClassTrib} ({c.TratamentoTributario}) depende de requisitos que o XML não comprova. Confirme o enquadramento com o fornecedor; "
+                    + "se já confirmou, marque como confirmado (no portal ou com confirmar=R021 na API).", ImpactoIndicio(it)));
             }
         }
     }

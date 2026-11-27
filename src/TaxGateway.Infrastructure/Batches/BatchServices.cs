@@ -45,9 +45,12 @@ public sealed class BatchOptions
     public double DocsPerSecondPerSlot { get; set; } = 20;
 }
 
-public sealed class BatchRejectedException(string code, string message) : Exception(message)
+public sealed class BatchRejectedException(string code, string message, int status = 422) : Exception(message)
 {
     public string Code { get; } = code;
+
+    /// <summary>HTTP: 413 tamanho, 402 franquia/teto/pagamento (D-R12), 422 o resto.</summary>
+    public int Status { get; } = code == "ERR_BATCH_TOO_LARGE" ? 413 : status;
 }
 
 public sealed record BatchCreated(Guid Id, int Documents, int Chunks);
@@ -136,7 +139,8 @@ public sealed class BatchIngestService(ITenantDb db, XmlVault vault, TenantSetti
     /// <see cref="BatchOptions.ChunkMaxBytes"/>), então a memória fica limitada a um chunk, não ao lote inteiro.
     /// Se o lote for recusado no meio, os chunks já enviados são apagados.
     /// </summary>
-    public async Task<BatchCreated> IngestAsync(TenantId tenant, StagedUpload staged, long maxBytes, int maxDocs, short priority, string direction, CancellationToken ct)
+    public async Task<BatchCreated> IngestAsync(TenantId tenant, StagedUpload staged, long maxBytes, int maxDocs, short priority, string direction, CancellationToken ct,
+        Func<int, CancellationToken, Task>? admit = null)
     {
         ArgumentNullException.ThrowIfNull(staged);
         var o = options.Value;
@@ -251,6 +255,12 @@ public sealed class BatchIngestService(ITenantDb db, XmlVault vault, TenantSetti
             if (totalDocs == 0)
             {
                 throw new BatchRejectedException("ERR_BATCH_EMPTY", "O ZIP não tem nenhum .xml.");
+            }
+
+            // D-R12: o lote inteiro precisa caber na franquia/teto (e a conta precisa estar em dia) antes de entrar na fila.
+            if (admit is not null)
+            {
+                await admit(totalDocs, ct).ConfigureAwait(false);
             }
 
             await FlushAsync().ConfigureAwait(false);

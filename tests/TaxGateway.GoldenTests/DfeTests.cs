@@ -63,6 +63,75 @@ public sealed class DfeTests(GoldenFixture env, ITestOutputHelper output)
         Assert.Equal(a1.Thumbprint, loaded.Thumbprint);
     }
 
+    /// <summary>
+    /// D-R37: troca do certificado avisa dono e admin; "Testar conexão" confere senha, prazo e aceite pela SEFAZ sem gastar a
+    /// cota de consultas; o status diz a situação em português; captura parada gera aviso automático.
+    /// </summary>
+    [Fact]
+    public async Task Certificado_avisa_testa_conexao_e_mostra_a_saude_da_captura()
+    {
+        var cnpj = GoldenFixture.NewCnpj();
+        var (tenant, key) = await env.CreateTenantWithIdAsync("DF-e saúde", cnpj);
+        var testar = $"/v1/cnpjs/{cnpj}/certificado/testar";
+
+        var none = await SendAsync(key, HttpMethod.Post, testar, null);
+        Assert.Equal("FALHA", none.Body!["resultado"]!.GetValue<string>());
+
+        using var a1 = Issue(cnpj, env.Clock.GetUtcNow().AddDays(20));
+        Assert.Equal(HttpStatusCode.OK, (await UploadAsync(key, cnpj, a1.Export(X509ContentType.Pfx, "s"), "s")).Status);
+        using var a2 = Issue(cnpj, env.Clock.GetUtcNow().AddYears(1));
+        Assert.Equal(HttpStatusCode.OK, (await UploadAsync(key, cnpj, a2.Export(X509ContentType.Pfx, "s"), "s")).Status);
+        Assert.Equal(2L, await CountAsync("SELECT count(*) FROM tenant_notifications WHERE tenant_id = $1 AND kind = 'SEGURANCA' AND title LIKE 'Certificado A1%'", tenant));
+
+        var sim = env.Sefaz.For(cnpj);
+        var queries = sim.Queries.Count;
+        var ok = await SendAsync(key, HttpMethod.Post, testar, null);
+        Assert.True(ok.Body!["resultado"]!.GetValue<string>() == "OK", ok.Body.ToJsonString());
+        Assert.Equal(4, ok.Body["verificacoes"]!.AsArray().Count);
+        Assert.Equal(queries, sim.Queries.Count);   // não gastou consulta de distribuição
+
+        env.Sefaz.RejectedRoots.Add(cnpj[..8]);
+        try
+        {
+            var refused = await SendAsync(key, HttpMethod.Post, testar, null);
+            Assert.Equal("FALHA", refused.Body!["resultado"]!.GetValue<string>());
+            Assert.Contains("recusou", refused.Body.ToJsonString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            env.Sefaz.RejectedRoots.Remove(cnpj[..8]);
+        }
+
+        // Saúde: ligada e ainda sem consulta → AGUARDANDO; depois de consultar → FUNCIONANDO.
+        var on = await SendAsync(key, HttpMethod.Post, $"/v1/cnpjs/{cnpj}/dfe/sync", new JsonObject { ["c_uf_autor"] = 35 });
+        Assert.Equal("AGUARDANDO", on.Body!["saude"]!["situacao"]!.GetValue<string>());
+        await env.WorkerServices.GetRequiredService<DfeSyncService>().SyncOneAsync(new Core.Tenancy.TenantId(tenant), cnpj, CancellationToken.None);
+        var status = await SendAsync(key, HttpMethod.Get, $"/v1/cnpjs/{cnpj}/dfe/status", null);
+        Assert.True(status.Body!["saude"]!["ok"]!.GetValue<bool>(), status.Body.ToJsonString());
+        Assert.Equal("FUNCIONANDO", status.Body["saude"]!["situacao"]!.GetValue<string>());
+
+        // Parada: sem consulta há mais de 6 h (o "agora" da função avança 1 dia) → um aviso por dia.
+        var db = env.WorkerServices.GetRequiredService<NpgsqlDataSource>();
+        async Task<int> StalledAsync(DateTimeOffset at)
+        {
+            await using var cmd = db.CreateCommand("SELECT app.notify_dfe_stalled($1)");
+            cmd.Parameters.Add(new() { Value = at.ToUniversalTime() });
+            return (int)(await cmd.ExecuteScalarAsync())!;
+        }
+
+        Assert.Equal(0L, await CountAsync("SELECT count(*) FROM tenant_notifications WHERE tenant_id = $1 AND kind = 'DFE_PARADO'", tenant));
+        await StalledAsync(env.Clock.GetUtcNow().AddDays(1));
+        await StalledAsync(env.Clock.GetUtcNow().AddDays(1).AddMinutes(5));
+        Assert.Equal(1L, await CountAsync("SELECT count(*) FROM tenant_notifications WHERE tenant_id = $1 AND kind = 'DFE_PARADO'", tenant));
+
+        // Certificado removido: aviso de segurança, saúde "sem certificado" e teste falha.
+        Assert.Equal(HttpStatusCode.NoContent, (await SendAsync(key, HttpMethod.Delete, $"/v1/cnpjs/{cnpj}/certificado", null)).Status);
+        Assert.Equal(1L, await CountAsync("SELECT count(*) FROM tenant_notifications WHERE tenant_id = $1 AND title = 'Certificado A1 removido'", tenant));
+        var semCert = await SendAsync(key, HttpMethod.Get, $"/v1/cnpjs/{cnpj}/dfe/status", null);
+        Assert.Equal("SEM_CERTIFICADO", semCert.Body!["saude"]!["situacao"]!.GetValue<string>());
+        Assert.Equal(HttpStatusCode.NotFound, (await SendAsync(key, HttpMethod.Delete, $"/v1/cnpjs/{cnpj}/certificado", null)).Status);
+    }
+
     [Fact]
     public async Task Simulador_responde_656_quando_as_regras_sao_violadas()
     {

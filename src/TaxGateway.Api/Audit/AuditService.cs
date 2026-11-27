@@ -41,7 +41,8 @@ public sealed partial class AuditService(
     IOptions<EngineOptions> engineOptions,
     TimeProvider clock,
     ILogger<AuditService> log,
-    XmlVault? vault = null)
+    XmlVault? vault = null,
+    TaxGateway.Infrastructure.Params.RateExceptionService? exceptions = null)
 {
     public async Task<byte[]> AuditAsync(Caller caller, AuditRequest req, CancellationToken ct)
     {
@@ -121,6 +122,7 @@ public sealed partial class AuditService(
         var snapshot = snapshots.Current;
         var findings = new List<Finding>();
         var avisos = new List<AvisoDto>();
+        var aplicadas = new List<AliquotaAplicadaDto>();
         EngineCalculation? calc = null;
         AuditOutcome outcome;
 
@@ -159,7 +161,7 @@ public sealed partial class AuditService(
                     avisos.Add(new AvisoDto { Codigo = "SEM_AUTORIZACAO", Mensagem = "XML sem protNFe (pré-transmissão): autorização da SEFAZ não verificada." });
                 }
 
-                (outcome, calc) = await RecalculateAsync(d, req, snapshot, ct).ConfigureAwait(false);
+                (outcome, calc) = await RecalculateAsync(d, req, snapshot, avisos, aplicadas, ct).ConfigureAwait(false);
             }
         }
 
@@ -171,6 +173,36 @@ public sealed partial class AuditService(
         if (req.Reprocess && existing is null)
         {
             avisos.Add(new AvisoDto { Codigo = "REPROCESSAMENTO_SEM_AUDITORIA_ANTERIOR", Mensagem = "reprocess=true ignorado: não há auditoria anterior desta chave; auditado (e cobrado) como novo." });
+        }
+
+        // D-R20: exceção do contribuinte que se aplica ao documento vira aviso (o resultado oficial não muda).
+        if (exceptions is not null && aplicadas.Count > 0)
+        {
+            var data = DateOnly.FromDateTime(d.DataEmissao.DateTime);
+            foreach (var ex in await exceptions.ActiveAsync(tenant, ct).ConfigureAwait(false))
+            {
+                var itens = d.Itens.Where(i => ex.Matches(sujeito, d.MunicipioIncidencia, data, i.Ncm, i.ImpostoSeletivo?.CClassTrib ?? i.CClassTrib)).ToList();
+                if (itens.Count == 0)
+                {
+                    continue;
+                }
+
+                decimal? Declared(DeclaredItem i) => ex.Tributo switch
+                {
+                    Tributo.Cbs => i.Cbs?.Aliquota,
+                    Tributo.IbsUf => i.IbsUf?.Aliquota,
+                    Tributo.IbsMun => i.IbsMun?.Aliquota,
+                    _ => i.ImpostoSeletivo?.Aliquota,
+                };
+                var confere = itens.All(i => Declared(i) is { } a && Math.Abs(a - ex.Aliquota) < 0.00005m);
+                avisos.Add(new AvisoDto
+                {
+                    Codigo = "EXCECAO_DO_CONTRIBUINTE",
+                    Mensagem = $"Exceção do contribuinte ({ex.Motivo}, processo {ex.Processo}) se aplica a {itens.Count} item(ns): {ex.Tributo} {ex.Aliquota:0.####}%. "
+                        + (confere ? "A alíquota declarada confere com a exceção; as divergências apontadas contra o catálogo oficial podem ser explicadas por ela."
+                                   : "A alíquota declarada NÃO confere com a exceção cadastrada."),
+                });
+            }
         }
 
         findings.AddRange(outcome.Findings);
@@ -211,6 +243,7 @@ public sealed partial class AuditService(
             },
             Ocorrencias = findings.Select(ToDto).ToList(),
             Avisos = avisos,
+            AliquotasAplicadas = aplicadas,
         };
         var json = JsonSerializer.SerializeToUtf8Bytes(response, AuditoriaJsonContext.Default.AuditoriaResponse);
 
@@ -221,7 +254,7 @@ public sealed partial class AuditService(
             "REGULAR", response.RfbEngineVersion!.Bundle, RuleCatalog.RulesVersion, snapshot.Id, response.Status,
             DeclaredJson(d), $$"""{"resposta": {{System.Text.Encoding.UTF8.GetString(json)}}}""", outcome.Diferenca,
             JsonSerializer.Serialize(response.Ocorrencias, AuditoriaJsonContext.Default.ListOcorrenciaDto),
-            storageKey, xmlSha256, billable, updatesExisting, outcome.CreditoPotencial ?? 0, outcome.CreditoStatus);
+            storageKey, xmlSha256, billable, updatesExisting, outcome.CreditoPotencial ?? 0, outcome.CreditoStatus, d.MunicipioIncidencia);
 
         if (await repository.SaveAsync(tenant, record, ct).ConfigureAwait(false) == SaveResult.Replay)
         {
@@ -238,7 +271,8 @@ public sealed partial class AuditService(
     /// Recalcula pelo(s) motor(es) da rota do §8.1 (tabela engine_routing): regular, Simples ou os dois (sublimite);
     /// MEI e combinações sem cálculo saem pelas regras R050/I004 (D-503).
     /// </summary>
-    private async Task<(AuditOutcome, EngineCalculation?)> RecalculateAsync(DeclaredDocument d, AuditRequest req, ParamSnapshot snapshot, CancellationToken ct)
+    private async Task<(AuditOutcome, EngineCalculation?)> RecalculateAsync(DeclaredDocument d, AuditRequest req, ParamSnapshot snapshot,
+        List<AvisoDto> avisos, List<AliquotaAplicadaDto> aplicadas, CancellationToken ct)
     {
         var data = DateOnly.FromDateTime(d.DataEmissao.DateTime);   // data local do offset (D-220)
         var classes = req.Direction == "INBOUND"
@@ -267,6 +301,7 @@ public sealed partial class AuditService(
         }
 
         EngineCalculation? calc = null;
+        var isFindings = new List<Finding>();
         if (usaRegular)
         {
             var uf = reference.UfOfMunicipio(d.MunicipioIncidencia);
@@ -290,10 +325,60 @@ public sealed partial class AuditService(
 
                 // Sublimite: a CBS vai no DAS, então a CBS do regime regular é zero (§8.1).
                 rates = new NominalRates(usaSimples ? 0m : cbs.Aliquota, iuf.Aliquota, imu.Aliquota, null, null);
+                Applied(aplicadas, avisos, "CBS", cbs);
+                Applied(aplicadas, avisos, "IBS_UF", iuf);
+                Applied(aplicadas, avisos, "IBS_MUN", imu);
+            }
+
+            // D-R17: o IS do produto vem do catálogo (o declarado é conferido, não usado); sem linha, avisa que não conferiu.
+            var isRates = new Dictionary<int, decimal>();
+            if (rates is not null)
+            {
+                var naoConferidos = new List<int>();
+                foreach (var item in d.Itens.Where(i => i.ImpostoSeletivo is not null))
+                {
+                    var isel = item.ImpostoSeletivo!;
+                    if (snapshot.Rates.ResolveIs(item.Ncm, isel.CClassTrib, data) is { } row)
+                    {
+                        isRates[item.Numero] = row.Aliquota;
+                        aplicadas.Add(new AliquotaAplicadaDto
+                        {
+                            Tributo = "IS",
+                            Aliquota = row.Aliquota,
+                            Origem = "PRODUTO",
+                            Produto = row.Produto,
+                            Item = item.Numero,
+                            AtoLegal = row.AtoLegal,
+                            Provisoria = row.Provisoria,
+                            CatalogoId = row.Id
+                        });
+                        if (Math.Abs(isel.Aliquota - row.Aliquota) > 0.00005m)
+                        {
+                            isFindings.Add(new Finding(RuleCatalog.R014.Id, RuleCatalog.R014.Versao, RuleCatalog.R014.Natureza, RuleCatalog.R014.Severidade, item.Numero,
+                                "det/imposto/IS/pIS", isel.Aliquota.ToString("0.0000", System.Globalization.CultureInfo.InvariantCulture),
+                                row.Aliquota.ToString("0.0000", System.Globalization.CultureInfo.InvariantCulture),
+                                $"Alíquota do IS declarada {isel.Aliquota:0.####}% ≠ {row.Aliquota:0.####}% do catálogo para {row.Produto} ({row.AtoLegal}).",
+                                RuleCatalog.R014.Fundamentacao, null));
+                        }
+                    }
+                    else
+                    {
+                        naoConferidos.Add(item.Numero);
+                    }
+                }
+
+                if (naoConferidos.Count > 0)
+                {
+                    avisos.Add(new AvisoDto
+                    {
+                        Codigo = "IS_NAO_CONFERIDO",
+                        Mensagem = $"Imposto Seletivo do(s) item(ns) {string.Join(", ", naoConferidos)} não conferido: o catálogo não tem alíquota de IS publicada para o produto na data. O cálculo usou a alíquota declarada."
+                    });
+                }
             }
 
             var operation = NfeMapper.ToEngineOperation(d, uf, i => rates is null ? null
-                : rates with { IsAdValorem = i.ImpostoSeletivo?.Aliquota, IsAdRem = i.ImpostoSeletivo?.AdRem });
+                : rates with { IsAdValorem = isRates.TryGetValue(i.Numero, out var cat) ? cat : i.ImpostoSeletivo?.Aliquota, IsAdRem = i.ImpostoSeletivo?.AdRem });
             if (operation.Itens.Count > 0)
             {
                 try
@@ -328,7 +413,41 @@ public sealed partial class AuditService(
 
         var outcome = DocumentAuditor.Audit(new AuditInput(d, req.Direction, usaRegular, usaSimples, calc, sim, classes,
             snapshot.CreditStatusOn(data), confirmed));
+        if (isFindings.Count > 0)
+        {
+            outcome = outcome with
+            {
+                Findings = [.. outcome.Findings, .. isFindings],
+                Status = outcome.Status is AuditStatus.Conforme or AuditStatus.Indicio ? AuditStatus.Divergente : outcome.Status,
+            };
+        }
+
         return (outcome, calc);
+    }
+
+    /// <summary>D-R21: registra a alíquota usada (com ato legal) e avisa quando ela é provisória — a do ente, se houver.</summary>
+    private static void Applied(List<AliquotaAplicadaDto> aplicadas, List<AvisoDto> avisos, string tributo, ResolvedRate r)
+    {
+        var row = r.Propria ?? r.Referencia;
+        aplicadas.Add(new AliquotaAplicadaDto
+        {
+            Tributo = tributo,
+            Aliquota = r.Aliquota,
+            Origem = r.Propria is null ? "REFERENCIA" : "PROPRIA_DO_ENTE",
+            EnteCodigo = r.Propria?.EnteCodigo,
+            AtoLegal = row.AtoLegal,
+            Provisoria = r.Provisoria,
+            CatalogoId = row.Id,
+        });
+        if (r.Provisoria)
+        {
+            var prov = r.Propria is { Provisoria: true } p ? p : r.Referencia;
+            avisos.Add(new AvisoDto
+            {
+                Codigo = "ALIQUOTA_PROVISORIA",
+                Mensagem = $"A alíquota de {tributo} usada ({r.Aliquota:0.00##}%) é provisória: {prov.AtoLegal}. O resultado pode mudar quando o valor definitivo for publicado; reprocessamos automaticamente."
+            });
+        }
     }
 
     private static AuditOutcome Fixed(AuditStatus status, DeclaredDocument d, Finding f) => new(status, [f], Declared(d), null, 0);

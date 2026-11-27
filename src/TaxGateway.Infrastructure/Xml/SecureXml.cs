@@ -292,7 +292,15 @@ public sealed class NfeSignatureVerifier(TrustAnchors anchors, CrlCache? crls = 
         using (cert)
         {
             var signed = new PinnedSignedXml(nfe.OwnerDocument, infNFe);
-            signed.LoadXml(sig);
+            try
+            {
+                signed.LoadXml(sig);
+            }
+            catch (Exception ex) when (ex is FormatException or CryptographicException)
+            {
+                return Fail(SignatureFailure.AssinaturaInvalida, "Assinatura malformada (SignatureValue/DigestValue ou canonicalização).");   // antes lançava exceção
+            }
+
             using var key = cert.GetRSAPublicKey();
             bool ok;
             try

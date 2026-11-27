@@ -60,11 +60,26 @@ public sealed class SefazSimulator : IAsyncDisposable
         })));
         _app = builder.Build();
         _app.MapPost("/NFeDistribuicaoDFe/NFeDistribuicaoDFe.asmx", DistAsync);
+        // WSDL por GET, só com certificado cliente aceito (o "Testar conexão" usa isto; não conta como consulta).
+        _app.MapGet("/NFeDistribuicaoDFe/NFeDistribuicaoDFe.asmx", (HttpContext ctx) =>
+        {
+            var cert = ctx.Connection.ClientCertificate;
+            var cnpj = cert is null ? null : NfeSignatureVerifier.CnpjFromCertificate(cert);
+            WsdlRequests++;
+            return cnpj is null || RejectedRoots.Contains(cnpj[..8])
+                ? Results.StatusCode(403)
+                : Results.Text($"<definitions xmlns=\"http://schemas.xmlsoap.org/wsdl/\" targetNamespace=\"{DfeProtocol.DistWsdl}\"/>", "text/xml");
+        });
         _app.MapPost("/NFeRecepcaoEvento4/NFeRecepcaoEvento4.asmx", EventoAsync);
         _app.StartAsync().GetAwaiter().GetResult();
     }
 
     public int Port { get; }
+
+    /// <summary>Raízes de CNPJ cujo certificado a "SEFAZ" recusa no teste de conexão.</summary>
+    public HashSet<string> RejectedRoots { get; } = new(StringComparer.Ordinal);
+
+    public int WsdlRequests { get; private set; }
     public string DistUrl => $"https://localhost:{Port}/NFeDistribuicaoDFe/NFeDistribuicaoDFe.asmx";
     public string EventoUrl => $"https://localhost:{Port}/NFeRecepcaoEvento4/NFeRecepcaoEvento4.asmx";
 

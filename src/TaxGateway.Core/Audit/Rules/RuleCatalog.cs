@@ -23,6 +23,8 @@ public static class RuleCatalog
         "Alíquota declarada ≠ alíquota do Catálogo ajustada pela redução do cClassTrib", "LC 214/2025 arts. 14 a 19 e 343 a 347; SDD §8.5");
     public static readonly RuleDefinition R013 = new("R013", 1, Natureza.Deterministica, "ERROR",
         "Valor do tributo ≠ valor recalculado pelo motor oficial (tolerância ±0,01 por item)", "Calculadora oficial RTC (RFB)");
+    public static readonly RuleDefinition R014 = new("R014", 1, Natureza.Deterministica, "ERROR",
+        "Alíquota do Imposto Seletivo declarada ≠ alíquota do Catálogo para o produto", "LC 214/2025 arts. 409 a 434; SDD §8.5 (D-R17)");
     public static readonly RuleDefinition R020 = new("R020", 1, Natureza.Deterministica, "ERROR",
         "CST inexistente ou incompatível com o cClassTrib", "Tabela de classificação tributária (IT 2025.002)");
     public static readonly RuleDefinition R022 = new("R022", 1, Natureza.Deterministica, "ERROR",
@@ -59,7 +61,7 @@ public static class RuleCatalog
         "Sem alíquota nominal vigente no catálogo para a data de emissão: recálculo impossível", "SDD §8.5");
 
     public static readonly IReadOnlyList<RuleDefinition> All =
-        [R001, R002, R010, R011, R012, R013, R020, R021, R022, R024, R025, R029, R030, R040, R050, I001, I002, I003, I004, I005, I006, I007];
+        [R001, R002, R010, R011, R012, R013, R014, R020, R021, R022, R024, R025, R029, R030, R040, R050, I001, I002, I003, I004, I005, I006, I007];
 
     /// <summary>Erros por item do motor → regra (D-307).</summary>
     public static RuleDefinition ForEngineError(string code) => code switch

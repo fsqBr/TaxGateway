@@ -1,4 +1,4 @@
-# Backoffice (D-W03): publicar só em host interno (VPN/allowlist no Ingress). Encaminha apenas a Admin API e a docs.
+# Backoffice (D-W03): publicar só em host interno (VPN/allowlist no Ingress). Encaminha apenas a Admin API, a docs e a busca pública de municípios.
 map $http_x_forwarded_proto $forwarded_proto { default $http_x_forwarded_proto; "" $scheme; }
 
 server {
@@ -15,6 +15,7 @@ server {
   location = /version { include /etc/nginx/conf.d/proxy.inc; }   # versão da API (D-W11)
   location /openapi/ { include /etc/nginx/conf.d/proxy.inc; }
   location /docs { include /etc/nginx/conf.d/proxy.inc; }
+  location = /v1/publico/municipios { include /etc/nginx/conf.d/proxy.inc; }   # só a busca anônima de municípios (tela de alíquotas)
   location /v1/ { return 404; }
   location = /healthz { access_log off; return 200 "ok\n"; }
 }

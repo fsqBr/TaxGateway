@@ -15,9 +15,18 @@ export interface NavItem {
   label: string;
   icon: LucideIcon;
   section?: string;
-  /** Só aparece para quem tem o escopo (papel da pessoa). */
-  scope?: string;
+  /** Só aparece para quem tem o escopo (papel da pessoa); com vários, basta um deles. */
+  scope?: string | string[];
 }
+
+/** Nome do plano para gente (a sessão traz o código). */
+export const PLANO_NOME: Record<string, string> = {
+  SANDBOX: 'Sandbox', ESSENCIAL: 'Essencial', PROFISSIONAL: 'Profissional', ESCRITORIO: 'Escritório contábil',
+  PARCEIRO_OEM: 'Software house (OEM)', ENTERPRISE: 'Enterprise',
+};
+
+export const podeVer = (scope: string | string[] | undefined, can: (s: string) => boolean) =>
+  !scope || (Array.isArray(scope) ? scope.some(can) : can(scope));
 
 /** Empresa ativa e troca entre empresas (escritórios e software houses com vários tenants, D-U05). */
 function Workspace() {
@@ -37,7 +46,7 @@ function Workspace() {
         </select>
       ) : <strong title={ativa.nome}>{ativa.nome}</strong>}
       <span className="muted small mono">{cnpj(ativa.cnpj_raiz)}</span>
-      <span><Badge tone="info">{ativa.plano}</Badge></span>
+      <span><Badge tone="info">{PLANO_NOME[ativa.plano] ?? ativa.plano}</Badge></span>
     </div>
   );
 }
@@ -68,7 +77,7 @@ export function Shell({ realm, nav, workspace, topbar, children }: { realm: Real
         {realm === 'backoffice' && <div className="internal-banner">Ambiente interno</div>}
         {realm === 'portal' ? <Workspace /> : workspace && <div className="workspace">{workspace}</div>}
         <nav className="nav" aria-label={realm === 'portal' ? 'Portal' : 'Backoffice'}>
-          {nav.filter((n) => !n.scope || can(n.scope)).map((n) => {
+          {nav.filter((n) => podeVer(n.scope, can)).map((n) => {
             const header = n.section && n.section !== lastSection ? <div className="nav-section" key={`s-${n.section}`}>{n.section}</div> : null;
             lastSection = n.section ?? lastSection;
             const Icon = n.icon;

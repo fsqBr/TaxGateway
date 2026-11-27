@@ -182,6 +182,83 @@ public sealed class BillingRulesTests(GoldenFixture env)
         Assert.Contains((await ApiAsync(key, HttpMethod.Get, "/v1/avisos")).Body!["avisos"]!.AsArray(), a => a!["tipo"]!.GetValue<string>() == "PAGAMENTO_REGULARIZADO");
     }
 
+    /// <summary>
+    /// D-R32: a vida da assinatura vira aviso (portal + e-mail): ativação, troca de plano, fatura emitida e vencendo,
+    /// pagamento recebido, renovação próxima e cancelamento — um por fato, mesmo com reentrega do evento.
+    /// </summary>
+    [Fact]
+    public async Task Ciclo_da_assinatura_gera_um_aviso_por_fato()
+    {
+        var cnpj = GoldenFixture.NewCnpj();
+        var (tenant, key) = await env.CreateTenantWithIdAsync("Ciclo de vida", cnpj);
+        var customer = $"cus_cv_{Guid.NewGuid():N}"[..20];
+        var sub = "sub_" + customer;
+        await using var billing = NpgsqlDataSource.Create(env.ConnectionFor("tg_billing"));
+        await using (var set = billing.CreateCommand("UPDATE tenants SET billing_customer_ref = $2, stripe_subscription_id = NULL, subscription_status = NULL WHERE id = $1"))
+        {
+            set.Parameters.Add(new() { Value = tenant });
+            set.Parameters.Add(new() { Value = customer });
+            await set.ExecuteNonQueryAsync();
+        }
+
+        await using var valkey = await ConnectionMultiplexer.ConnectAsync(env.ValkeyConnection);
+        var processor = new StripeEventProcessor(new BillingDataSource(billing), valkey, NullLogger<StripeEventProcessor>.Instance);
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var seq = 0;
+        async Task Event(string type, string obj)
+        {
+            var json = $$$"""{"id":"evt_{{{++seq}}}_{{{customer}}}","type":"{{{type}}}","created":{{{now + seq}}},"data":{"object":{{{obj}}}}}""";
+            for (var i = 0; i < 2; i++)   // reentrega: mesmo evento duas vezes
+            {
+                using var req = new HttpRequestMessage(HttpMethod.Post, "/webhooks/stripe") { Content = new StringContent(json, Encoding.UTF8, "application/json") };
+                req.Headers.Add("Stripe-Signature", Sign(json, env.Clock.GetUtcNow().ToUnixTimeSeconds()));
+                Assert.Equal(HttpStatusCode.OK, (await env.Api.SendAsync(req)).StatusCode);
+            }
+
+            await processor.RunOnceAsync(CancellationToken.None);
+        }
+
+        string Sub(string status, string plan) =>
+            $$"""{"id":"{{sub}}","customer":"{{customer}}","status":"{{status}}","metadata":{"plan_code":"{{plan}}"},"current_period_end":{{now + 2_592_000}}}""";
+        string Invoice(string id, string status, long due, long paid, string extra = "") =>
+            $$"""{"id":"{{id}}_{{customer}}","customer":"{{customer}}","number":"TG-{{id}}","status":"{{status}}","currency":"brl","amount_due":{{due}},"amount_paid":{{paid}}{{extra}}}""";
+
+        await Event("customer.subscription.created", Sub("active", "STARTER"));
+        await Event("customer.subscription.updated", Sub("active", "GROWTH"));
+        await Event("invoice.finalized", Invoice("in1", "open", 14900, 0, $",\"due_date\":{now + 2 * 86_400}"));
+        await Event("invoice.upcoming", Invoice("up", "draft", 29900, 0, $",\"next_payment_attempt\":{now + 5 * 86_400},\"subscription\":\"{sub}\""));
+        await using (var due = env.WorkerServices.GetRequiredService<NpgsqlDataSource>().CreateCommand("SELECT app.notify_invoices_due()"))
+        {
+            Assert.True((int)(await due.ExecuteScalarAsync())! >= 1);
+        }
+
+        await Event("invoice.paid", Invoice("in1", "paid", 14900, 14900));
+        await Event("customer.subscription.deleted", Sub("canceled", "GROWTH"));
+
+        var avisos = (await ApiAsync(key, HttpMethod.Get, "/v1/avisos")).Body!["avisos"]!.AsArray()
+            .Select(a => (Tipo: a!["tipo"]!.GetValue<string>(), Titulo: a["titulo"]!.GetValue<string>(), Texto: a["mensagem"]?.GetValue<string>() ?? a["texto"]?.GetValue<string>() ?? "")).ToList();
+        foreach (var kind in (string[])["ASSINATURA_ATIVA", "PLANO_ALTERADO", "FATURA_EMITIDA", "RENOVACAO_PROXIMA", "FATURA_VENCENDO", "PAGAMENTO_RECEBIDO", "ASSINATURA_CANCELADA"])
+        {
+            Assert.True(avisos.Count(a => a.Tipo == kind) == 1, $"{kind}: {string.Join(" | ", avisos.Select(a => a.Tipo))}");
+        }
+
+        Assert.Contains(avisos, a => a.Tipo == "FATURA_EMITIDA" && a.Texto.Contains("R$ 149,00", StringComparison.Ordinal));
+        Assert.Contains(avisos, a => a.Tipo == "PLANO_ALTERADO" && a.Titulo.Contains("Growth", StringComparison.OrdinalIgnoreCase));
+
+        // Chave de API nova: aviso de segurança para dono e administradores.
+        var created = await ApiAsync(key, HttpMethod.Post, "/v1/api-keys", new JsonObject { ["nome"] = "erp-teste", ["scopes"] = new JsonArray("simulacao:write") });
+        Assert.Equal(HttpStatusCode.Created, created.Status);
+        Assert.Contains((await ApiAsync(key, HttpMethod.Get, "/v1/avisos")).Body!["avisos"]!.AsArray(),
+            a => a!["tipo"]!.GetValue<string>() == "SEGURANCA" && a["titulo"]!.GetValue<string>() == "Nova chave de API criada");
+    }
+
+    [Fact]
+    public void Valor_em_reais_sem_depender_de_cultura()
+    {
+        Assert.Equal("R$ 0,00", StripeEventProcessor.Money(0));
+        Assert.Equal("R$ 1.234.567,89", StripeEventProcessor.Money(123_456_789));
+    }
+
     private static async Task WaitAsync(Func<Task<bool>> condition, int seconds = 20)
     {
         var until = DateTime.UtcNow.AddSeconds(seconds);

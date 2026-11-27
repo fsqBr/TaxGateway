@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { AlertTriangle, CheckCircle2, Copy, Inbox, Info, KeyRound, XCircle, type LucideIcon } from 'lucide-react';
-import { describeError } from '../lib/api';
+import { codeOf, describeError } from '../lib/api';
 import { ConfirmButton } from './ConfirmDialog';
 
 export function useLoad<T>(load: () => Promise<T>, deps: unknown[] = []) {
@@ -29,19 +29,22 @@ export function useLoad<T>(load: () => Promise<T>, deps: unknown[] = []) {
 export function useAction() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | undefined>();
+  const [errorCode, setErrorCode] = useState<string | undefined>();
   const run = useCallback(async <T,>(fn: () => Promise<T>): Promise<T | undefined> => {
     setBusy(true);
     setError(undefined);
+    setErrorCode(undefined);
     try {
       return await fn();
     } catch (e) {
       setError(describeError(e));
+      setErrorCode(codeOf(e));
       return undefined;
     } finally {
       setBusy(false);
     }
   }, []);
-  return { busy, error, run, setError };
+  return { busy, error, errorCode, run, setError };
 }
 
 export const PageHeader = ({ title, description, eyebrow, children }: { title: string; description?: string; eyebrow?: string; children?: ReactNode }) => (

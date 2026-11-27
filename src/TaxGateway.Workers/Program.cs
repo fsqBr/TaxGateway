@@ -36,6 +36,31 @@ public static class WorkerHost
         builder.Services.AddSingleton(TimeProvider.System);
         builder.Services.AddSingleton<AuditService>();
         builder.Services.AddSingleton<IBatchDocumentAuditor, BatchDocumentAuditor>();
+        builder.Services.AddSingleton<TaxGateway.Infrastructure.Params.RateExceptionService>();   // D-R20: aviso de exceção também no lote/DF-e
+        builder.Services.AddSingleton<ApiLogJanitor>();                      // D-R27
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<ApiLogJanitor>());
+
+        if (config.GetValue("Workers:CatalogCheck", true))
+        {
+            builder.Services.AddSingleton<CatalogEngineCheck>();             // D-R22
+            builder.Services.AddHostedService(sp => sp.GetRequiredService<CatalogEngineCheck>());
+        }
+
+        if (config.GetValue("Workers:RateSync", true))
+        {
+            // D-R30/D-R31: catálogo sincronizado com a base oficial da Receita e aviso de motor atualizado.
+            builder.Services.AddSingleton<TaxGateway.Infrastructure.Params.IOfficialRateSource, TaxGateway.Infrastructure.Params.EngineRateSource>();
+            builder.Services.AddSingleton<TaxGateway.Infrastructure.Params.RateSyncService>();
+            builder.Services.AddSingleton<RateSyncWorker>();
+            builder.Services.AddHostedService(sp => sp.GetRequiredService<RateSyncWorker>());
+        }
+
+        if (config.GetValue("Workers:Reprocess", true))
+        {
+            builder.Services.AddSingleton<ReprocessService>();                // D-R19
+            builder.Services.AddSingleton<ReprocessWorker>();
+            builder.Services.AddHostedService(sp => sp.GetRequiredService<ReprocessWorker>());
+        }
 
         if (config.GetValue("Workers:OutboxRelay", true))
         {

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 using StackExchange.Redis;
 
@@ -88,7 +89,11 @@ public static class ApiKeyEndpoints
             cmd.Parameters.Add(new() { Value = key.Hash });
             cmd.Parameters.Add(new() { Value = scopes.ToArray() });
             cmd.Parameters.Add(new() { Value = (object?)req.ExpiraEm?.UtcDateTime ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz });
-            return await cmd.ExecuteNonQueryAsync(ct);
+            await cmd.ExecuteNonQueryAsync(ct);
+            // D-R32: credencial nova é fato de segurança — dono e administradores ficam sabendo (portal e e-mail).
+            return await TenantNotices.SecurityAsync(scope, caller.Identity.Tenant.Value, "Nova chave de API criada",
+                $"A chave \"{(string.IsNullOrWhiteSpace(req.Nome) ? "api-key" : req.Nome)}\" ({key.Prefix}…) foi criada com os escopos {string.Join(", ", scopes)}. " +
+                "Se ninguém da empresa reconhece, revogue em Credenciais.", "/portal/credenciais", "chave:" + id, ct);
         }, http.RequestAborted);
 
         return Results.Created($"/v1/api-keys/{id}", new CriarApiKeyResponse
@@ -135,7 +140,9 @@ public static class AdminEndpoints
         admin.MapPost("/tenants", CreateTenantAsync).WithMetadata(new RequiredScope(Commercial));
         admin.MapGet("/params/rates", ListRatesAsync).WithMetadata(new RequiredScope(Fiscal));
         admin.MapPost("/params/rates/changes", ProposeAsync).WithMetadata(new RequiredScope(Fiscal));
+        admin.MapPost("/params/rates/changes/preview", PreviewAsync).WithMetadata(new RequiredScope(Fiscal));
         admin.MapPost("/params/changes/{id:guid}/approve", ApproveAsync).WithMetadata(new RequiredScope(Fiscal));
+        admin.MapPost("/params/changes/{id:guid}/reject", RejectAsync).WithMetadata(new RequiredScope(Fiscal));
         admin.MapGet("/params/changes", ListChangesAsync).WithMetadata(new RequiredScope(Fiscal));
         return admin;
     }
@@ -193,37 +200,158 @@ public static class AdminEndpoints
     private static readonly string[] Tributos = ["CBS", "IBS_UF", "IBS_MUN", "IS"];
     private static readonly string[] Fontes = ["LEI_FEDERAL", "SENADO", "TCU", "CG_IBS", "LEI_ENTE", "BUNDLE_RFB"];
 
+    /// <summary>
+    /// D-R18: valida as linhas de uma proposta — campos obrigatórios, coerência tributo × esfera × código do ente
+    /// (CBS e IS só nacionais; IBS estadual com código de UF; IBS municipal com código de município), forma de aplicação
+    /// para alíquota própria, produto só no IS, alíquota até 100%, vigência coerente e ente existente no IBGE.
+    /// </summary>
+    internal static async Task<(List<RateChangeRow> Rows, List<string> Errors)> ValidateLinesAsync(IReadOnlyList<LinhaAliquotaDto> linhas, AdminRepository repo, CancellationToken ct)
+    {
+        var rows = new List<RateChangeRow>();
+        var errors = new List<string>();
+        var entes = await repo.ExistingEntesAsync([.. linhas.Select(l => l.EnteCodigo).OfType<string>().Distinct()], ct);
+        foreach (var (l, i) in linhas.Select((l, i) => (l, i)))
+        {
+            var p = $"linha {i + 1}";
+            if (l.Tributo is null || !Tributos.Contains(l.Tributo) || l.Tipo is not ("REFERENCIA" or "PROPRIA_ENTE")
+                || l.Esfera is not ("UNIAO" or "UF" or "MUNICIPIO") || l.Aliquota is null || l.ValidFrom is null
+                || string.IsNullOrWhiteSpace(l.AtoLegal) || l.Fonte is null || !Fontes.Contains(l.Fonte))
+            {
+                errors.Add($"{p}: tributo, tipo, esfera, alíquota, início da vigência, ato legal e fonte são obrigatórios e válidos");
+                continue;
+            }
+
+            var esferaOk = l.Tributo switch
+            {
+                "CBS" or "IS" => l.Esfera == "UNIAO" && l.Tipo == "REFERENCIA",
+                "IBS_UF" => l.Esfera == "UF",
+                _ => l.Esfera == "MUNICIPIO",
+            };
+            if (!esferaOk)
+            {
+                errors.Add($"{p}: {l.Tributo} não combina com esfera {l.Esfera}/{l.Tipo} (CBS e IS são nacionais; IBS_UF é estadual; IBS_MUN é municipal)");
+            }
+
+            if (l.Tipo == "REFERENCIA" && (l.EnteCodigo is not null || l.FormaAplicacao is not null))
+            {
+                errors.Add($"{p}: alíquota de referência não tem ente nem forma de aplicação");
+            }
+
+            if (l.Tipo == "PROPRIA_ENTE")
+            {
+                var len = l.Tributo == "IBS_UF" ? 2 : 7;
+                if (l.EnteCodigo is null || l.EnteCodigo.Length != len || !l.EnteCodigo.All(char.IsAsciiDigit))
+                {
+                    errors.Add($"{p}: {l.Tributo} próprio exige o código IBGE do ente com {len} dígitos");
+                }
+                else if (!entes.Contains(l.EnteCodigo))
+                {
+                    errors.Add($"{p}: o código {l.EnteCodigo} não existe no cadastro do IBGE");
+                }
+
+                if (l.FormaAplicacao is not ("SUBSTITUICAO" or "ACRESCIMO" or "DECRESCIMO"))
+                {
+                    errors.Add($"{p}: alíquota própria exige a forma de aplicação (SUBSTITUICAO, ACRESCIMO ou DECRESCIMO)");
+                }
+            }
+
+            if ((l.Tributo == "IS") != (l.Produto is not null)
+                || (l.Produto is not null && !System.Text.RegularExpressions.Regex.IsMatch(l.Produto, "^(NCM:[0-9]{2,8}|CCLASS:[0-9]{6})$")))
+            {
+                errors.Add($"{p}: o IS exige o produto (NCM:<prefixo> ou CCLASS:<cClassTrib>); os demais tributos não têm produto");
+            }
+
+            if (l.Aliquota is < 0 or > 100)
+            {
+                errors.Add($"{p}: alíquota deve ficar entre 0% e 100%");
+            }
+
+            if (l.ValidTo is { } to && to <= l.ValidFrom)
+            {
+                errors.Add($"{p}: o fim da vigência deve ser depois do início");
+            }
+
+            rows.Add(new RateChangeRow(l.Tributo, l.Tipo, l.Esfera, l.EnteCodigo, l.FormaAplicacao, l.Aliquota!.Value,
+                l.ValidFrom.Value, l.ValidTo, l.AtoLegal!, l.Fonte, l.Provisoria, l.Produto));
+        }
+
+        return (rows, errors);
+    }
+
     private static async Task<IResult> ProposeAsync(HttpContext http, PropostaAliquotaRequest req, AdminRepository repo, CancellationToken ct)
     {
         var op = AdminKeyFilter.Get(http);
-        var rows = new List<RateChangeRow>();
-        var errors = new List<string>();
         if (string.IsNullOrWhiteSpace(req.Justificativa) || req.Linhas is not { Count: > 0 })
         {
             return ApiProblem.Result(400, "ERR_VALIDATION", "justificativa e linhas são obrigatórias");
         }
 
-        foreach (var (l, i) in req.Linhas.Select((l, i) => (l, i)))
+        if (req.Linhas.Count > 6000)
         {
-            if (l.Tributo is null || !Tributos.Contains(l.Tributo) || l.Tipo is not ("REFERENCIA" or "PROPRIA_ENTE")
-                || l.Esfera is not ("UNIAO" or "UF" or "MUNICIPIO") || l.Aliquota is not >= 0 || l.ValidFrom is null
-                || string.IsNullOrWhiteSpace(l.AtoLegal) || l.Fonte is null || !Fontes.Contains(l.Fonte))
-            {
-                errors.Add($"linhas[{i}]: tributo, tipo, esfera, aliquota, valid_from, ato_legal e fonte são obrigatórios e válidos");
-                continue;
-            }
-
-            rows.Add(new RateChangeRow(l.Tributo, l.Tipo, l.Esfera, l.EnteCodigo, l.FormaAplicacao, l.Aliquota.Value,
-                l.ValidFrom.Value, l.ValidTo, l.AtoLegal!, l.Fonte, l.Provisoria));
+            return ApiProblem.Result(400, "ERR_VALIDATION", "Até 6.000 linhas por proposta (todos os municípios cabem numa só)");
         }
 
+        var (rows, errors) = await ValidateLinesAsync(req.Linhas, repo, ct);
         if (errors.Count > 0)
         {
-            return ApiProblem.Result(400, "ERR_VALIDATION", "Linhas inválidas", string.Join("; ", errors));
+            return ApiProblem.Result(400, "ERR_VALIDATION", "Linhas inválidas", string.Join("; ", errors.Take(50)) + (errors.Count > 50 ? $" (+{errors.Count - 50})" : ""));
         }
 
+        // A vigência é a de cada linha (valid_from); "vigente_em" fica só como registro da proposta (D-R18).
         var id = await repo.ProposeRateChangeAsync(op.Name, req.Justificativa!, req.VigenteEm ?? DateTimeOffset.UtcNow, rows, req.Substitui ?? [], ct);
         return Results.Created($"/admin/v1/params/changes/{id}", new PropostaCriadaResponse { ChangeId = id, Status = "PROPOSED" });
+    }
+
+    /// <summary>
+    /// D-R18: prévia de uma proposta (importação em lote incluída) — valida e mostra, linha a linha, o que está vigente
+    /// hoje na mesma chave e vigência (o que precisa ir em "substitui"), sem gravar nada.
+    /// </summary>
+    private static async Task<IResult> PreviewAsync(PropostaAliquotaRequest req, AdminRepository repo, CancellationToken ct)
+    {
+        if (req.Linhas is not { Count: > 0 } || req.Linhas.Count > 6000)
+        {
+            return ApiProblem.Result(400, "ERR_VALIDATION", "Informe de 1 a 6.000 linhas");
+        }
+
+        var (rows, errors) = await ValidateLinesAsync(req.Linhas, repo, ct);
+        var items = new JsonArray();
+        var conflicts = 0;
+        foreach (var row in rows)
+        {
+            var current = JsonNode.Parse(await repo.OverlappingRatesJsonAsync(row, ct))!.AsArray();
+            conflicts += current.Count > 0 && !(req.Substitui ?? []).Any(id => current.Any(c => c!["id"]!.GetValue<Guid>() == id)) ? 1 : 0;
+            items.Add(new JsonObject
+            {
+                ["tributo"] = row.Tributo,
+                ["ente_codigo"] = row.EnteCodigo,
+                ["produto"] = row.Produto,
+                ["aliquota_nova"] = row.Aliquota,
+                ["valid_from"] = row.ValidFrom.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture),
+                ["vigentes"] = current,
+            });
+        }
+
+        return Results.Ok(new JsonObject
+        {
+            ["linhas"] = rows.Count,
+            ["erros"] = new JsonArray([.. errors.Select(e => (JsonNode)e)]),
+            ["conflitos_sem_substituicao"] = conflicts,
+            ["itens"] = items,
+        });
+    }
+
+    private static async Task<IResult> RejectAsync(HttpContext http, Guid id, AdminRepository repo, CancellationToken ct)
+    {
+        var body = await JsonNode.ParseAsync(http.Request.Body, cancellationToken: ct) as JsonObject;
+        var reason = body?["motivo"]?.GetValue<string>()?.Trim();
+        if (reason is null || reason.Length is < 5 or > 500)
+        {
+            return ApiProblem.Result(400, "ERR_VALIDATION", "Informe o motivo da recusa (5 a 500 caracteres)");
+        }
+
+        return await repo.RejectChangeAsync(id, AdminKeyFilter.Get(http).Name, reason, ct)
+            ? Results.Ok(new PropostaCriadaResponse { ChangeId = id, Status = "REJECTED" })
+            : ApiProblem.Result(409, "ERR_PARAM_CONFLICT", "Só propostas pendentes podem ser recusadas");
     }
 
     private static async Task<IResult> ApproveAsync(HttpContext http, Guid id, AdminRepository repo, ParamSnapshotService snapshots,

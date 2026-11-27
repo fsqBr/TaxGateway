@@ -45,7 +45,8 @@ public sealed partial class SimulationService(
     IOptions<EngineOptions> engineOptions,
     IOptions<SimulationOptions> options,
     TimeProvider clock,
-    ILogger<SimulationService> log)
+    ILogger<SimulationService> log,
+    TaxGateway.Infrastructure.Params.RateExceptionService? exceptions = null)
 {
     private static readonly TimeSpan L1Ttl = TimeSpan.FromSeconds(60);
 
@@ -115,6 +116,24 @@ public sealed partial class SimulationService(
             await ToCacheAsync(cacheKey, response).ConfigureAwait(false);
         }
 
+        // D-R20: alíquota informada pelo cliente = cenário hipotético, nunca o cálculo oficial.
+        var clientRates = req.Itens!.Count(i => i.AliquotasNominais is { } a && (a.Cbs ?? a.IbsUf ?? a.IbsMun ?? a.IsAdValorem ?? a.IsAdRem) is not null);
+        if (clientRates > 0)
+        {
+            response.Oficial = false;
+            response.Avisos.Add(new AvisoDto
+            {
+                Codigo = "ALIQUOTA_INFORMADA_PELO_CLIENTE",
+                Mensagem = $"Cálculo NÃO OFICIAL: {clientRates} item(ns) com alíquota informada em aliquotas_nominais. Use para cenários \"e se\"; o cálculo oficial usa o catálogo vigente.",
+            });
+        }
+
+        // D-R20: exceções ativas do contribuinte geram um cálculo ajustado AO LADO (o oficial não muda).
+        if (operation is not null && exceptions is not null && clientRates == 0)
+        {
+            response.CenarioAjustado = await AdjustedAsync(caller, v, operation, response, ct).ConfigureAwait(false);
+        }
+
         // D-R06: se o motor recusou TODOS os itens não houve cálculo — a resposta continua 200 com os erros por item
         // (contrato v1), mas com um aviso explícito e SEM cobrança (antes era cobrada e os totais zerados enganavam).
         var billable = response.Itens.Count == 0 || !response.Itens.All(i => i.Estado.StartsWith("INCONSISTENCIA", StringComparison.Ordinal));
@@ -133,6 +152,76 @@ public sealed partial class SimulationService(
         return new SimulationOutcome(response, json);
     }
 
+    /// <summary>
+    /// D-R20: recalcula com as alíquotas das exceções ativas que casam com cada item (só para fato gerador em que o
+    /// catálogo informa alíquotas nominais ao motor). null quando nenhuma exceção se aplica.
+    /// </summary>
+    private async Task<CenarioAjustadoDto?> AdjustedAsync(Caller caller, Validated v, EngineOperation operation, SimulacaoResponse official, CancellationToken ct)
+    {
+        var active = await exceptions!.ActiveAsync(caller.Identity.Tenant, ct).ConfigureAwait(false);
+        if (active.Count == 0)
+        {
+            return null;
+        }
+
+        var data = DateOnly.FromDateTime(v.FatoGerador.DateTime);   // mesma data do catálogo em BuildOperation
+        var applied = new Dictionary<Guid, ExcecaoAplicadaDto>();
+        var items = new List<EngineItemInput>();
+        foreach (var it in operation.Itens)
+        {
+            var n = it.AliquotasNominais;
+            if (n is not null)
+            {
+                foreach (var ex in active.Where(e => e.Matches(v.Cnpj, v.Municipio, data, it.Ncm, it.ImpostoSeletivo?.CClassTrib ?? it.CClassTrib)))
+                {
+                    n = ex.Tributo switch
+                    {
+                        Tributo.Cbs => n with { Cbs = ex.Aliquota },
+                        Tributo.IbsUf => n with { IbsUf = ex.Aliquota },
+                        Tributo.IbsMun => n with { IbsMun = ex.Aliquota },
+                        _ => n with { IsAdValorem = ex.Aliquota },
+                    };
+                    if (!applied.TryGetValue(ex.Id, out var dto))
+                    {
+                        applied[ex.Id] = dto = new ExcecaoAplicadaDto { Id = ex.Id, Tributo = ex.Tributo switch { Tributo.Cbs => "CBS", Tributo.IbsUf => "IBS_UF", Tributo.IbsMun => "IBS_MUN", _ => "IS" }, Aliquota = ex.Aliquota, Motivo = ex.Motivo, Processo = ex.Processo };
+                    }
+
+                    dto.Itens.Add(it.Numero);
+                }
+            }
+
+            items.Add(it with { AliquotasNominais = n });
+        }
+
+        if (applied.Count == 0)
+        {
+            return null;
+        }
+
+        var calc = await engine.CalculateAsync(operation with { Itens = items }, ct).ConfigureAwait(false);
+        var totais = new TotaisDto
+        {
+            ValorBaseTotal = calc.Totais.BaseCalculo,
+            CbsValor = calc.Totais.Cbs,
+            IbsUfValor = calc.Totais.IbsUf,
+            IbsMunValor = calc.Totais.IbsMun,
+            IbsTotalValor = calc.Totais.Ibs,
+            ImpostoSeletivoValor = calc.Totais.ImpostoSeletivo,
+        };
+        var oficial = official.Totais.CbsValor + official.Totais.IbsTotalValor + official.Totais.ImpostoSeletivoValor;
+        official.Avisos.Add(new AvisoDto
+        {
+            Codigo = "EXCECAO_DO_CONTRIBUINTE",
+            Mensagem = $"{applied.Count} exceção(ões) do contribuinte se aplicam (ex.: processo {applied.Values.First().Processo}). Os totais acima são o cálculo OFICIAL; o cálculo com as exceções está em cenario_ajustado.",
+        });
+        return new CenarioAjustadoDto
+        {
+            Totais = totais,
+            Diferenca = totais.CbsValor + totais.IbsTotalValor + totais.ImpostoSeletivoValor - oficial,
+            Excecoes = [.. applied.Values],
+        };
+    }
+
     /// <summary>Competência = mês de recebimento em America/Sao_Paulo (SDD §10.1).</summary>
     public static DateOnly BillingMonth(DateTimeOffset utc)
     {
@@ -143,7 +232,7 @@ public sealed partial class SimulationService(
     private sealed record Validated(string Cnpj, string Regime, DateTimeOffset FatoGerador, int Municipio, string Uf, string Crt, string TpRegime);
 
     /// <summary>Fonte de cada alíquota por item: MOTOR, CATALOGO (com a linha) ou CLIENTE.</summary>
-    private sealed record ItemSources(RateSource Cbs, RateSource IbsUf, RateSource IbsMun);
+    private sealed record ItemSources(RateSource Cbs, RateSource IbsUf, RateSource IbsMun, RateRow? Is = null);
 
     private sealed record RateSource(string Fonte, ResolvedRate? Catalog);
 
@@ -374,8 +463,10 @@ public sealed partial class SimulationService(
                 var cbs = zeroCbs ? (Value: (decimal?)0m, Source: new RateSource("SUBLIMITE_CBS_NO_DAS", null)) : Pick(c?.Cbs, Tributo.Cbs, "cbs");
                 var ibsUf = Pick(c?.IbsUf, Tributo.IbsUf, "ibs_uf");
                 var ibsMun = Pick(c?.IbsMun, Tributo.IbsMun, "ibs_mun");
-                nominais = new NominalRates(cbs.Value, ibsUf.Value, ibsMun.Value, c?.IsAdValorem, c?.IsAdRem);
-                src = new ItemSources(cbs.Source, ibsUf.Source, ibsMun.Source);
+                // D-R17: IS do catálogo por produto quando o cliente não informa a alíquota.
+                var isRow = c?.IsAdValorem is null && it.ImpostoSeletivo is { } isel ? snapshot.Rates.ResolveIs(it.Ncm, isel.CClassTrib, data) : null;
+                nominais = new NominalRates(cbs.Value, ibsUf.Value, ibsMun.Value, c?.IsAdValorem ?? isRow?.Aliquota, c?.IsAdRem);
+                src = new ItemSources(cbs.Source, ibsUf.Source, ibsMun.Source, isRow);
             }
 
             sources[numero] = src;

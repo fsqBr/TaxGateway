@@ -71,6 +71,13 @@ public sealed partial class ApiExceptionHandler(ILogger<ApiExceptionHandler> log
         {
             ApiProblemException p => ApiProblem.From(p),
             TaxGateway.Identity.Accounts.AccountException a => ApiProblem.Result(a.Status, a.Code, a.Title, a.Detail),
+            System.Text.Json.JsonException => ApiProblem.Result(400, "ERR_JSON_INVALIDO", "Corpo JSON inválido", "Confira a sintaxe do JSON enviado."),
+            InvalidOperationException io when io.TargetSite?.DeclaringType?.Namespace?.StartsWith("System.Text.Json", StringComparison.Ordinal) == true
+                => ApiProblem.Result(400, "ERR_VALIDATION", "Campo com tipo errado", "Algum campo veio com tipo diferente do esperado (ex.: número no lugar de texto)."),
+            TaxGateway.Infrastructure.Billing.StripeException s => ApiProblem.Result(s.Status == 503 ? 503 : 502, "ERR_PAGAMENTO_PROVEDOR",
+                "O provedor de pagamento não respondeu como esperado", "Tente de novo em alguns minutos. Se continuar, fale com o suporte (a cobrança não foi alterada)."),
+            Npgsql.PostgresException { SqlState: "P0001" } pg when pg.MessageText.StartsWith("ERR_LIMITE_CNPJS:", StringComparison.Ordinal) => ApiProblem.Result(402, "ERR_LIMITE_CNPJS",
+                "Limite de CNPJs do plano atingido", $"O plano permite {pg.MessageText["ERR_LIMITE_CNPJS:".Length..]} CNPJ(s). Troque de plano em Plano e cobrança para atender mais CNPJs (D-R14)."),
             EngineCapabilityNotSupportedException c => ApiProblem.Result(422, "ERR_ENGINE_CAPABILITY",
                 "Capacidade não suportada pelo motor", c.Message),
             EngineRejectedException r => ApiProblem.Result(422, "ERR_ENGINE_REJECTED",

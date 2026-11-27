@@ -76,6 +76,19 @@ internal static class Seed
             INSERT INTO cnpj_disputes (id, cnpj_root, tenant_id, claimant_user, method, certificate)
             VALUES (md5(@t::text || 'dispute')::uuid, '00000000000000', @t, md5(@t::text || 'disp')::uuid, 'CERTIFICADO', 'seed')
             """,
+        ["api_call_logs"] = "INSERT INTO api_call_logs (tenant_id, method, route, status, duration_ms, credential) VALUES (@t, 'GET', '/v1/x', 400, 1, 'seed')",
+        ["reprocess_requests"] = """
+            INSERT INTO param_changes (id, domain, scope, payload, justification, proposed_by, status, effective_at)
+            VALUES (md5(@t::text || 'pc')::uuid, 'RATE_CATALOG', 'GLOBAL', '{}', 'seed', 'seed', 'PROPOSED', now()) ON CONFLICT DO NOTHING;
+            INSERT INTO reprocess_requests (id, tenant_id, change_id, from_month, to_month)
+            VALUES (md5(@t::text || 'rq')::uuid, @t, md5(@t::text || 'pc')::uuid, '2027-01-01', '2027-02-01')
+            """,
+        ["tenant_rate_exceptions"] = """
+            INSERT INTO users (id, realm, email, name, password_hash, password_salt)
+            VALUES (md5(@t::text || 'exc')::uuid, 'customer', 'e' || @n || '@seed.test', 'seed', '\x01', '\x01') ON CONFLICT DO NOTHING;
+            INSERT INTO tenant_rate_exceptions (id, tenant_id, tributo, aliquota, valid_from, motivo, processo, documento_nome, documento, documento_sha256, proposed_by)
+            VALUES (md5(@t::text || 'ex')::uuid, @t, 'CBS', 1, '2027-01-01', 'LIMINAR', 'proc-seed', 'd.pdf', '\x01', '\x01', md5(@t::text || 'exc')::uuid)
+            """,
         ["tenant_notifications"] = "INSERT INTO tenant_notifications (tenant_id, kind, severity, title, body, dedupe_key) VALUES (@t, 'FRANQUIA_80', 'aviso', 'seed', 'seed', 'seed-' || @n)",
         ["titular_requests"] = "INSERT INTO titular_requests (id, tenant_id, cpf_hmac, action, documents, requested_by) VALUES (md5(@t::text || 'tit')::uuid, @t, '\\x01', 'LOCALIZAR', 0, 'seed')",
     };

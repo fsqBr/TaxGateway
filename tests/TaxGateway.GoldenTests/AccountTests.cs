@@ -17,6 +17,9 @@ public sealed class AccountTests(GoldenFixture env)
     private const string Senha = "Uma frase longa e boa 2027!";
     private static readonly string[] PeopleOnlyScope = ["membros:manage"];
     private static readonly string[] FiscalScope = ["admin:fiscal"];
+    private static readonly string[] UsageOnly = ["usage:read"];
+    private static readonly string[] OptOut = ["RESUMO_MENSAL", "MOTOR_ATUALIZADO", "RESUMO_MENSAL"];
+    private static readonly string[] Critical = ["PAGAMENTO_PENDENTE"];
     private static readonly string[] SecurityCommercialScopes = ["admin:security", "admin:commercial"];
 
     private static HttpRequestMessage Req(HttpMethod m, string path, object? body = null, bool csrf = true)
@@ -101,6 +104,41 @@ public sealed class AccountTests(GoldenFixture env)
         Assert.Equal("SANDBOX", session.Body["plano"]!.GetValue<string>());
         var tenant = session.Body["empresa_ativa"]!.GetValue<Guid>();
         return (browser, email, secret, tenant);
+    }
+
+    /// <summary>D-R32/D-R33: boas-vindas na confirmação, aviso de entrada por navegador novo e preferências de e-mail.</summary>
+    [Fact]
+    public async Task Boas_vindas_navegador_novo_e_preferencias_de_email()
+    {
+        var (browser, email, _, _) = await SignupAndLoginAsync("ciclo");
+        Assert.Single(env.Emails.Sent, m => m.To == email && m.Subject == "Boas-vindas ao TaxGateway");
+
+        // Entrada pelo mesmo navegador: sem aviso. Por outro navegador: aviso de segurança com o dispositivo.
+        var before = env.Emails.Sent.Count(m => m.To == email && m.Subject.StartsWith("Aviso de segurança", StringComparison.Ordinal));
+        using (var same = env.NewBrowser())
+        {
+            Assert.Equal(HttpStatusCode.OK, (await Send(same, HttpMethod.Post, "/v1/conta/entrar", new { email, senha = Senha })).Status);
+        }
+
+        Assert.Equal(before, env.Emails.Sent.Count(m => m.To == email && m.Subject.StartsWith("Aviso de segurança", StringComparison.Ordinal)));
+        using (var other = env.NewBrowser())
+        {
+            other.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36");
+            Assert.Equal(HttpStatusCode.OK, (await Send(other, HttpMethod.Post, "/v1/conta/entrar", new { email, senha = Senha })).Status);
+        }
+
+        Assert.Contains(env.Emails.Sent, m => m.To == email && m.Text.Contains("navegador ou dispositivo novo (Chrome no Windows", StringComparison.Ordinal));
+
+        // Preferências: só informativos podem ser desligados.
+        var prefs = await Send(browser, HttpMethod.Get, "/v1/conta/preferencias-email");
+        Assert.Empty(prefs.Body!["desligados"]!.AsArray());
+        Assert.Contains(prefs.Body["opcionais"]!.AsArray(), o => o!["tipo"]!.GetValue<string>() == "RESUMO_MENSAL");
+        var off = await Send(browser, HttpMethod.Put, "/v1/conta/preferencias-email", new { desligados = OptOut });
+        Assert.Equal(["MOTOR_ATUALIZADO", "RESUMO_MENSAL"], off.Body!["desligados"]!.AsArray().Select(x => x!.GetValue<string>()));
+        var bad = await Send(browser, HttpMethod.Put, "/v1/conta/preferencias-email", new { desligados = Critical });
+        Assert.Equal(HttpStatusCode.BadRequest, bad.Status);
+        Assert.Equal(2, (await Send(browser, HttpMethod.Get, "/v1/conta/preferencias-email")).Body!["desligados"]!.AsArray().Count);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await Send(env.NewBrowser(), HttpMethod.Get, "/v1/conta/preferencias-email")).Status);
     }
 
     [Fact]
@@ -316,9 +354,21 @@ public sealed class AccountTests(GoldenFixture env)
     [Fact]
     public async Task Titularidade_por_certificado_libera_dfe_e_recusa_certificado_alheio()
     {
-        var (browser, _, _, _) = await SignupAndLoginAsync("verif-cert");
+        var (browser, _, _, tenant) = await SignupAndLoginAsync("verif-cert");
         var root = await RootAsync(browser);
         Assert.False((await Send(browser, HttpMethod.Get, "/v1/verificacao-cnpj")).Body!["verificada"]!.GetValue<bool>());
+        // Sandbox não tem DF-e (D-R13); num plano com DF-e, o que falta é a verificação.
+        Assert.Equal("ERR_PLANO_SEM_DFE", (await Send(browser, HttpMethod.Post, $"/v1/cnpjs/{root}/dfe/sync", new { c_uf_autor = 35 })).Body!["code"]!.GetValue<string>());
+        using (var change = new HttpRequestMessage(HttpMethod.Post, $"/admin/v1/tenants/{tenant}/plano") { Content = JsonContent.Create(new { plano = "PROFISSIONAL" }) })
+        {
+            change.Headers.Add("X-Admin-Key", GoldenFixture.OperatorKey);
+            Assert.Equal(HttpStatusCode.OK, (await env.Api.SendAsync(change)).StatusCode);
+        }
+
+        for (var i = 0; i < 40 && (await Send(browser, HttpMethod.Get, "/v1/me")).Body?["plano"]?.GetValue<string>() != "PROFISSIONAL"; i++)
+        {
+            await Task.Delay(250);
+        }
         Assert.Equal("ERR_EMPRESA_NAO_VERIFICADA", (await Send(browser, HttpMethod.Post, $"/v1/cnpjs/{root}/dfe/sync", new { c_uf_autor = 35 })).Body!["code"]!.GetValue<string>());
 
         var other = await Send(browser, HttpMethod.Post, "/v1/verificacao-cnpj/certificado", new { pfx_base64 = Pfx(GoldenFixture.NewCnpj()), senha = "senha-a1" });
@@ -446,6 +496,193 @@ public sealed class AccountTests(GoldenFixture env)
         var third = env.NewBrowser();
         Assert.Equal("ERR_CREDENCIAIS", (await Send(third, HttpMethod.Post, "/v1/conta/entrar", new { email, senha = Senha })).Body!["code"]!.GetValue<string>());
         Assert.Equal("verificar", (await Send(third, HttpMethod.Post, "/v1/conta/entrar", new { email, senha = Nova })).Body!["mfa"]!.GetValue<string>());
+    }
+
+
+    /// <summary>D-R14: o limite de usuários vale também no aceite — convite feito antes de um rebaixamento não passa do limite.</summary>
+    [Fact]
+    public async Task Convite_aceito_depois_de_rebaixar_o_plano_respeita_o_limite_de_usuarios()
+    {
+        var (owner, _, _, tenant) = await SignupAndLoginAsync("limite-aceite");
+        var invitedEmail = $"convidado-tarde-{Guid.NewGuid():N}@exemplo.test";
+        Assert.Equal(HttpStatusCode.Accepted, (await Send(owner, HttpMethod.Post, "/v1/conta/membros/convites", new { email = invitedEmail, papel = "fiscal" })).Status);
+
+        var code = $"TUSR{Random.Shared.Next(10000, 99999)}";
+        using (var plan = new HttpRequestMessage(HttpMethod.Put, $"/admin/v1/planos/{code}")
+        {
+            Content = JsonContent.Create(new
+            {
+                name = "Um usuário",
+                price_cents = 0,
+                included_docs = 10,
+                included_simulations = 10,
+                hard_quota = true,
+                max_users = 1,
+                rpm = 60,
+                burst = 20,
+                concurrency = 3,
+                is_public = false,
+                self_service = false,
+                active = true
+            }),
+        })
+        {
+            plan.Headers.Add("X-Admin-Key", GoldenFixture.OperatorKey);
+            Assert.Equal(HttpStatusCode.OK, (await env.Api.SendAsync(plan)).StatusCode);
+        }
+
+        using (var change = new HttpRequestMessage(HttpMethod.Post, $"/admin/v1/tenants/{tenant}/plano") { Content = JsonContent.Create(new { plano = code }) })
+        {
+            change.Headers.Add("X-Admin-Key", GoldenFixture.OperatorKey);
+            Assert.Equal(HttpStatusCode.OK, (await env.Api.SendAsync(change)).StatusCode);
+        }
+
+        var guest = env.NewBrowser();
+        var accept = await Send(guest, HttpMethod.Post, "/v1/conta/convite/aceitar", new { token = Token(env.Emails.LastLinkTo(invitedEmail)!), nome = "Chegou Tarde", senha = Senha });
+        Assert.Equal("ERR_LIMITE_USUARIOS", accept.Body!["code"]!.GetValue<string>());
+        Assert.Single((await Send(owner, HttpMethod.Get, "/v1/conta/membros")).Body!["membros"]!.AsArray());
+    }
+
+
+    private static object Sim(string cnpj, object? nominais = null) => new
+    {
+        cnpj_emitente = cnpj,
+        regime_tributario = "REGIME_REGULAR",
+        data_fato_gerador = "2027-06-15T14:00:00-03:00",
+        municipio_ibge = 3550308,
+        uf = "SP",
+        itens = new[] { new { numero = 1, cst_ibs_cbs = "000", c_class_trib = "000001", valor_base_calculo = 1000, ncm = "84713012", quantidade = 1, unidade = "UN", aliquotas_nominais = nominais } },
+    };
+
+    /// <summary>
+    /// D-R20: alíquota informada pelo cliente = cenário NÃO OFICIAL; exceção do contribuinte (liminar) exige documento e
+    /// duas pessoas, e gera um cálculo ajustado AO LADO do oficial — os totais oficiais não mudam.
+    /// </summary>
+    [Fact]
+    public async Task Excecao_do_contribuinte_gera_calculo_ajustado_ao_lado_do_oficial()
+    {
+        var (owner, _, _, _) = await SignupAndLoginAsync("excecao");
+        var root = await RootAsync(owner);
+        var oficial = await Send(owner, HttpMethod.Post, "/v1/calculo/simular", Sim(root));
+        Assert.True(oficial.Body!["oficial"]!.GetValue<bool>());
+        Assert.Null(oficial.Body["cenario_ajustado"]);
+        var cbsOficial = oficial.Body["totais"]!["cbs_valor"]!.GetValue<decimal>();
+
+        var hipotetico = await Send(owner, HttpMethod.Post, "/v1/calculo/simular", Sim(root, new { cbs = 5.0 }));
+        Assert.False(hipotetico.Body!["oficial"]!.GetValue<bool>());
+        Assert.Contains(hipotetico.Body["avisos"]!.AsArray(), a => a!["codigo"]!.GetValue<string>() == "ALIQUOTA_INFORMADA_PELO_CLIENTE");
+
+        var pdf = Convert.ToBase64String("%PDF-1.4\n% decisao liminar de teste\n"u8.ToArray());
+        Assert.Equal(HttpStatusCode.BadRequest, (await Send(owner, HttpMethod.Post, "/v1/excecoes-aliquota", new
+        {
+            tributo = "CBS",
+            aliquota = 5,
+            vigencia_inicio = "2027-01-01",
+            motivo = "LIMINAR",
+            processo = "5000123-45.2027.4.03.6100",
+            documento_base64 = Convert.ToBase64String("nao e pdf"u8.ToArray())
+        })).Status);
+        var proposed = await Send(owner, HttpMethod.Post, "/v1/excecoes-aliquota", new
+        {
+            tributo = "CBS",
+            aliquota = 5,
+            vigencia_inicio = "2027-01-01",
+            motivo = "LIMINAR",
+            processo = "5000123-45.2027.4.03.6100",
+            documento_nome = "liminar.pdf",
+            documento_base64 = pdf
+        });
+        Assert.Equal(HttpStatusCode.Created, proposed.Status);
+        var id = proposed.Body!["id"]!.GetValue<Guid>();
+
+        // Quem propôs não aprova a própria exceção (duas pessoas).
+        Assert.Equal(HttpStatusCode.Conflict, (await Send(owner, HttpMethod.Post, $"/v1/excecoes-aliquota/{id}/aprovar")).Status);
+        var fiscalEmail = $"fiscal-exc-{Guid.NewGuid():N}@exemplo.test";
+        Assert.Equal(HttpStatusCode.Accepted, (await Send(owner, HttpMethod.Post, "/v1/conta/membros/convites", new { email = fiscalEmail, papel = "fiscal" })).Status);
+        var fiscal = env.NewBrowser();
+        Assert.Equal(HttpStatusCode.OK, (await Send(fiscal, HttpMethod.Post, "/v1/conta/convite/aceitar", new { token = Token(env.Emails.LastLinkTo(fiscalEmail)!), nome = "Fiscal Dois", senha = Senha })).Status);
+        await Send(fiscal, HttpMethod.Post, "/v1/conta/entrar", new { email = fiscalEmail, senha = Senha });
+        var secret = (await Send(fiscal, HttpMethod.Post, "/v1/conta/mfa/iniciar")).Body!["segredo"]!.GetValue<string>();
+        await Send(fiscal, HttpMethod.Post, "/v1/conta/mfa/ativar", new { codigo = Code(secret) });
+        Assert.Equal("ATIVA", (await Send(fiscal, HttpMethod.Post, $"/v1/excecoes-aliquota/{id}/aprovar")).Body!["situacao"]!.GetValue<string>());
+
+        var list = (await Send(owner, HttpMethod.Get, "/v1/excecoes-aliquota")).Body!["excecoes"]!.AsArray();
+        Assert.Contains(list, e => e!["id"]!.GetValue<Guid>() == id && e["proposta_por"]!.GetValue<string>() == "Maria Fiscal" && e["decidida_por"]!.GetValue<string>() == "Fiscal Dois");
+        using (var doc = await owner.GetAsync(new Uri($"/v1/excecoes-aliquota/{id}/documento", UriKind.Relative)))
+        {
+            Assert.Equal("application/pdf", doc.Content.Headers.ContentType!.MediaType);
+        }
+
+        var ajustado = (await Send(owner, HttpMethod.Post, "/v1/calculo/simular", Sim(root))).Body!;
+        Assert.True(ajustado["oficial"]!.GetValue<bool>());
+        Assert.Equal(cbsOficial, ajustado["totais"]!["cbs_valor"]!.GetValue<decimal>());   // o oficial não muda
+        var cenario = ajustado["cenario_ajustado"]!;
+        Assert.Equal(50m, cenario["totais"]!["cbs_valor"]!.GetValue<decimal>());
+        Assert.True(cenario["diferenca"]!.GetValue<decimal>() < 0);
+        Assert.Equal("LIMINAR", cenario["excecoes"]![0]!["motivo"]!.GetValue<string>());
+        Assert.Contains(ajustado["avisos"]!.AsArray(), a => a!["codigo"]!.GetValue<string>() == "EXCECAO_DO_CONTRIBUINTE");
+
+        // Revogada, o cálculo ajustado some.
+        Assert.Equal("REVOGADA", (await Send(owner, HttpMethod.Post, $"/v1/excecoes-aliquota/{id}/revogar")).Body!["situacao"]!.GetValue<string>());
+        Assert.Null((await Send(owner, HttpMethod.Post, "/v1/calculo/simular", Sim(root))).Body!["cenario_ajustado"]);
+    }
+
+
+    /// <summary>D-R23: a pessoa no portal tem limite próprio — o ERP saturando o limite do plano não trava o portal.</summary>
+    [Fact]
+    public async Task Pessoa_no_portal_nao_disputa_o_limite_com_o_ERP()
+    {
+        var (owner, _, _, tenant) = await SignupAndLoginAsync("limite-pessoa");
+        var key = (await Send(owner, HttpMethod.Post, "/v1/api-keys", new { nome = "erp", scopes = UsageOnly })).Body!["api_key"]!.GetValue<string>();
+        var code = $"TRLP{Random.Shared.Next(10000, 99999)}";
+        using (var plan = new HttpRequestMessage(HttpMethod.Put, $"/admin/v1/planos/{code}")
+        {
+            Content = JsonContent.Create(new
+            {
+                name = "Limite baixo",
+                price_cents = 0,
+                included_docs = 10,
+                included_simulations = 10,
+                hard_quota = true,
+                rpm = 6,
+                burst = 2,
+                concurrency = 5,
+                is_public = false,
+                self_service = false,
+                active = true
+            }),
+        })
+        {
+            plan.Headers.Add("X-Admin-Key", GoldenFixture.OperatorKey);
+            Assert.Equal(HttpStatusCode.OK, (await env.Api.SendAsync(plan)).StatusCode);
+        }
+
+        using (var change = new HttpRequestMessage(HttpMethod.Post, $"/admin/v1/tenants/{tenant}/plano") { Content = JsonContent.Create(new { plano = code }) })
+        {
+            change.Headers.Add("X-Admin-Key", GoldenFixture.OperatorKey);
+            Assert.Equal(HttpStatusCode.OK, (await env.Api.SendAsync(change)).StatusCode);
+        }
+
+        async Task<HttpStatusCode> Erp()
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, "/v1/usage");
+            req.Headers.Add("X-Api-Key", key);
+            using var resp = await env.Api.SendAsync(req);
+            return resp.StatusCode;
+        }
+
+        HttpStatusCode last = HttpStatusCode.OK;
+        for (var i = 0; i < 6 && last != HttpStatusCode.TooManyRequests; i++)
+        {
+            last = await Erp();
+            if (last == HttpStatusCode.OK)
+            {
+                await Task.Yield();
+            }
+        }
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, last);   // o ERP esgotou o limite do plano
+        Assert.Equal(HttpStatusCode.OK, (await Send(owner, HttpMethod.Get, "/v1/usage")).Status);   // a pessoa continua
     }
 
 }
