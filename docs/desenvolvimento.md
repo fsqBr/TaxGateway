@@ -263,6 +263,14 @@ docker compose -f docker-compose.yml -f docker-compose.capacity.yml -f docker-co
 - **Cliente sintético** (D-R11): `python tests/smoke/cliente_sintetico.py` faz a jornada de uma empresa nova pela
   pilha do compose (precisa do Mailpit).
 
+## Painel de integrações (D-R39)
+
+* Backoffice → **Integrações** (`GET /admin/v1/integracoes`): e-mail, Stripe, motor oficial, sincronização com a
+  Receita, DF-e e cache, com a situação e o que fazer. `POST /admin/v1/integracoes/email-teste` (`{"para": ...}` só com
+  `admin:security`) e `POST /admin/v1/integracoes/stripe-teste`.
+* SMTP (`Email__SmtpHost`, `Email__SmtpPort`, `Email__SmtpUser`, `Email__SmtpPassword`, `Email__From`) e Stripe
+  (`Stripe__SecretKey`, `Stripe__WebhookSecret`) ficam nas variáveis/segredos do deploy — de propósito, não no banco.
+
 ## Versão, novidades e central de ajuda (D-W11 a D-W13)
 
 ```bash

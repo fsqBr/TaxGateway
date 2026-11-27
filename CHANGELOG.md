@@ -7,6 +7,15 @@ Todas as mudanças relevantes para quem usa o TaxGateway. A versão em uso apare
 > Este arquivo é a fonte do aviso de novidades exibido no portal e da página `/ajuda/novidades`. Ao lançar uma versão:
 > atualize `VERSION`, `web/package.json` e o `Chart.yaml`, e acrescente a seção aqui (o CI confere que as versões batem).
 
+## [0.15.0] - 2026-11-27
+
+### Novidades
+- **Backoffice → Integrações**: um painel diz se e-mail, pagamentos (Stripe), motor oficial da Receita, sincronização de alíquotas, captura de notas (DF-e) e cache estão funcionando, com o que fazer quando algo falha, e botões para enviar um e-mail de teste e testar a Stripe.
+- Atualização do motor oficial da Receita agora entra sozinha depois que todos os testes passam (a produção continua pedindo aprovação).
+
+### Correções
+- A sonda de saúde dos workers responde assim que o serviço sobe (antes podia recusar a conexão nos primeiros instantes).
+
 ## [0.14.0] - 2026-11-27
 
 ### Novidades

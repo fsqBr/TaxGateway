@@ -28,7 +28,7 @@ operação multiempresa (OEM), cobrança por uso, segurança e LGPD.
 | **Avisos** | Ciclo de vida completo no portal e por e-mail: boas-vindas, assinatura, troca de plano, fatura emitida e vencendo, pagamento, renovação, resumo do mês, franquia e teto, inadimplência, webhook pausado, certificado vencendo, titularidade, credencial nova e login novo, mudança de alíquota (só para quem é afetado, na publicação e no dia em que vale) e motor oficial atualizado; informativos desligáveis por pessoa |
 | **Integração** | API keys e clientes OAuth criados no portal, webhooks com reenvio, log das chamadas da API (30 dias) |
 | **LGPD** | RLS forçado em todas as tabelas, XML não guardado por padrão, CPF pseudonimizado com chave fora do banco, atendimento a titulares |
-| **Interfaces** | Site com cadastro e planos, portal do cliente (também no celular), backoffice com operadores e trilha de auditoria (React), central de ajuda em `/ajuda` e referência interativa da API em `/docs` |
+| **Interfaces** | Site com cadastro e planos, portal do cliente (também no celular), backoffice com operadores, trilha de auditoria e painel de integrações (React), central de ajuda em `/ajuda` e referência interativa da API em `/docs` |
 | **Versão** | Versão única (`VERSION`) em `GET /version`, no header `X-TaxGateway-Version` e no portal, com aviso de novidades a partir do [`CHANGELOG.md`](CHANGELOG.md) |
 
 ## Arquitetura

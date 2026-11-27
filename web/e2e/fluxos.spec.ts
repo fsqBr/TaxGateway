@@ -124,6 +124,14 @@ test('operador recebe convite, define senha, ativa MFA e opera o backoffice', as
   // D-R04: gerir operadores e ler a trilha exigem admin:security (este operador só tem admin:commercial).
   await expect(page.getByRole('link', { name: 'Operadores', exact: true })).toHaveCount(0);
   await expect(page.getByRole('link', { name: 'Trilha de auditoria', exact: true })).toHaveCount(0);
+
+  // D-R39: painel de integrações — qualquer operador vê; e-mail de teste vai para o próprio operador (Mailpit).
+  await page.getByRole('link', { name: 'Integrações', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Integrações', level: 1 })).toBeVisible();
+  await expect(page.getByLabel('Detalhes: Motor oficial da Receita')).toBeVisible();
+  await page.screenshot({ path: 'test-results/backoffice-integracoes.png', fullPage: true });
+  await page.getByRole('button', { name: 'Enviar e-mail de teste' }).click();
+  await expect(page.getByText(`E-mail de teste enviado para ${email}`, { exact: false })).toBeVisible();
   expect(errors).toEqual([]);
 });
 

@@ -12,12 +12,29 @@ namespace TaxGateway.Infrastructure;
 /// </summary>
 public sealed partial class WorkerHealthServer(int port, ILogger<WorkerHealthServer> log) : BackgroundService
 {
+    private readonly HttpListener _listener = new();
+
+    /// <summary>
+    /// A porta abre AQUI, antes de o host se dar por iniciado: no .NET 10 o ExecuteAsync roda em segundo plano, e a sonda
+    /// do Kubernetes (ou um teste) podia bater antes de o listener existir (D-R40).
+    /// </summary>
+    public override Task StartAsync(CancellationToken cancellationToken)
+    {
+        _listener.Prefixes.Add($"http://+:{port}/");
+        _listener.Start();
+        LogListening(log, port);
+        return base.StartAsync(cancellationToken);
+    }
+
+    public override void Dispose()
+    {
+        ((IDisposable)_listener).Dispose();
+        base.Dispose();
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        using var listener = new HttpListener();
-        listener.Prefixes.Add($"http://+:{port}/");
-        listener.Start();
-        LogListening(log, port);
+        var listener = _listener;
         using var reg = stoppingToken.Register(listener.Stop);
         while (!stoppingToken.IsCancellationRequested)
         {

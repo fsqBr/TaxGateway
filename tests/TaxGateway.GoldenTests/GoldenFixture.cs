@@ -191,6 +191,7 @@ public sealed class GoldenFixture : IAsyncLifetime
             ["Accounts:RequestsPerMinutePerIp"] = "100000",
             ["Identity:TokenRequestsPerMinutePerIp"] = "100000",
             ["Accounts:PublicBaseUrl"] = "http://golden.test",
+            ["Email:SmtpHost"] = "smtp.golden.test",   // o envio real é substituído pelo CapturingEmailSender
             ["Accounts:BackofficeBaseUrl"] = "http://backoffice.golden.test",
             // Chave de assinatura fixa e comum a todas as instâncias (como em produção); a efêmera é por processo.
             ["Identity:SigningKeys:0:Kid"] = "golden",

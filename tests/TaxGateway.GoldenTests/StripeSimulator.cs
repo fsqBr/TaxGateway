@@ -242,6 +242,8 @@ public sealed class StripeSimulator : IAsyncDisposable
                     return (200, new JsonObject { ["object"] = "billing.meter_event", ["identifier"] = identifier }.ToJsonString());
                 }
 
+            case ("GET", ["v1", "products"]):
+                return (200, new JsonObject { ["object"] = "list", ["data"] = new JsonArray(new JsonObject { ["id"] = "prod_x" }) }.ToJsonString());
             case ("POST", ["v1", "products"]):
                 return (200, new JsonObject { ["id"] = Next("prod"), ["name"] = c["name"] }.ToJsonString());
             case ("POST", ["v1", "prices"]):

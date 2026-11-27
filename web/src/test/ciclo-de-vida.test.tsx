@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AtualizacoesFiscais } from '../components/AtualizacoesFiscais';
+import { Integracoes } from '../backoffice/Integracoes';
 import { PlanosResumo } from '../pages/Landing';
 import { PlanMatrix, linhasDaMatriz, type PlanoPublico } from '../pages/Planos';
 import { PreferenciasEmail } from '../portal/Conta';
@@ -143,5 +144,48 @@ describe('planos na home', () => {
     const { container } = render(<MemoryRouter><PlanosResumo /></MemoryRouter>);
     await waitFor(() => expect(calls.length).toBeGreaterThan(0));
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+describe('backoffice: integrações', () => {
+  const item = (id: string, nome: string, situacao: string) => ({ id, nome, situacao, resumo: `resumo ${id}`, detalhes: [{ rotulo: 'Último', valor: 'agora' }] });
+
+  it('mostra a situação de cada integração e testa e-mail e Stripe', async () => {
+    let geral = 'FALHA';
+    mockApi((r) => {
+      if (r.url.endsWith('/admin/v1/integracoes')) {
+        return { json: { geral, verificado_em: '2026-11-27T15:00:00Z', integracoes: [item('email', 'E-mail (SMTP)', 'OK'), item('stripe', 'Pagamentos (Stripe)', 'FALHA'), item('dfe', 'Captura', 'DESLIGADO'), item('receita', 'Sincronização', 'ATENCAO')] } };
+      }
+      if (r.url.endsWith('/email-teste')) {
+        const para = (r.body as { para?: string }).para;
+        return para === 'x@y.z' ? { status: 403, json: { code: 'ERR_FORBIDDEN_SCOPE', title: 'Só operadores de segurança escolhem o destinatário' } } : { json: { enviado: true, mensagem: 'E-mail de teste enviado.' } };
+      }
+      if (r.url.endsWith('/stripe-teste')) return { json: { ok: false, mensagem: 'A Stripe recusou a chave.' } };
+      return undefined;
+    });
+    render(<MemoryRouter><Integracoes /></MemoryRouter>);
+    expect(await screen.findByText(/Há integração com falha/)).toBeInTheDocument();
+    expect(screen.getByText('funcionando')).toBeInTheDocument();
+    expect(screen.getByText('com falha')).toBeInTheDocument();
+    expect(screen.getByText('não configurado')).toBeInTheDocument();
+    expect(screen.getByText('atenção')).toBeInTheDocument();
+    expect(screen.getByLabelText('Detalhes: E-mail (SMTP)')).toHaveTextContent('agora');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Enviar e-mail de teste' }));
+    expect(await screen.findByText('E-mail de teste enviado.')).toBeInTheDocument();
+    expect(calls.find((c) => c.url.endsWith('/email-teste'))!.body).toEqual({});
+    await userEvent.type(screen.getByLabelText('Enviar para'), 'x@y.z');
+    await userEvent.click(screen.getByRole('button', { name: 'Enviar e-mail de teste' }));
+    expect(await screen.findByText(/Seu acesso não permite esta ação/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Testar Stripe' }));
+    expect(await screen.findByText('A Stripe recusou a chave.')).toBeInTheDocument();
+
+    geral = 'OK';
+    await userEvent.click(screen.getByRole('button', { name: /Verificar de novo/ }));
+    expect(await screen.findByText('Tudo funcionando.')).toBeInTheDocument();
+    geral = 'ATENCAO';
+    await userEvent.click(screen.getByRole('button', { name: /Verificar de novo/ }));
+    expect(await screen.findByText(/pontos de atenção/)).toBeInTheDocument();
   });
 });

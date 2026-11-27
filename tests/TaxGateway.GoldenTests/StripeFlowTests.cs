@@ -123,6 +123,45 @@ public sealed class StripeFlowTests(GoldenFixture env)
 
     private static long Unix(string iso) => DateTimeOffset.Parse(iso, CultureInfo.InvariantCulture).ToUnixTimeSeconds();
 
+    /// <summary>D-R39: painel de integrações — sem Stripe na instância padrão, com Stripe (simulador) na outra; e-mail de teste.</summary>
+    [Fact]
+    public async Task Painel_de_integracoes_e_testes_sob_demanda()
+    {
+        static async Task<(HttpStatusCode Status, JsonNode? Body)> Admin(HttpClient c, HttpMethod m, string path, object? body = null)
+        {
+            using var req = new HttpRequestMessage(m, path) { Content = body is null ? null : JsonContent.Create(body) };
+            req.Headers.Add("X-Admin-Key", GoldenFixture.OperatorKey);
+            using var resp = await c.SendAsync(req);
+            var text = await resp.Content.ReadAsStringAsync();
+            return (resp.StatusCode, text.Length == 0 ? null : JsonNode.Parse(text));
+        }
+
+        var painel = await Admin(env.Api, HttpMethod.Get, "/admin/v1/integracoes");
+        Assert.Equal(HttpStatusCode.OK, painel.Status);
+        var itens = painel.Body!["integracoes"]!.AsArray().ToDictionary(i => i!["id"]!.GetValue<string>(), i => i!["situacao"]!.GetValue<string>());
+        Assert.Equal(["email", "stripe", "motor", "receita", "dfe", "cache"], itens.Keys);
+        Assert.Equal("DESLIGADO", itens["stripe"]);
+        Assert.Equal("OK", itens["motor"]);
+        Assert.Equal("OK", itens["cache"]);
+        Assert.DoesNotContain("dev-only", painel.Body.ToJsonString(), StringComparison.Ordinal);
+        Assert.Equal("Stripe não configurada nesta instalação.", (await Admin(env.Api, HttpMethod.Post, "/admin/v1/integracoes/stripe-teste")).Body!["mensagem"]!.GetValue<string>());
+
+        // E-mail de teste: operador por chave não tem e-mail (400); com "para" (operador de segurança) vai.
+        Assert.Equal(HttpStatusCode.BadRequest, (await Admin(env.Api, HttpMethod.Post, "/admin/v1/integracoes/email-teste")).Status);
+        var to = $"ops-{Guid.NewGuid():N}@exemplo.test";
+        var sent = await Admin(env.Api, HttpMethod.Post, "/admin/v1/integracoes/email-teste", new { para = to });
+        Assert.True(sent.Body!["enviado"]!.GetValue<bool>());
+        Assert.Contains(env.Emails.Sent, m => m.To == to && m.Text.Contains("e-mail de teste do painel de integrações", StringComparison.Ordinal));
+
+        await using var sim = new StripeSimulator();
+        await using var api = StripeApi(sim);
+        var client = api.CreateClient();
+        var comStripe = await Admin(client, HttpMethod.Get, "/admin/v1/integracoes");
+        Assert.NotEqual("DESLIGADO", comStripe.Body!["integracoes"]!.AsArray().First(i => i!["id"]!.GetValue<string>() == "stripe")!["situacao"]!.GetValue<string>());
+        var teste = await Admin(client, HttpMethod.Post, "/admin/v1/integracoes/stripe-teste");
+        Assert.True(teste.Body!["ok"]!.GetValue<bool>(), teste.Body.ToJsonString());
+    }
+
     /// <summary>Segunda instância da API com a Stripe (simulador) e o faturamento administrativo (tg_billing) ligados.</summary>
     private WebApplicationFactory<Program> StripeApi(StripeSimulator sim)
     {

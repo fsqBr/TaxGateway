@@ -246,6 +246,7 @@ if (adminConnection is not null)
 {
     var admin = app.MapGroup("/admin/v1").AddEndpointFilter<AdminKeyFilter>().MapAdmin().MapIdentityAdmin().MapAdminListings().MapOperators().MapAdminPlans().MapAdminCompany();
     admin.MapAdminCoverage();   // D-R22
+    admin.MapAdminIntegrations();   // D-R39
     if (billingConnection is not null)
     {
         admin.MapBillingAdmin();

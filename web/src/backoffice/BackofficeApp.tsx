@@ -1,9 +1,10 @@
 import { Fragment, useState, type FormEvent } from 'react';
 import { Route, Routes } from 'react-router-dom';
-import { Ban, Building2, History, Layers3, Percent, Receipt, Scale, UserCog } from 'lucide-react';
+import { Activity, Ban, Building2, History, Layers3, Percent, Receipt, Scale, UserCog } from 'lucide-react';
 import { Operadores, Trilha } from './Operadores';
 import { Planos } from './Planos';
 import { Disputas } from './Disputas';
+import { Integracoes } from './Integracoes';
 import { Aliquotas } from './Aliquotas';
 import { LimitesContrato, type Limites } from './LimitesContrato';
 import { useSession } from '../auth/session';
@@ -26,6 +27,7 @@ const nav: NavItem[] = [
   { to: '/backoffice/operadores', label: 'Operadores', icon: UserCog, section: 'Segurança', scope: 'admin:security' },
   { to: '/backoffice/disputas', label: 'Disputas de CNPJ', icon: Scale, section: 'Segurança', scope: 'admin:security' },
   { to: '/backoffice/trilha', label: 'Trilha de auditoria', icon: History, section: 'Segurança', scope: 'admin:security' },
+  { to: '/backoffice/integracoes', label: 'Integrações', icon: Activity, section: 'Operação' },
 ];
 
 export default function BackofficeApp() {
@@ -51,6 +53,7 @@ export default function BackofficeApp() {
         <Route path="planos" element={<Planos />} />
         <Route path="disputas" element={<Disputas />} />
         <Route path="trilha" element={<Trilha />} />
+        <Route path="integracoes" element={<Integracoes />} />
       </Routes>
     </Shell>
   );
