@@ -15,7 +15,7 @@ RUN npm test && npx tsc -b \
  && npx vite build --mode backoffice --outDir /out/backoffice \
  && rm -rf /out/backoffice/ajuda
 
-FROM nginxinc/nginx-unprivileged:1.27.3-alpine@sha256:9e7238f579a54582263a960d1b0094b4a3ecce641342eda3f8e2ff82b1703d2b AS base
+FROM nginxinc/nginx-unprivileged:1.31.7-alpine@sha256:b5047b9b76845eac124358373c6852377c52e4b05834a47647e955dd91cb8f1e AS base
 ENV API_UPSTREAM=api:8000
 USER root
 COPY web/nginx/security-headers.conf /etc/nginx/snippets/security-headers.conf
