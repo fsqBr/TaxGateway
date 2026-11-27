@@ -13,11 +13,17 @@ permissions:
   contents: write
   pull-requests: write
   packages: read
+  actions: write   # D-R38: disparar o CI no PR e na main (o GITHUB_TOKEN só dispara workflow por workflow_dispatch)
 
 jobs:
   detect-and-validate:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    outputs:
+      changed: ${{ steps.detect.outputs.changed }}
+      bundle: ${{ steps.detect.outputs.bundle }}
+      retag: ${{ steps.detect.outputs.retag }}
+      pr: ${{ steps.pr.outputs.pull-request-number }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Detectar tags novas
@@ -29,6 +35,7 @@ jobs:
           python3 infra/rfb/check_tags.py --write | tee /tmp/check.json
           echo "changed=$(python3 -c 'import json;print(str(json.load(open("/tmp/check.json"))["changed"]).lower())')" >> "$GITHUB_OUTPUT"
           echo "bundle=$(python3 -c 'import json;print(json.load(open("/tmp/check.json"))["bundle"])')" >> "$GITHUB_OUTPUT"
+          echo "retag=$(python3 -c 'import json;print(str(any(u.get("kind") == "retag" for u in json.load(open("/tmp/check.json")).get("updates", {}).values())).lower())')" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         if: steps.detect.outputs.changed == 'true'
@@ -109,15 +116,62 @@ jobs:
             src/TaxGateway.Workers/fiscal-bundles/*.json
           body-path: out/regressao.md
           labels: fiscal, requer-aprovacao-fiscal
-          # PR aberto com o GITHUB_TOKEN não dispara o CI (regra do GitHub); com FISCAL_BOT_TOKEN (PAT/App) o CI roda
-          # no PR e o merge automático pode acontecer.
-          token: ${{ secrets.FISCAL_BOT_TOKEN || github.token }}
 
-      # D-R30/D-R31: com a variável FISCAL_AUTO_MERGE=true no repositório, o PR entra sozinho quando todas as
-      # verificações obrigatórias passarem (contratos, testes oficiais dos motores, CI completo). O deploy em produção
-      # continua passando pela aprovação do ambiente "production" (deploy.yml).
-      - name: Merge automático quando as verificações passarem
-        if: steps.detect.outputs.changed == 'true' && vars.FISCAL_AUTO_MERGE == 'true' && steps.pr.outputs.pull-request-number != ''
-        env:
-          GH_TOKEN: ${{ secrets.FISCAL_BOT_TOKEN || github.token }}
-        run: gh pr merge --auto --squash "${{ steps.pr.outputs.pull-request-number }}"
+  # D-R38: merge automático SEGURO do bundle novo (variável do repositório FISCAL_AUTO_MERGE=true). Sem token pessoal:
+  #  1. dispara o CI completo no commit do PR (workflow_dispatch é o único evento que o GITHUB_TOKEN pode disparar);
+  #  2. só faz o merge se o CI daquele commit terminar VERDE (contrato e testes oficiais já passaram no job anterior);
+  #  3. roda o CI na main depois do merge e, com DEPLOY_ENABLED=true, dispara o deploy — staging automático e
+  #     produção só com a aprovação do ambiente "production" (canário com rollback automático).
+  # Tag republicada pela RFB no mesmo número (retag) NÃO entra sozinha: código diferente na mesma versão pede revisão.
+  # Qualquer falha deixa o PR aberto com um comentário dizendo o motivo — nada vai para a main sem CI verde.
+  auto-merge:
+    needs: detect-and-validate
+    if: >-
+      needs.detect-and-validate.outputs.changed == 'true' && vars.FISCAL_AUTO_MERGE == 'true' &&
+      needs.detect-and-validate.outputs.retag != 'true' && needs.detect-and-validate.outputs.pr != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PR: ${{ needs.detect-and-validate.outputs.pr }}
+      BRANCH: fiscal/bundle-${{ needs.detect-and-validate.outputs.bundle }}
+    steps:
+      - name: CI completo no commit do PR
+        id: ci_pr
+        run: |
+          sha=$(gh pr view "$PR" --json headRefOid -q .headRefOid)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          gh workflow run ci.yml --ref "$BRANCH"
+          export SHA="$sha"; id=""
+          for _ in $(seq 1 60); do
+            id=$(gh run list --workflow ci.yml --branch "$BRANCH" --event workflow_dispatch --json databaseId,headSha -q '[.[] | select(.headSha == env.SHA)][0].databaseId')
+            [ -n "$id" ] && break; sleep 10
+          done
+          [ -n "$id" ] || { echo "CI não iniciou"; exit 1; }
+          echo "$id" > /tmp/run
+          gh run watch "$(cat /tmp/run)" --exit-status --interval 60
+
+      - name: Merge (só com o CI verde e o PR sem mudança desde o teste)
+        run: |
+          now=$(gh pr view "$PR" --json headRefOid -q .headRefOid)
+          [ "$now" = "${{ steps.ci_pr.outputs.sha }}" ] || { echo "PR mudou depois do CI"; exit 1; }
+          gh pr merge "$PR" --squash --delete-branch --match-head-commit "$now"
+
+      - name: CI na main e deploy
+        run: |
+          main=$(gh api "repos/$GH_REPO/commits/main" -q .sha)
+          gh workflow run ci.yml --ref main
+          export SHA="$main"; id=""
+          for _ in $(seq 1 60); do
+            id=$(gh run list --workflow ci.yml --branch main --event workflow_dispatch --json databaseId,headSha -q '[.[] | select(.headSha == env.SHA)][0].databaseId')
+            [ -n "$id" ] && break; sleep 10
+          done
+          [ -n "$id" ] || { echo "CI não iniciou"; exit 1; }
+          echo "$id" > /tmp/run
+          gh run watch "$(cat /tmp/run)" --exit-status --interval 60
+          if [ "${{ vars.DEPLOY_ENABLED }}" = "true" ]; then gh workflow run deploy.yml --ref main; else echo "DEPLOY_ENABLED desligado: deploy fica manual."; fi
+
+      - name: Avisar no PR quando o merge automático não aconteceu
+        if: failure()
+        run: gh pr comment "$PR" --body "Merge automático cancelado (CI vermelho, PR alterado ou falha no CI da main). O PR fica aberto para revisão — nada foi para a main sem CI verde." || true

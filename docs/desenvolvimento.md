@@ -41,9 +41,9 @@ curl -s -X POST http://127.0.0.1:5205/v1/calculo/simular -H "X-Api-Key: $KEY" -H
   cerca de 100 mil consultas ao motor local (alguns minutos). Linha do tempo: `GET /v1/publico/atualizacoes-fiscais`.
 * Bundle novo: o resumo da regressão vai em `src/TaxGateway.Workers/fiscal-bundles/<bundle>.json` (gerado pelo
   `regression_report.py --summary-json`) e vira o texto do aviso `MOTOR_ATUALIZADO`.
-* Merge automático do PR fiscal: variável do repositório `FISCAL_AUTO_MERGE=true` e segredo `FISCAL_BOT_TOKEN` (PAT ou
-  App com `contents`/`pull-requests`), para o CI rodar no PR; exige "Allow auto-merge" e as verificações obrigatórias
-  na proteção da `main`.
+* Merge automático do PR fiscal (D-R38, ligado com a variável `FISCAL_AUTO_MERGE=true`): o job `auto-merge` roda o CI
+  no commit do PR, faz o merge só com o CI verde, roda o CI na `main` e dispara o deploy se `DEPLOY_ENABLED=true`
+  (produção ainda pede aprovação). Retag da RFB e qualquer falha deixam o PR aberto. Para desligar: apague a variável.
 
 ## Mudar uma alíquota à mão (duas pessoas, D-204/D-214)
 

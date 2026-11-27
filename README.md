@@ -102,7 +102,7 @@ Os testes Golden e de contrato usam Testcontainers e os motores da RFB rodando l
 * **Deploy** (`deploy.yml`): roda depois do CI verde na `main`; imagens no GHCR → staging → produção com aprovação, sempre
   pelo mesmo digest (actions fixadas por SHA, imagens base por digest, Dependabot para atualizações). Fica desligado até existir cluster:
   ligue com a variável de repositório `DEPLOY_ENABLED=true` e os segredos `KUBECONFIG_STAGING`/`KUBECONFIG_PRODUCTION`.
-* **Atualização fiscal** (`fiscal-update.yml`): diária; abre PR com o relatório de regressão e o resumo do bundle quando a RFB publica (ou republica) um motor; com `FISCAL_AUTO_MERGE=true` o PR entra sozinho quando as verificações passam (o deploy em produção continua com aprovação). As alíquotas da base nova são aplicadas pelos workers (D-R30).
+* **Atualização fiscal** (`fiscal-update.yml`): diária; abre PR com o relatório de regressão e o resumo do bundle quando a RFB publica (ou republica) um motor; com `FISCAL_AUTO_MERGE=true` (ligado) o PR entra sozinho só depois do CI completo verde (o deploy em produção continua com aprovação; D-R38). As alíquotas da base nova são aplicadas pelos workers (D-R30).
 
 ## Documentação
 
